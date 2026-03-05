@@ -1,4 +1,11 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::{
+  sync::{
+    atomic::{AtomicUsize, Ordering},
+    mpsc, Arc,
+  },
+  thread::JoinHandle,
+  time::Duration,
+};
 
 use clap::Parser;
 use tracing::{info, warn};
@@ -7,10 +14,124 @@ use erlangrt::agent_rt::{
   checkpoint::{CheckpointStore, FileCheckpointStore, InMemoryCheckpointStore},
   checkpoint_sqlite::SqliteCheckpointStore,
   config::{load_config, AppConfig},
+  mcp_types::ProcessInfo,
   observability::RuntimeMetrics,
   pruner::spawn_pruner,
-  server::{HealthServer, McpServerStateExt, ServerState},
+  scheduler::AgentScheduler,
+  server::{HealthServer, McpRuntimeOps, McpServerStateExt, ServerState},
+  types::{AgentPid, Message, Reason},
 };
+
+enum McpRuntimeCommand {
+  ListProcesses {
+    reply: mpsc::Sender<Result<Vec<ProcessInfo>, String>>,
+  },
+  SendMessage {
+    pid: u64,
+    message: Message,
+    reply: mpsc::Sender<Result<(), String>>,
+  },
+  CancelProcess {
+    pid: u64,
+    reason: Reason,
+    reply: mpsc::Sender<Result<(), String>>,
+  },
+  Shutdown,
+}
+
+#[derive(Clone)]
+struct DaemonMcpRuntimeOps {
+  tx: mpsc::Sender<McpRuntimeCommand>,
+  timeout: Duration,
+}
+
+impl DaemonMcpRuntimeOps {
+  fn call<T>(
+    &self,
+    make_cmd: impl FnOnce(mpsc::Sender<Result<T, String>>) -> McpRuntimeCommand,
+  ) -> Result<T, String> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    self
+      .tx
+      .send(make_cmd(reply_tx))
+      .map_err(|_| "MCP runtime worker disconnected".to_string())?;
+    reply_rx
+      .recv_timeout(self.timeout)
+      .map_err(|_| "MCP runtime worker response timed out".to_string())?
+  }
+}
+
+impl McpRuntimeOps for DaemonMcpRuntimeOps {
+  fn list_processes(&self) -> Result<Vec<ProcessInfo>, String> {
+    self.call(|reply| McpRuntimeCommand::ListProcesses { reply })
+  }
+
+  fn send_message(&self, pid: u64, message: Message) -> Result<(), String> {
+    self.call(|reply| McpRuntimeCommand::SendMessage {
+      pid,
+      message,
+      reply,
+    })
+  }
+
+  fn cancel_process(&self, pid: u64, reason: Reason) -> Result<(), String> {
+    self.call(|reply| McpRuntimeCommand::CancelProcess { pid, reason, reply })
+  }
+}
+
+fn spawn_mcp_runtime_worker(
+  process_count: Arc<AtomicUsize>,
+) -> (
+  Arc<dyn McpRuntimeOps>,
+  mpsc::Sender<McpRuntimeCommand>,
+  JoinHandle<()>,
+) {
+  let (tx, rx) = mpsc::channel::<McpRuntimeCommand>();
+  let shutdown_tx = tx.clone();
+  let handle = std::thread::spawn(move || {
+    let mut scheduler = AgentScheduler::new();
+    process_count.store(scheduler.registry.count(), Ordering::Relaxed);
+
+    while let Ok(cmd) = rx.recv() {
+      match cmd {
+        McpRuntimeCommand::ListProcesses { reply } => {
+          let processes = scheduler
+            .list_processes()
+            .into_iter()
+            .map(|snap| ProcessInfo {
+              pid: snap.pid,
+              status: format!("{:?}", snap.status),
+              priority: format!("{:?}", snap.priority),
+              mailbox_depth: snap.mailbox_depth,
+            })
+            .collect();
+          let _ = reply.send(Ok(processes));
+        }
+        McpRuntimeCommand::SendMessage {
+          pid,
+          message,
+          reply,
+        } => {
+          let result = scheduler.send(AgentPid::from_raw(pid), message);
+          let _ = reply.send(result);
+        }
+        McpRuntimeCommand::CancelProcess { pid, reason, reply } => {
+          scheduler.terminate_process(AgentPid::from_raw(pid), reason);
+          let _ = reply.send(Ok(()));
+        }
+        McpRuntimeCommand::Shutdown => break,
+      }
+
+      process_count.store(scheduler.registry.count(), Ordering::Relaxed);
+    }
+  });
+
+  let runtime_ops: Arc<dyn McpRuntimeOps> = Arc::new(DaemonMcpRuntimeOps {
+    tx,
+    timeout: Duration::from_secs(2),
+  });
+  (runtime_ops, shutdown_tx, handle)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "zeptobeam", version, about = "Zeptoclaw agent runtime daemon")]
@@ -127,6 +248,8 @@ async fn main() {
 
   // Start HTTP server for health and/or MCP endpoints.
   let http_enabled = config.server.enabled || config.mcp.server.enabled;
+  let mut mcp_runtime_shutdown: Option<mpsc::Sender<McpRuntimeCommand>> = None;
+  let mut mcp_runtime_handle: Option<JoinHandle<()>> = None;
   let server = if http_enabled {
     let state = ServerState {
       metrics: metrics.clone(),
@@ -157,13 +280,20 @@ async fn main() {
         true,
         config.mcp.server.session_timeout_secs,
       );
+      let (runtime_ops, shutdown_tx, worker_handle) =
+        spawn_mcp_runtime_worker(process_count.clone());
+      let mcp_state = mcp_state.with_runtime_ops(runtime_ops);
 
       match HealthServer::start_with_mcp(&config.server.bind, mcp_state).await {
         Ok(s) => {
+          mcp_runtime_shutdown = Some(shutdown_tx);
+          mcp_runtime_handle = Some(worker_handle);
           info!(bind = %config.server.bind, "health + MCP server started");
           Some(s)
         }
         Err(e) => {
+          let _ = shutdown_tx.send(McpRuntimeCommand::Shutdown);
+          let _ = worker_handle.join();
           warn!("Failed to start health + MCP server: {}", e);
           None
         }
@@ -217,6 +347,13 @@ async fn main() {
   if let Some(s) = server {
     s.shutdown().await;
     info!("health server stopped");
+  }
+
+  if let Some(tx) = mcp_runtime_shutdown {
+    let _ = tx.send(McpRuntimeCommand::Shutdown);
+  }
+  if let Some(handle) = mcp_runtime_handle {
+    let _ = handle.join();
   }
 
   info!("zeptobeam stopped");
