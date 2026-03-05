@@ -1,26 +1,38 @@
 # ZeptoBeam
 
-> **Fault-tolerant AI agent runtime. Built in Rust. Inspired by Erlang.**
+> **Orchestration layer for ZeptoClaw. Fault-tolerant multi-agent runtime built in Rust.**
 
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://rust-lang.github.io/rustup/concepts/channels.html)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ---
 
+## What
+
+ZeptoBeam is the orchestration runtime for [ZeptoClaw](https://github.com/qhkm/zeptoclaw) — a multi-agent AI system where autonomous agents collaborate on complex tasks.
+
+It handles the hard parts of running many agents at once:
+- **Process isolation** — Each agent runs independently
+- **Fault tolerance** — Crashed agents restart automatically
+- **Message passing** — Agents communicate via async messages
+- **Checkpoint/resume** — State persists to SQLite
+
+---
+
 ## The Problem
 
-AI agents fail. They hallucinate, loop infinitely, hit context limits, panic on bad tool output. In most systems, one failing agent takes down the entire workflow.
+AI agents fail. They hallucinate commands, loop infinitely, exhaust context windows, panic on unexpected inputs. When one agent in a swarm fails, it often takes down the entire workflow.
 
 ## The Solution
 
-ZeptoBeam treats failure as a first-class concept. Each agent runs in an isolated process with:
+ZeptoBeam treats failure as normal. When an agent crashes:
 
-- **Private state** — No shared memory between agents
-- **Message passing** — Async communication only
-- **Supervision trees** — Automatic restart on crash with backoff
-- **Checkpoint/resume** — State persists to SQLite
+1. The supervisor detects it
+2. The agent restarts with exponential backoff
+3. The other agents keep running
+4. The system continues
 
-When an agent fails, it restarts. The rest of the system keeps running.
+No 3 AM pages. No cascade failures.
 
 ---
 
@@ -58,21 +70,17 @@ When an agent fails, it restarts. The rest of the system keeps running.
 
 **Message Passing** — Agents communicate only through async messages. No blocking RPC, no shared-state corruption.
 
-**Supervision** — Supervisors monitor child agents. On crash: restart (with exponential backoff), escalate if restarts exceed limits, or propagate failure depending on strategy (OneForOne, OneForAll, RestForOne).
+**Supervision** — Supervisors monitor child agents and restart on crash. Supports OneForOne, OneForAll, and RestForOne restart strategies with exponential backoff.
 
-**Checkpointing** — Agent state periodically saved to SQLite. Resume from checkpoint after restart instead of starting fresh.
+**Checkpointing** — Agent state periodically saved to SQLite. Resume from checkpoint after restart.
 
 ---
 
-## Why Erlang/BEAM?
+## Influences
 
-The BEAM virtual machine runs WhatsApp (2 billion users), Discord, and RabbitMQ with **nine nines of uptime** (99.9999999%).
+**[OpenAI Symphony](https://github.com/openai/symphony)** — The orchestrator-worker pattern and multi-agent coordination model. Symphony showed how to structure agent swarms; ZeptoBeam adds fault-tolerance.
 
-Their approach: *Let it crash.*
-
-Don't defensively code against every failure. Isolate processes. Restart on failure. Design the system to fail and recover continuously.
-
-ZeptoBeam brings this philosophy to AI agents.
+**[Erlang/BEAM](https://www.erlang.org/)** — The "let it crash" philosophy. The BEAM VM runs WhatsApp (2B+ users) and Discord with nine nines of uptime. ZeptoBeam brings BEAM's process isolation and supervision trees to AI agents.
 
 ---
 
@@ -112,10 +120,11 @@ cargo build --release -p zeptoclaw-rtd
 
 ---
 
-## Inspiration
+## Related
 
-- [Erlang/OTP](https://www.erlang.org/) — Fault-tolerant systems
-- [The Zen of Erlang](https://ferd.ca/the-zen-of-erlang.html) — *"The only way to make a reliable system is to accept that things will fail."*
+- [ZeptoClaw](https://github.com/qhkm/zeptoclaw) — The agent framework ZeptoBeam orchestrates
+- [Symphony](https://github.com/openai/symphony) — OpenAI's orchestration system
+- [The Zen of Erlang](https://ferd.ca/the-zen-of-erlang.html) — Fault-tolerance philosophy
 
 ---
 
