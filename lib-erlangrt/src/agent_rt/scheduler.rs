@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use crate::agent_rt::bridge::BridgeHandle;
 use crate::agent_rt::process::{Priority, ProcessStatus};
 use crate::agent_rt::registry::AgentRegistry;
 use crate::agent_rt::types::*;
@@ -13,6 +14,7 @@ pub struct AgentScheduler {
   queue_normal: VecDeque<AgentPid>,
   queue_low: VecDeque<AgentPid>,
   advantage_count: usize,
+  bridge: Option<BridgeHandle>,
 }
 
 impl AgentScheduler {
@@ -23,7 +25,12 @@ impl AgentScheduler {
       queue_normal: VecDeque::new(),
       queue_low: VecDeque::new(),
       advantage_count: 0,
+      bridge: None,
     }
+  }
+
+  pub fn set_bridge(&mut self, bridge: BridgeHandle) {
+    self.bridge = bridge.into();
   }
 
   /// Add a process to the appropriate priority queue
@@ -93,6 +100,16 @@ impl AgentScheduler {
   /// Run one scheduling cycle. Returns true if work was
   /// done, false if no runnable process was found.
   pub fn tick(&mut self) -> bool {
+    // Drain bridge responses and deliver to processes
+    let responses = self
+      .bridge
+      .as_ref()
+      .map(|b| b.drain_responses())
+      .unwrap_or_default();
+    for (resp_pid, msg) in responses {
+      let _ = self.send(resp_pid, msg);
+    }
+
     let pid = match self.next_runnable() {
       Some(p) => p,
       None => return false,
@@ -194,15 +211,29 @@ impl AgentScheduler {
           should_stop = Some(reason);
           break;
         }
-        Action::IoRequest(_) => {
-          // Mark process as Waiting (IO bridge
-          // is a future task)
+        Action::IoRequest(op) => {
           if let Some(proc) =
             self.registry.lookup_mut(&pid)
           {
             proc.reductions =
               proc.reductions.saturating_sub(1);
             proc.status = ProcessStatus::Waiting;
+          }
+          // Submit to bridge if available
+          if let Some(ref mut bridge) = self.bridge {
+            if let Err(err) = bridge.submit(pid, op) {
+              // Bridge overflow/disconnect — wake
+              // process with error
+              if let Some(proc) =
+                self.registry.lookup_mut(&pid)
+              {
+                proc.deliver_message(
+                  Message::Text(err),
+                );
+                proc.status = ProcessStatus::Runnable;
+              }
+              self.enqueue(pid);
+            }
           }
           break;
         }
