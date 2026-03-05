@@ -105,11 +105,85 @@ No 3 AM pages. No cascade failures.
 
 ## Quick Start
 
+### Prerequisites
+
+- Rust (nightly toolchain)
+- (Optional) ZeptoClaw — for running actual LLM agents with tools
+
 ```bash
+# Install Rust nightly
+rustup toolchain install nightly
+
+# Clone and build
 git clone https://github.com/qhkm/zeptobeam.git
 cd zeptobeam
 cargo build --release -p zeptoclaw-rtd
-./target/release/zeptoclaw-rtd --help
+```
+
+### Run the Daemon
+
+```bash
+# Start with defaults
+./target/release/zeptoclaw-rtd
+
+# Or with custom config
+./target/release/zeptoclaw-rtd -c zeptoclaw-rt.toml
+```
+
+### Create a Config File
+
+Create `zeptoclaw-rt.toml`:
+
+```toml
+[runtime]
+worker_count = 4
+mailbox_capacity = 1024
+
+[checkpoint]
+store = "sqlite"
+path = "./zeptoclaw-rt.db"
+ttl_hours = 24
+
+[server]
+enabled = true
+bind = "127.0.0.1:9090"
+
+[logging]
+level = "info"
+format = "pretty"
+```
+
+### Check Health
+
+```bash
+# Health endpoint
+curl http://127.0.0.1:9090/health
+
+# Metrics
+curl http://127.0.0.1:9090/metrics
+```
+
+### Programmatic Usage
+
+```rust
+use zeptobeam::agent_rt::{
+    orchestration::OrchestratorBehavior,
+    scheduler::AgentScheduler,
+    types::*,
+};
+
+let mut sched = AgentScheduler::new();
+
+// Spawn an orchestrator with a goal
+let behavior = Arc::new(OrchestratorBehavior::default());
+let pid = sched.registry.spawn(behavior, json!({
+    "goal": "Analyze support tickets and categorize by urgency"
+})).unwrap();
+
+// Run the scheduler loop
+while sched.tick() {
+    // Agents execute, supervised, and checkpoint automatically
+}
 ```
 
 ---
