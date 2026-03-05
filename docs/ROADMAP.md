@@ -99,7 +99,7 @@ Sophisticated multi-agent coordination patterns.
 - **Hierarchical orchestrators**: sub_orchestration task type, recursive OrchestratorBehavior spawning, depth limiting
 - **Result aggregation**: ResultAggregator trait with ConcatAggregator, VoteAggregator, MergeAggregator
 
-**12 tasks, 48 tests:** `3e91307` through `TBD`
+**12 tasks, 48 tests:** `3e91307` through `70fb607`
 
 ---
 
@@ -146,3 +146,70 @@ Distribute agents across multiple runtime nodes.
 | 6 | Advanced Orchestration | Done | 48 |
 | 7 | MCP Integration | Planned | — |
 | 8 | Multi-Node Clustering | Planned | — |
+| 9 | BEAM Parity | Planned | — |
+
+---
+
+## Phase 9: BEAM Parity [PLANNED]
+
+True Erlang/BEAM-inspired features that make the runtime uniquely powerful.
+
+- **Hot Code Upgrades**: Upgrade running agent behaviors without stopping processes. Version coexistence, `code_change` callbacks, atomic switchover
+- **Persistent Message Queues**: Disk-backed mailboxes for durability across restarts. Replay from checkpoint on recovery
+- **ETS/DETS Tables**: In-memory term storage (ETS) with match specifications, disk-backed version (DETS) for persistence
+- **Behaviors Framework**: Formal `gen_server`, `gen_fsm`, `gen_event` patterns. Standardized callbacks, supervision integration
+- **Release Handling**: `.rel` files, appup/appdown scripts, distributed upgrades
+
+**Prerequisite:** Phase 5 (production daemon), Phase 8 (clustering for distributed upgrades)
+
+---
+
+# Enterprise Feature Track
+
+The following features are designated as **Enterprise** — they extend the core runtime for production deployments at scale but are not required for the fundamental BEAM-inspired agent experience.
+
+## Enterprise Phase E1: Cloud Native
+
+- Kubernetes Operator with CRDs for AgentRuntime, AgentPool
+- Horizontal Pod Autoscaler (HPA) integration
+- GitOps workflows (ArgoCD/Flux)
+- Helm charts and Terraform modules
+- Multi-tenancy with namespace isolation
+- Resource quotas and per-tenant rate limiting
+- Cost optimization: token budgeting, model tier routing, spot instance support
+
+## Enterprise Phase E2: Security & Compliance
+
+- Zero-trust architecture with mTLS between nodes
+- OIDC/OAuth2 authentication and RBAC
+- Audit logging and tamper-proof log shipping
+- PII detection and automatic redaction
+- Data residency controls and GDPR deletion APIs
+- Wasm-based agent sandboxing
+- FIPS 140-2 compliance mode
+
+## Enterprise Phase E3: Advanced AI Patterns
+
+- Agent swarm intelligence (emergent coordination, pheromone trails)
+- Federated learning across agent nodes
+- Agent marketplace/registry (publish, discover, compose)
+- Advanced human-in-the-loop workflows
+- Multi-modal agents (vision, audio, code)
+- Agent-to-agent negotiation protocols
+
+## Enterprise Phase E4: Enterprise Observability
+
+- OpenTelemetry distributed tracing
+- Real-time WebSocket event streaming
+- Live debugging: attach to running agents, inspect mailboxes
+- Performance profiler with reduction analysis
+- Cost attribution dashboards
+- SLA/SLO monitoring with alerting
+
+---
+
+## Philosophy
+
+**Core (Phases 1-9)**: Open source, BEAM-inspired, essential for any serious agent runtime. These features make zeptobeam unique and powerful on its own.
+
+**Enterprise (E1-E4)**: Production-hardening for organizations running at scale. These are important but not differentiating — they make the runtime *deployable* at enterprise scale.
