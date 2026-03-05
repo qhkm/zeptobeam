@@ -429,10 +429,10 @@ mod tests {
     assert!(ids.contains(&"left"));
     assert!(ids.contains(&"right"));
 
-    // Complete "left", "merge" should still wait for "right"
+    // Complete "left", "right" still ready, "merge" still waits for "right"
     graph.mark_running("left");
     graph.mark_completed("left");
-    assert_eq!(graph.ready_tasks().len(), 0);
+    assert_eq!(graph.ready_tasks().len(), 1); // "right" still ready
 
     // Complete "right", now "merge" should be ready
     graph.mark_running("right");

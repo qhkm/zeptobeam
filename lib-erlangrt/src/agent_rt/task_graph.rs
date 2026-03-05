@@ -103,22 +103,8 @@ impl TaskGraph {
     }
 
     pub fn mark_running(&mut self, task_id: &str) {
-        // Mark the specified task as running
         if let Some(node) = self.tasks.get_mut(task_id) {
             node.status = TaskStatus::Running;
-        }
-
-        // Also mark all other Ready tasks as Running (parallel execution semantics)
-        // This handles the case where multiple tasks become ready at the same time
-        // and should be executed in parallel
-        for id in &self.insertion_order {
-            if id != task_id {
-                if let Some(node) = self.tasks.get_mut(id) {
-                    if node.status == TaskStatus::Ready {
-                        node.status = TaskStatus::Running;
-                    }
-                }
-            }
         }
     }
 
@@ -229,46 +215,9 @@ impl TaskGraph {
     }
 
     fn detect_cycle(&self) -> bool {
-        // Kahn's algorithm (topological sort)
-        // If sorted count < total tasks, cycle exists
-
-        // Calculate in-degrees
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        for (id, _) in self.tasks.iter() {
-            in_degree.insert(id.clone(), 0);
-        }
-
-        for (_, node) in self.tasks.iter() {
-            for dep in &node.depends_on {
-                // Only count dependencies that exist in the graph
-                if self.tasks.contains_key(dep) {
-                    *in_degree.get_mut(dep).unwrap_or(&mut 0) += 1;
-                }
-            }
-        }
-
-        // Wait, I need to recalculate correctly
-        // in_degree should be: for each node, count how many nodes depend on it
-        // Actually for Kahn's: in-degree is how many dependencies a node has
-
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        for (id, _) in self.tasks.iter() {
-            in_degree.insert(id.clone(), 0);
-        }
-
-        for (_, node) in self.tasks.iter() {
-            for dep in &node.depends_on {
-                if self.tasks.contains_key(dep) {
-                    // Node depends on dep, so increment in-degree of node
-                    // Actually we need to count later
-                }
-            }
-        }
-
-        // Recalculate: in_degree[node] = number of dependencies it has
+        // Kahn's algorithm: in_degree[node] = number of in-graph dependencies it has
         let mut in_degree: HashMap<String, usize> = HashMap::new();
         for (id, node) in self.tasks.iter() {
-            // Count only deps that exist in the graph
             let count = node
                 .depends_on
                 .iter()
@@ -379,10 +328,12 @@ mod tests {
 
         graph.mark_running("left");
         graph.mark_completed("left");
-        assert_eq!(graph.ready_tasks().len(), 0);
+        // "right" is still Ready, "merge" still pending (needs both left + right)
+        assert_eq!(graph.ready_tasks().len(), 1);
 
         graph.mark_running("right");
         graph.mark_completed("right");
+        // "merge" now ready (both deps completed)
         assert_eq!(graph.ready_tasks().len(), 1);
     }
 
