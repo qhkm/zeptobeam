@@ -1635,10 +1635,7 @@ fn test_spawn_with_link_false_does_not_cascade() {
   let mut sched = AgentScheduler::new();
   let parent = sched
     .registry
-    .spawn(
-      Arc::new(SpawnNoLinkBehavior),
-      serde_json::Value::Null,
-    )
+    .spawn(Arc::new(SpawnNoLinkBehavior), serde_json::Value::Null)
     .unwrap();
   sched.send(parent, Message::Text("spawn".into())).unwrap();
   sched.enqueue(parent);
@@ -1719,10 +1716,7 @@ fn test_spawn_with_monitor_true_includes_monitor_ref() {
   let mut sched = AgentScheduler::new();
   let parent = sched
     .registry
-    .spawn(
-      Arc::new(SpawnMonitorBehavior),
-      serde_json::Value::Null,
-    )
+    .spawn(Arc::new(SpawnMonitorBehavior), serde_json::Value::Null)
     .unwrap();
   sched.send(parent, Message::Text("spawn".into())).unwrap();
   sched.enqueue(parent);
@@ -1985,10 +1979,7 @@ fn test_panic_in_terminate_does_not_crash_scheduler() {
   let mut sched = AgentScheduler::new();
   let pid = sched
     .registry
-    .spawn(
-      Arc::new(PanicOnTerminateBehavior),
-      serde_json::Value::Null,
-    )
+    .spawn(Arc::new(PanicOnTerminateBehavior), serde_json::Value::Null)
     .unwrap();
   sched.send(pid, Message::Text("stop".into())).unwrap();
   sched.enqueue(pid);
@@ -2162,7 +2153,10 @@ fn test_receive_timeout_wakes_waiting_process() {
     .unwrap();
   assert_eq!(state.received.len(), 1);
   assert!(
-    matches!(&state.received[0], Message::System(SystemMsg::ReceiveTimeout)),
+    matches!(
+      &state.received[0],
+      Message::System(SystemMsg::ReceiveTimeout)
+    ),
     "Process should receive ReceiveTimeout message"
   );
 }
@@ -2238,8 +2232,7 @@ fn test_receive_timeout_only_fires_when_waiting() {
 fn test_set_receive_timeout_errors_on_missing_pid() {
   let mut sched = AgentScheduler::new();
   let fake_pid = AgentPid::from_raw(0xDEAD);
-  let result =
-    sched.set_receive_timeout(fake_pid, std::time::Duration::from_secs(1));
+  let result = sched.set_receive_timeout(fake_pid, std::time::Duration::from_secs(1));
   assert!(result.is_err(), "Should error for unknown PID");
 }
 
@@ -2255,6 +2248,180 @@ fn test_set_receive_timeout_errors_on_overflow() {
 }
 
 // === Step 6: Real HTTP in bridge ===
+
+#[derive(Debug)]
+struct TestHttpRequest {
+  method: String,
+  path: String,
+  headers: std::collections::HashMap<String, String>,
+  body: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct TestHttpResponse {
+  status: u16,
+  body: String,
+  headers: Vec<(String, String)>,
+  delay: std::time::Duration,
+}
+
+impl TestHttpResponse {
+  fn ok(body: impl Into<String>) -> Self {
+    Self {
+      status: 200,
+      body: body.into(),
+      headers: Vec::new(),
+      delay: std::time::Duration::from_millis(0),
+    }
+  }
+}
+
+fn start_test_http_server<F>(
+  expected_requests: usize,
+  handler: F,
+) -> (String, std::thread::JoinHandle<()>)
+where
+  F: Fn(TestHttpRequest) -> TestHttpResponse + Send + Sync + 'static,
+{
+  let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  let addr = listener.local_addr().unwrap();
+  let handler = Arc::new(handler);
+  let join = std::thread::spawn(move || {
+    for _ in 0..expected_requests {
+      let (mut stream, _) = match listener.accept() {
+        Ok(v) => v,
+        Err(_) => break,
+      };
+      let req = read_http_request(&mut stream);
+      let resp = handler(req);
+      if !resp.delay.is_zero() {
+        std::thread::sleep(resp.delay);
+      }
+      let _ = write_http_response(&mut stream, resp);
+    }
+  });
+  (format!("http://{}", addr), join)
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> TestHttpRequest {
+  use std::io::Read;
+  stream
+    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+    .ok();
+
+  let mut buf = Vec::new();
+  let mut chunk = [0_u8; 1024];
+  let mut header_end = None;
+  let mut content_len = 0_usize;
+
+  loop {
+    match stream.read(&mut chunk) {
+      Ok(0) => break,
+      Ok(n) => {
+        buf.extend_from_slice(&chunk[..n]);
+        if header_end.is_none() {
+          if let Some(pos) = find_subsequence(&buf, b"\r\n\r\n") {
+            let end = pos + 4;
+            header_end = Some(end);
+            content_len = parse_content_length(&buf[..end]);
+          }
+        }
+        if let Some(end) = header_end {
+          if buf.len() >= end + content_len {
+            break;
+          }
+        }
+      }
+      Err(e)
+        if e.kind() == std::io::ErrorKind::WouldBlock
+          || e.kind() == std::io::ErrorKind::TimedOut =>
+      {
+        break
+      }
+      Err(_) => break,
+    }
+  }
+
+  let end = header_end.unwrap_or(buf.len());
+  let header_text = String::from_utf8_lossy(&buf[..end]);
+  let mut lines = header_text.split("\r\n");
+  let req_line = lines.next().unwrap_or("");
+  let mut req_parts = req_line.split_whitespace();
+  let method = req_parts.next().unwrap_or("").to_string();
+  let path = req_parts.next().unwrap_or("/").to_string();
+
+  let mut headers = std::collections::HashMap::new();
+  for line in lines {
+    if line.is_empty() {
+      continue;
+    }
+    if let Some((k, v)) = line.split_once(':') {
+      headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+    }
+  }
+
+  let body_end = std::cmp::min(buf.len(), end + content_len);
+  let body = if end < body_end {
+    buf[end..body_end].to_vec()
+  } else {
+    Vec::new()
+  };
+
+  TestHttpRequest {
+    method,
+    path,
+    headers,
+    body,
+  }
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+  if needle.is_empty() {
+    return Some(0);
+  }
+  haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn parse_content_length(headers: &[u8]) -> usize {
+  let text = String::from_utf8_lossy(headers);
+  for line in text.split("\r\n") {
+    if let Some((k, v)) = line.split_once(':') {
+      if k.trim().eq_ignore_ascii_case("content-length") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+          return n;
+        }
+      }
+    }
+  }
+  0
+}
+
+fn write_http_response(
+  stream: &mut std::net::TcpStream,
+  resp: TestHttpResponse,
+) -> std::io::Result<()> {
+  use std::io::Write;
+  let status_text = match resp.status {
+    200 => "OK",
+    404 => "Not Found",
+    _ => "OK",
+  };
+  let body_bytes = resp.body.as_bytes();
+  let mut raw = format!(
+    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+    resp.status,
+    status_text,
+    body_bytes.len()
+  );
+  for (k, v) in &resp.headers {
+    raw.push_str(&format!("{}: {}\r\n", k, v));
+  }
+  raw.push_str("\r\n");
+
+  stream.write_all(raw.as_bytes())?;
+  stream.write_all(body_bytes)?;
+  stream.flush()
+}
 
 /// A behavior that issues an HTTP GET via IoOp::HttpRequest
 /// and stores the response.
@@ -2300,7 +2467,12 @@ impl AgentBehavior for HttpGetBehavior {
     }
   }
 
-  fn handle_exit(&self, _from: AgentPid, _reason: Reason, _state: &mut dyn AgentState) -> Action {
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
     Action::Continue
   }
 
@@ -2312,14 +2484,20 @@ async fn test_bridge_http_get_success() {
   use crate::agent_rt::bridge::execute_io_op;
   use std::collections::HashMap;
 
+  let (base_url, server) = start_test_http_server(1, |req| {
+    assert_eq!(req.method, "GET");
+    assert_eq!(req.path, "/get");
+    TestHttpResponse::ok("{\"ok\":true}")
+  });
   let op = IoOp::HttpRequest {
     method: "GET".into(),
-    url: "https://httpbin.org/get".into(),
+    url: format!("{}/get", base_url),
     headers: HashMap::new(),
     body: None,
-    timeout_ms: Some(10_000),
+    timeout_ms: Some(2_000),
   };
   let result = execute_io_op(&op, None).await;
+  server.join().unwrap();
   match &result {
     IoResult::Ok(val) => {
       assert_eq!(val["status"], 200);
@@ -2334,14 +2512,21 @@ async fn test_bridge_http_timeout() {
   use crate::agent_rt::bridge::execute_io_op;
   use std::collections::HashMap;
 
+  let (base_url, server) = start_test_http_server(1, |_req| TestHttpResponse {
+    status: 200,
+    body: "late".into(),
+    headers: Vec::new(),
+    delay: std::time::Duration::from_millis(500),
+  });
   let op = IoOp::HttpRequest {
     method: "GET".into(),
-    url: "https://httpbin.org/delay/10".into(),
+    url: format!("{}/slow", base_url),
     headers: HashMap::new(),
     body: None,
-    timeout_ms: Some(500),
+    timeout_ms: Some(100),
   };
   let result = execute_io_op(&op, None).await;
+  server.join().unwrap();
   assert!(
     matches!(result, IoResult::Timeout),
     "Expected IoResult::Timeout for slow endpoint, got {:?}",
@@ -2354,14 +2539,21 @@ async fn test_bridge_http_non_2xx() {
   use crate::agent_rt::bridge::execute_io_op;
   use std::collections::HashMap;
 
+  let (base_url, server) = start_test_http_server(1, |_req| TestHttpResponse {
+    status: 404,
+    body: "missing".into(),
+    headers: Vec::new(),
+    delay: std::time::Duration::from_millis(0),
+  });
   let op = IoOp::HttpRequest {
     method: "GET".into(),
-    url: "https://httpbin.org/status/404".into(),
+    url: format!("{}/status/404", base_url),
     headers: HashMap::new(),
     body: None,
-    timeout_ms: Some(10_000),
+    timeout_ms: Some(2_000),
   };
   let result = execute_io_op(&op, None).await;
+  server.join().unwrap();
   match &result {
     IoResult::Ok(val) => {
       assert_eq!(val["status"], 404);
@@ -2373,19 +2565,39 @@ async fn test_bridge_http_non_2xx() {
 #[tokio::test]
 async fn test_bridge_http_post_with_body() {
   use crate::agent_rt::bridge::execute_io_op;
-  use std::collections::HashMap;
+  use std::{collections::HashMap, sync::Mutex};
 
+  let captured = Arc::new(Mutex::new(None::<TestHttpRequest>));
+  let captured2 = Arc::clone(&captured);
+  let (base_url, server) = start_test_http_server(1, move |req| {
+    *captured2.lock().unwrap() = Some(req);
+    TestHttpResponse::ok("{\"saved\":true}")
+  });
   let mut headers = HashMap::new();
   headers.insert("Content-Type".into(), "application/json".into());
 
   let op = IoOp::HttpRequest {
     method: "POST".into(),
-    url: "https://httpbin.org/post".into(),
+    url: format!("{}/post", base_url),
     headers,
     body: Some(b"{\"key\":\"value\"}".to_vec()),
-    timeout_ms: Some(10_000),
+    timeout_ms: Some(2_000),
   };
   let result = execute_io_op(&op, None).await;
+  server.join().unwrap();
+
+  let req = captured
+    .lock()
+    .unwrap()
+    .take()
+    .expect("server should capture request");
+  assert_eq!(req.method, "POST");
+  assert_eq!(req.path, "/post");
+  assert_eq!(
+    req.headers.get("content-type"),
+    Some(&"application/json".to_string()),
+  );
+  assert_eq!(req.body, b"{\"key\":\"value\"}");
   match &result {
     IoResult::Ok(val) => {
       assert_eq!(val["status"], 200);
@@ -2400,12 +2612,15 @@ async fn test_bridge_http_connection_error() {
   use crate::agent_rt::bridge::execute_io_op;
   use std::collections::HashMap;
 
+  let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  let addr = listener.local_addr().unwrap();
+  drop(listener);
   let op = IoOp::HttpRequest {
     method: "GET".into(),
-    url: "http://192.0.2.1:1".into(), // RFC 5737 TEST-NET, should fail to connect
+    url: format!("http://127.0.0.1:{}/unreachable", addr.port()),
     headers: HashMap::new(),
     body: None,
-    timeout_ms: Some(2_000),
+    timeout_ms: Some(500),
   };
   let result = execute_io_op(&op, None).await;
   assert!(
@@ -2417,6 +2632,11 @@ async fn test_bridge_http_connection_error() {
 
 #[tokio::test]
 async fn test_scheduler_bridge_http_roundtrip() {
+  let (base_url, server) = start_test_http_server(1, |req| {
+    assert_eq!(req.method, "GET");
+    assert_eq!(req.path, "/get");
+    TestHttpResponse::ok("{\"from\":\"local\"}")
+  });
   let (bridge_handle, worker) = crate::agent_rt::bridge::create_bridge();
   let mut sched = AgentScheduler::new();
   sched.set_bridge(bridge_handle);
@@ -2424,7 +2644,7 @@ async fn test_scheduler_bridge_http_roundtrip() {
   let worker_handle = tokio::spawn(async move { worker.run().await });
 
   let behavior = Arc::new(HttpGetBehavior {
-    url: "https://httpbin.org/get".into(),
+    url: format!("{}/get", base_url),
   });
   let pid = sched
     .registry
@@ -2441,13 +2661,26 @@ async fn test_scheduler_bridge_http_roundtrip() {
     ProcessStatus::Waiting,
   );
 
-  // Wait for ureq HTTP call to complete
-  tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-  // Second tick: drains IoResponse, delivers to process,
-  // behavior stores response in state.
-  let ran = sched.tick();
-  assert!(ran, "Second tick should have run work");
+  // Poll until IoResponse is delivered instead of using a fixed sleep.
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+  loop {
+    sched.tick();
+    let proc = sched.registry.lookup(&pid).unwrap();
+    let state = proc
+      .state
+      .as_ref()
+      .unwrap()
+      .as_any()
+      .downcast_ref::<HttpGetState>()
+      .unwrap();
+    if state.response.is_some() {
+      break;
+    }
+    if std::time::Instant::now() >= deadline {
+      panic!("Timed out waiting for scheduler bridge HTTP response");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+  }
 
   let proc = sched.registry.lookup(&pid).unwrap();
   let state = proc
@@ -2465,6 +2698,7 @@ async fn test_scheduler_bridge_http_roundtrip() {
   assert_eq!(resp["status"], 200);
   assert!(resp["body"].is_string());
 
+  server.join().unwrap();
   drop(sched);
   let _ = worker_handle.await;
 }
@@ -2473,28 +2707,35 @@ async fn test_scheduler_bridge_http_roundtrip() {
 fn test_extract_provider_from_url() {
   use crate::agent_rt::bridge::extract_provider;
 
-  assert_eq!(extract_provider("https://api.openai.com/v1/chat"), "api.openai.com");
-  assert_eq!(extract_provider("https://api.anthropic.com/v1/messages"), "api.anthropic.com");
+  assert_eq!(
+    extract_provider("https://api.openai.com/v1/chat"),
+    "api.openai.com"
+  );
+  assert_eq!(
+    extract_provider("https://api.anthropic.com/v1/messages"),
+    "api.anthropic.com"
+  );
   assert_eq!(extract_provider("http://localhost:8080/api"), "localhost");
   assert_eq!(extract_provider("https://example.com"), "example.com");
 }
 
 #[tokio::test]
 async fn test_bridge_rate_limiter_throttles_requests() {
-  use crate::agent_rt::bridge::execute_io_op;
-  use crate::agent_rt::rate_limiter::RateLimiter;
+  use crate::agent_rt::{bridge::execute_io_op, rate_limiter::RateLimiter};
   use std::collections::HashMap;
 
+  let (base_url, server) =
+    start_test_http_server(2, |_req| TestHttpResponse::ok("{\"ok\":true}"));
   let rl = RateLimiter::new();
-  // Allow 1 request per 200ms to httpbin.org
-  rl.set_limit("httpbin.org", 1, std::time::Duration::from_millis(200));
+  // Allow 1 request per 200ms to localhost provider
+  rl.set_limit("127.0.0.1", 1, std::time::Duration::from_millis(200));
 
   let op = IoOp::HttpRequest {
     method: "GET".into(),
-    url: "https://httpbin.org/get".into(),
+    url: format!("{}/get", base_url),
     headers: HashMap::new(),
     body: None,
-    timeout_ms: Some(10_000),
+    timeout_ms: Some(2_000),
   };
 
   // First request should complete quickly
@@ -2511,4 +2752,5 @@ async fn test_bridge_rate_limiter_throttles_requests() {
     "Second request should have been rate-limited, total elapsed {:?}",
     elapsed
   );
+  server.join().unwrap();
 }
