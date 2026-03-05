@@ -87,23 +87,7 @@ Make the runtime deployable as a standalone service.
 
 ---
 
-## Phase 6: Multi-Node Clustering [PLANNED]
-
-Distribute agents across multiple runtime nodes.
-
-- **Network transport**: gRPC or QUIC-based inter-node communication for message passing
-- **Node discovery**: Static config or mDNS/consul-based node registry
-- **Remote spawn**: Spawn processes on remote nodes, transparent PID routing
-- **Partition rebalancing**: Migrate agent processes between nodes on load imbalance
-- **Distributed supervision**: Supervisors that span nodes, restart on remote node failure
-- **Cross-node dead-letter routing**: Forward undeliverable messages to origin node's DLQ
-- **Split-brain resolution**: Quorum-based consistency for shared state (agent registry, checkpoints)
-
-**Prerequisite:** Phase 5 (production readiness) — need config, logging, health checks before distribution.
-
----
-
-## Phase 7: Advanced Orchestration [PLANNED]
+## Phase 6: Advanced Orchestration [PLANNED]
 
 Sophisticated multi-agent coordination patterns.
 
@@ -119,7 +103,7 @@ Sophisticated multi-agent coordination patterns.
 
 ---
 
-## Phase 8: MCP Integration [PLANNED]
+## Phase 7: MCP Integration [PLANNED]
 
 Expose the runtime as an MCP server and consume MCP tools natively.
 
@@ -134,6 +118,22 @@ Expose the runtime as an MCP server and consume MCP tools natively.
 
 ---
 
+## Phase 8: Multi-Node Clustering [PLANNED]
+
+Distribute agents across multiple runtime nodes.
+
+- **Network transport**: gRPC (tonic) inter-node communication for message passing
+- **Node discovery**: Static config node registry
+- **Remote spawn**: Spawn processes on remote nodes, transparent PID routing
+- **Partition rebalancing**: Migrate agent processes between nodes on load imbalance
+- **Distributed supervision**: Supervisors that span nodes, restart on remote node failure
+- **Cross-node dead-letter routing**: Forward undeliverable messages to origin node's DLQ
+- **Split-brain resolution**: Leader-based consistency for shared state (agent registry, checkpoints)
+
+**Prerequisite:** Phase 5 (production readiness), Phase 7 (MCP transport layer reusable for node communication).
+
+---
+
 ## Phase Summary
 
 | Phase | Name | Status | Tests |
@@ -143,6 +143,6 @@ Expose the runtime as an MCP server and consume MCP tools natively.
 | 3 | ZeptoAgent Integration | Done | ~120 |
 | 4 | Reliability Hardening | Done | 146 |
 | 5 | Production Readiness | Done | ~20 |
-| 6 | Multi-Node Clustering | Planned | — |
-| 7 | Advanced Orchestration | Planned | — |
-| 8 | MCP Integration | Planned | — |
+| 6 | Advanced Orchestration | Planned | — |
+| 7 | MCP Integration | Planned | — |
+| 8 | Multi-Node Clustering | Planned | — |
