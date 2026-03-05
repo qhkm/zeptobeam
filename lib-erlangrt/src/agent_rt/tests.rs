@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::agent_rt::process::*;
 use crate::agent_rt::registry::AgentRegistry;
+use crate::agent_rt::scheduler::AgentScheduler;
 use crate::agent_rt::types::*;
 
 struct EchoState {
@@ -223,4 +224,237 @@ fn test_registry_count() {
   reg.spawn(b1, serde_json::Value::Null).unwrap();
   reg.spawn(b2, serde_json::Value::Null).unwrap();
   assert_eq!(reg.count(), 2);
+}
+
+// --- AgentScheduler tests ---
+
+#[test]
+fn test_scheduler_tick_returns_false_when_empty() {
+  let mut sched = AgentScheduler::new();
+  assert!(!sched.tick());
+}
+
+#[test]
+fn test_scheduler_dispatches_message() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched
+    .send(pid, Message::Text("hello".into()))
+    .unwrap();
+  sched.enqueue(pid);
+  assert!(sched.tick());
+}
+
+#[test]
+fn test_scheduler_process_yields_after_reductions() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  for i in 0..500 {
+    sched
+      .send(
+        pid,
+        Message::Text(format!("msg_{}", i)),
+      )
+      .unwrap();
+  }
+  sched.enqueue(pid);
+  sched.tick();
+  let proc = sched.registry.lookup(&pid).unwrap();
+  assert!(
+    proc.has_messages(),
+    "Should still have unprocessed messages \
+     after reduction limit"
+  );
+}
+
+#[test]
+fn test_scheduler_waiting_process_wakes_on_message() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched.enqueue(pid);
+  // empty mailbox -> Waiting
+  sched.tick();
+  assert_eq!(
+    sched.registry.lookup(&pid).unwrap().status,
+    ProcessStatus::Waiting
+  );
+
+  sched
+    .send(pid, Message::Text("wake".into()))
+    .unwrap();
+  assert_eq!(
+    sched.registry.lookup(&pid).unwrap().status,
+    ProcessStatus::Runnable
+  );
+}
+
+#[test]
+fn test_scheduler_high_priority_runs_first() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+
+  let low_pid = sched
+    .registry
+    .spawn(
+      behavior.clone(),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  if let Some(p) =
+    sched.registry.lookup_mut(&low_pid)
+  {
+    p.priority = Priority::Low;
+  }
+
+  let high_pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  if let Some(p) =
+    sched.registry.lookup_mut(&high_pid)
+  {
+    p.priority = Priority::High;
+  }
+
+  // Send messages to both
+  sched
+    .send(
+      low_pid,
+      Message::Text("low_msg".into()),
+    )
+    .unwrap();
+  sched
+    .send(
+      high_pid,
+      Message::Text("high_msg".into()),
+    )
+    .unwrap();
+
+  // Enqueue low first, then high
+  sched.enqueue(low_pid);
+  sched.enqueue(high_pid);
+
+  // Tick should run high_pid first
+  sched.tick();
+
+  // high_pid should have consumed its message
+  // (now Waiting with empty mailbox)
+  let high_proc =
+    sched.registry.lookup(&high_pid).unwrap();
+  assert_eq!(
+    high_proc.status,
+    ProcessStatus::Waiting,
+    "High priority should have run first"
+  );
+  assert!(!high_proc.has_messages());
+
+  // low_pid should still have its message
+  let low_proc =
+    sched.registry.lookup(&low_pid).unwrap();
+  assert!(
+    low_proc.has_messages(),
+    "Low priority should not have run yet"
+  );
+}
+
+#[test]
+fn test_scheduler_terminate_removes_process() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  assert!(sched.registry.lookup(&pid).is_some());
+
+  sched.terminate_process(pid, Reason::Normal);
+  assert!(sched.registry.lookup(&pid).is_none());
+}
+
+#[test]
+fn test_scheduler_terminate_notifies_links() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+
+  let pid_a = sched
+    .registry
+    .spawn(
+      behavior.clone(),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  let pid_b = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  // Link a -> b
+  if let Some(proc_a) =
+    sched.registry.lookup_mut(&pid_a)
+  {
+    proc_a.links.push(pid_b);
+  }
+
+  // Terminate a, b should get Exit message
+  sched.terminate_process(pid_a, Reason::Normal);
+
+  let proc_b =
+    sched.registry.lookup(&pid_b).unwrap();
+  assert!(
+    proc_b.has_messages(),
+    "Linked process should receive Exit message"
+  );
+}
+
+#[test]
+fn test_scheduler_send_to_missing_process_errors() {
+  let mut sched = AgentScheduler::new();
+  let fake_pid = AgentPid::new();
+  let result = sched
+    .send(fake_pid, Message::Text("oops".into()));
+  assert!(result.is_err());
+}
+
+#[test]
+fn test_scheduler_multiple_ticks_drain_mailbox() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  // Send exactly 5 messages
+  for i in 0..5 {
+    sched
+      .send(
+        pid,
+        Message::Text(format!("msg_{}", i)),
+      )
+      .unwrap();
+  }
+  sched.enqueue(pid);
+
+  // One tick should process all 5 (well within
+  // 200 reductions)
+  sched.tick();
+
+  let proc = sched.registry.lookup(&pid).unwrap();
+  assert!(
+    !proc.has_messages(),
+    "All 5 messages should be consumed in one tick"
+  );
+  assert_eq!(proc.status, ProcessStatus::Waiting);
 }

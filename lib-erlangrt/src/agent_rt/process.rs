@@ -10,6 +10,7 @@ pub struct AgentProcess {
   pub mailbox: VecDeque<Message>,
   pub reductions: u32,
   pub status: ProcessStatus,
+  pub priority: Priority,
   pub links: Vec<AgentPid>,
   pub monitors: Vec<MonitorRef>,
   pub supervisor: Option<AgentPid>,
@@ -22,6 +23,13 @@ pub enum ProcessStatus {
   Waiting,
   Suspended,
   Exiting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+  High,
+  Normal,
+  Low,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +59,7 @@ impl AgentProcess {
       mailbox: VecDeque::new(),
       reductions: 0,
       status: ProcessStatus::Runnable,
+      priority: Priority::Normal,
       links: Vec::new(),
       monitors: Vec::new(),
       supervisor: None,
@@ -71,5 +80,13 @@ impl AgentProcess {
 
   pub fn next_message(&mut self) -> Option<Message> {
     self.mailbox.pop_front()
+  }
+
+  pub fn terminate(&mut self, reason: Reason) {
+    self.status = ProcessStatus::Exiting;
+    if let Some(ref mut state) = self.state {
+      self.behavior.terminate(reason, state.as_mut());
+    }
+    self.state = None;
   }
 }
