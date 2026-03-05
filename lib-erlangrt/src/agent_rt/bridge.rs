@@ -11,16 +11,26 @@ use std::{
   error::Error as StdError,
   sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
   },
   time::Duration,
 };
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use zeptoclaw::{agent::ZeptoAgent, providers::LLMProvider};
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
 const RESPONSE_QUEUE_SIZE: usize = 4096;
+pub const DEFAULT_AGENT_CHAT_TIMEOUT_MS: u64 = 120_000;
+pub const DEFAULT_HTTP_TIMEOUT_MS: u64 = 30_000;
+
+#[derive(Clone)]
+struct CancellationEntry {
+  token: CancellationToken,
+  in_flight: usize,
+}
+
 /// Request sent from scheduler thread to Tokio thread
 /// pool.
 #[derive(Debug)]
@@ -51,7 +61,9 @@ pub struct BridgeHandle {
   request_tx: Sender<WorkerRequest>,
   response_rx: Receiver<IoResponse>,
   next_correlation_id: Arc<AtomicU64>,
+  cancellation: Arc<Mutex<HashMap<AgentPid, CancellationEntry>>>,
   shutdown_enabled: bool,
+  agent_metrics: Arc<BridgeMetrics>,
 }
 
 /// Tokio-side worker that receives I/O requests
@@ -66,6 +78,7 @@ pub struct BridgeWorker {
   agent_provider_registry: Arc<HashMap<String, Arc<dyn LLMProvider + Send + Sync>>>,
   agent_tool_factory: Arc<dyn ToolFactory>,
   agent_metrics: Arc<BridgeMetrics>,
+  cancellation: Arc<Mutex<HashMap<AgentPid, CancellationEntry>>>,
 }
 
 impl Clone for BridgeHandle {
@@ -74,7 +87,9 @@ impl Clone for BridgeHandle {
       request_tx: self.request_tx.clone(),
       response_rx: self.response_rx.clone(),
       next_correlation_id: self.next_correlation_id.clone(),
+      cancellation: self.cancellation.clone(),
       shutdown_enabled: self.shutdown_enabled,
+      agent_metrics: self.agent_metrics.clone(),
     }
   }
 }
@@ -93,11 +108,15 @@ pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorke
   let worker_count = worker_count.max(1);
   let (req_tx, req_rx) = bounded(REQUEST_QUEUE_SIZE);
   let (resp_tx, resp_rx) = bounded(RESPONSE_QUEUE_SIZE);
+  let agent_metrics = Arc::new(BridgeMetrics::new());
+  let cancellation = Arc::new(Mutex::new(HashMap::new()));
   let handle = BridgeHandle {
     request_tx: req_tx,
     response_rx: resp_rx,
     next_correlation_id: Arc::new(AtomicU64::new(0)),
+    cancellation: cancellation.clone(),
     shutdown_enabled: true,
+    agent_metrics: agent_metrics.clone(),
   };
   let mut workers = Vec::with_capacity(worker_count);
   for _ in 0..worker_count {
@@ -109,7 +128,8 @@ pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorke
       agent_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
       agent_provider_registry: Arc::new(HashMap::new()),
       agent_tool_factory: Arc::new(DefaultToolFactory::from_env()),
-      agent_metrics: Arc::new(BridgeMetrics::new()),
+      agent_metrics: agent_metrics.clone(),
+      cancellation: cancellation.clone(),
     });
   }
   (handle, workers)
@@ -135,6 +155,9 @@ impl BridgeHandle {
   /// Submit an I/O operation. Returns the correlation ID
   /// on success, or an error string if the queue is full.
   pub fn submit(&mut self, pid: AgentPid, op: IoOp) -> Result<u64, String> {
+    self.reserve_cancellation_slot(pid);
+    let is_agent_destroy = matches!(op, IoOp::AgentDestroy { .. });
+    let is_agent_chat = matches!(op, IoOp::AgentChat { .. });
     let cid = self.next_correlation_id.fetch_add(1, Ordering::Relaxed);
     let req = IoRequest {
       correlation_id: cid,
@@ -143,8 +166,34 @@ impl BridgeHandle {
     };
     match self.request_tx.try_send(WorkerRequest::Io(req)) {
       Ok(()) => Ok(cid),
-      Err(TrySendError::Full(_)) => Err("request queue full".into()),
-      Err(TrySendError::Disconnected(_)) => Err("bridge worker disconnected".into()),
+      Err(TrySendError::Full(_)) => {
+        self.release_cancellation_slot(pid);
+        if is_agent_destroy {
+          self.agent_metrics.inc_destroy_failures();
+        }
+        if is_agent_chat {
+          self.agent_metrics.inc_busy_rejections();
+        }
+        Err("request queue full".into())
+      }
+      Err(TrySendError::Disconnected(_)) => {
+        self.release_cancellation_slot(pid);
+        if is_agent_destroy {
+          self.agent_metrics.inc_destroy_failures();
+        }
+        Err("bridge worker disconnected".into())
+      }
+    }
+  }
+
+  pub fn cancel(&mut self, pid: AgentPid) -> bool {
+    let mut cancellation = self.cancellation.lock().unwrap();
+    match cancellation.get_mut(&pid) {
+      Some(entry) if !entry.token.is_cancelled() => {
+        entry.token.cancel();
+        true
+      }
+      _ => false,
     }
   }
 
@@ -186,6 +235,26 @@ impl BridgeHandle {
       }
     }
     out
+  }
+
+  fn reserve_cancellation_slot(&self, pid: AgentPid) {
+    let mut cancellation = self.cancellation.lock().unwrap();
+    let entry = cancellation.entry(pid).or_insert_with(|| CancellationEntry {
+      token: CancellationToken::new(),
+      in_flight: 0,
+    });
+    entry.in_flight = entry.in_flight.saturating_add(1);
+  }
+
+  fn release_cancellation_slot(&self, pid: AgentPid) {
+    let mut cancellation = self.cancellation.lock().unwrap();
+    if let Some(entry) = cancellation.get_mut(&pid) {
+      if entry.in_flight > 1 {
+        entry.in_flight -= 1;
+      } else {
+        cancellation.remove(&pid);
+      }
+    }
   }
 }
 
@@ -253,6 +322,7 @@ impl BridgeWorker {
     let agent_provider_registry = self.agent_provider_registry;
     let agent_tool_factory = self.agent_tool_factory;
     let agent_metrics = self.agent_metrics;
+    let cancellation = self.cancellation;
     loop {
       while in_flight.try_join_next().is_some() {}
 
@@ -272,6 +342,7 @@ impl BridgeWorker {
           let agent_prov = agent_provider_registry.clone();
           let agent_tf = agent_tool_factory.clone();
           let agent_met = agent_metrics.clone();
+          let cancellation = cancellation.clone();
           in_flight.spawn(async move {
             let op_kind = io_op_kind(&req.op);
             if let Some(ref m) = metrics {
@@ -284,24 +355,38 @@ impl BridgeWorker {
               "bridge io start"
             );
             let start = std::time::Instant::now();
-            let result = match &req.op {
-              IoOp::AgentChat { .. } => {
-                execute_agent_chat_standalone(
-                  req.source_pid,
-                  &req.op,
-                  agent_reg,
-                  agent_prov,
-                  agent_tf,
-                  agent_met,
-                )
-                .await
+            let token = {
+              let state = cancellation.lock().unwrap();
+              state.get(&req.source_pid).map(|entry| entry.token.clone())
+            };
+            let execute_op = async {
+              match &req.op {
+                IoOp::AgentChat { .. } => {
+                  execute_agent_chat_standalone(
+                    req.source_pid,
+                    &req.op,
+                    agent_reg,
+                    agent_prov,
+                    agent_tf,
+                    agent_met,
+                  )
+                  .await
+                }
+                IoOp::AgentDestroy { target_pid } => {
+                  let mut reg = agent_reg.lock().unwrap();
+                  let removed = reg.remove(target_pid).is_some();
+                  IoResult::Ok(serde_json::json!({ "destroyed": removed }))
+                }
+                _ => execute_io_op(&req.op, rl.as_ref()).await,
               }
-              IoOp::AgentDestroy { target_pid } => {
-                let mut reg = agent_reg.lock().unwrap();
-                let removed = reg.remove(target_pid).is_some();
-                IoResult::Ok(serde_json::json!({ "destroyed": removed }))
+            };
+            let result = if let Some(token) = token {
+              tokio::select! {
+                result = execute_op => result,
+                _ = token.cancelled() => IoResult::Timeout,
               }
-              _ => execute_io_op(&req.op, rl.as_ref()).await,
+            } else {
+              execute_op.await
             };
             let latency = start.elapsed();
             if let Some(ref m) = metrics {
@@ -343,6 +428,14 @@ impl BridgeWorker {
               result,
             };
             let _ = tx.send(resp);
+            let mut state = cancellation.lock().unwrap();
+            if let Some(entry) = state.get_mut(&req.source_pid) {
+              if entry.in_flight > 1 {
+                entry.in_flight -= 1;
+              } else {
+                state.remove(&req.source_pid);
+              }
+            }
           });
         }
         WorkerRequest::Shutdown { timeout, ack } => {
@@ -383,26 +476,34 @@ async fn execute_agent_chat_standalone(
   tool_factory: Arc<dyn ToolFactory>,
   metrics: Arc<BridgeMetrics>,
 ) -> IoResult {
-  let (provider_name, model, system_prompt, prompt, tools_whitelist, max_iterations) =
-    match op {
-      IoOp::AgentChat {
-        provider,
-        model,
-        system_prompt,
-        prompt,
-        tools,
-        max_iterations,
-        ..
-      } => (
-        provider,
-        model,
-        system_prompt,
-        prompt,
-        tools,
-        max_iterations,
-      ),
-      _ => return IoResult::Error("not an AgentChat op".into()),
-    };
+  let (
+    provider_name,
+    model,
+    system_prompt,
+    prompt,
+    tools_whitelist,
+    max_iterations,
+    timeout_ms,
+  ) = match op {
+    IoOp::AgentChat {
+      provider,
+      model,
+      system_prompt,
+      prompt,
+      tools,
+      max_iterations,
+      timeout_ms,
+    } => (
+      provider,
+      model,
+      system_prompt,
+      prompt,
+      tools,
+      max_iterations,
+      timeout_ms,
+    ),
+    _ => return IoResult::Error("not an AgentChat op".into()),
+  };
 
   let agent_arc = {
     let mut registry = agent_registry.lock().unwrap();
@@ -446,11 +547,24 @@ async fn execute_agent_chat_standalone(
   let agent = agent_arc.clone();
   let prompt_owned = prompt.to_string();
 
-  let chat_result = tokio::task::spawn(async move {
+  let mut chat_task = tokio::task::spawn(async move {
     let guard = agent.lock().await;
     guard.chat(&prompt_owned).await
-  })
-  .await;
+  });
+
+  let effective_timeout_ms = (*timeout_ms).unwrap_or(DEFAULT_AGENT_CHAT_TIMEOUT_MS);
+  let chat_result = match tokio::time::timeout(
+    Duration::from_millis(effective_timeout_ms),
+    &mut chat_task,
+  )
+  .await
+  {
+    Ok(join_result) => join_result,
+    Err(_) => {
+      chat_task.abort();
+      return IoResult::Timeout;
+    }
+  };
 
   match chat_result {
     Ok(Ok(response)) => IoResult::Ok(serde_json::json!({ "response": response })),
@@ -537,7 +651,8 @@ fn execute_http_blocking(
   body: Option<&[u8]>,
   timeout_ms: Option<u64>,
 ) -> IoResult {
-  let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
+  let timeout =
+    std::time::Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_HTTP_TIMEOUT_MS));
   let agent = ureq::AgentBuilder::new()
     .timeout_connect(timeout)
     .timeout_read(timeout)

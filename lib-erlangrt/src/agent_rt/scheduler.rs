@@ -2,12 +2,13 @@ use std::{collections::VecDeque, sync::Arc};
 
 use crate::agent_rt::{
   bridge::BridgeHandle,
+  dead_letter::{DeadLetter, DeadLetterQueue, DeadLetterReason},
   observability::{ProcessSnapshot, RuntimeMetrics, RuntimeMetricsSnapshot},
   process::{Priority, ProcessStatus},
   registry::AgentRegistry,
   types::*,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, info_span, warn};
 
 const DEFAULT_REDUCTIONS: u32 = 200;
 const NORMAL_ADVANTAGE: usize = 8;
@@ -26,6 +27,7 @@ pub struct AgentScheduler {
   advantage_count: usize,
   bridge: Option<BridgeHandle>,
   pending_destroys: Vec<(AgentPid, u8)>,
+  dead_letters: DeadLetterQueue,
   metrics: Arc<RuntimeMetrics>,
   exit_handlers: Vec<ExitHandler>,
 }
@@ -42,6 +44,7 @@ impl AgentScheduler {
       advantage_count: 0,
       bridge: None,
       pending_destroys: Vec::new(),
+      dead_letters: DeadLetterQueue::new(256),
       metrics: Arc::new(RuntimeMetrics::new()),
       exit_handlers: Vec::new(),
     }
@@ -53,6 +56,10 @@ impl AgentScheduler {
 
   pub fn metrics_snapshot(&self) -> RuntimeMetricsSnapshot {
     self.metrics.snapshot(self.registry.count())
+  }
+
+  pub fn dead_letter_queue(&self) -> &DeadLetterQueue {
+    &self.dead_letters
   }
 
   pub fn list_processes(&self) -> Vec<ProcessSnapshot> {
@@ -259,7 +266,16 @@ impl AgentScheduler {
     let msg_kind = message_kind(&msg);
     let was_waiting = if let Some(proc) = self.registry.lookup_mut(&to) {
       let was = proc.status == ProcessStatus::Waiting;
-      proc.deliver_message(msg);
+      if proc.deliver_message(msg).is_err() {
+        self.metrics.record_mailbox_rejection();
+        self.dead_letters.push(DeadLetter {
+          timestamp: std::time::Instant::now(),
+          sender_pid: None,
+          target_pid: to,
+          reason: DeadLetterReason::MailboxFull,
+        });
+        return Err(format!("mailbox full for {:?}", to));
+      }
       was
     } else if self.allow_external_routing {
       self.outbound_messages.push((to, msg));
@@ -270,6 +286,12 @@ impl AgentScheduler {
       );
       return Ok(());
     } else {
+      self.dead_letters.push(DeadLetter {
+        timestamp: std::time::Instant::now(),
+        sender_pid: None,
+        target_pid: to,
+        reason: DeadLetterReason::ProcessNotFound,
+      });
       return Err(format!("Process {:?} not found", to));
     };
     self.metrics.record_message_sent();
@@ -486,7 +508,7 @@ impl AgentScheduler {
               // Bridge overflow/disconnect — wake
               // process with error
               if let Some(proc) = self.registry.lookup_mut(&pid) {
-                proc.deliver_message(Message::Text(err));
+                proc.deliver_message(Message::Text(err)).ok();
                 proc.status = ProcessStatus::Runnable;
               }
               self.enqueue(pid);
@@ -495,7 +517,9 @@ impl AgentScheduler {
             // No bridge configured — deliver error
             // back to process so it doesn't get stuck
             if let Some(proc) = self.registry.lookup_mut(&pid) {
-              proc.deliver_message(Message::Text("no I/O bridge configured".to_string()));
+              proc
+                .deliver_message(Message::Text("no I/O bridge configured".to_string()))
+                .ok();
               proc.status = ProcessStatus::Runnable;
             }
             self.enqueue(pid);
@@ -585,7 +609,11 @@ impl AgentScheduler {
   /// is not Normal, cascade termination. Normal exits
   /// with trap_exit=false do not propagate.
   pub fn terminate_process(&mut self, pid: AgentPid, reason: Reason) {
+    let _span = info_span!("process.terminate", pid = pid.raw(), ?reason).entered();
     info!(pid = pid.raw(), ?reason, "terminating process");
+    if let Some(ref mut bridge) = self.bridge {
+      bridge.cancel(pid);
+    }
     // Collect links and monitor relations before terminating
     let (links, monitored_by, monitors): (
       Vec<AgentPid>,
@@ -640,7 +668,7 @@ impl AgentScheduler {
         });
         if let Some(lp) = self.registry.lookup_mut(linked_pid) {
           let was_waiting = lp.status == ProcessStatus::Waiting;
-          lp.deliver_message(exit_msg);
+          lp.deliver_message(exit_msg).ok();
           if was_waiting {
             pids_to_wake.push(*linked_pid);
           }

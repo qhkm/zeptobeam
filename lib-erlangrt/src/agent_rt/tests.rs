@@ -1,14 +1,15 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use crate::agent_rt::bridge::create_bridge;
-use crate::agent_rt::bridge_metrics::BridgeMetrics;
 use crate::agent_rt::{
-  process::*, registry::AgentRegistry, scheduler::AgentScheduler, types::*,
+  bridge::create_bridge, bridge_metrics::BridgeMetrics, process::*,
+  registry::AgentRegistry, scheduler::AgentScheduler, types::*,
 };
-use zeptoclaw::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
-use zeptoclaw::session::Message as ZeptoMessage;
-use zeptoclaw::tools::Tool;
-use zeptoclaw::error::Result as ZeptoResult;
+use zeptoclaw::{
+  error::Result as ZeptoResult,
+  providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition},
+  session::Message as ZeptoMessage,
+  tools::Tool,
+};
 
 struct EchoState {
   received: Vec<Message>,
@@ -138,6 +139,28 @@ impl LLMProvider for MockLLMProvider {
   }
 }
 
+struct SlowLLMProvider;
+
+#[async_trait::async_trait]
+impl LLMProvider for SlowLLMProvider {
+  async fn chat(
+    &self,
+    _messages: Vec<ZeptoMessage>,
+    _tools: Vec<ToolDefinition>,
+    _model: Option<&str>,
+    _options: ChatOptions,
+  ) -> ZeptoResult<LLMResponse> {
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    Ok(LLMResponse::text("Slow response"))
+  }
+  fn default_model(&self) -> &str {
+    "slow-model"
+  }
+  fn name(&self) -> &str {
+    "slow"
+  }
+}
+
 struct MockToolFactory;
 
 impl crate::agent_rt::tool_factory::ToolFactory for MockToolFactory {
@@ -188,7 +211,7 @@ fn test_deliver_message() {
   let mut proc = AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
   assert!(!proc.has_messages());
 
-  proc.deliver_message(Message::Text("hello".into()));
+  proc.deliver_message(Message::Text("hello".into())).unwrap();
   assert!(proc.has_messages());
 
   let msg = proc.next_message().unwrap();
@@ -200,12 +223,36 @@ fn test_deliver_message() {
 }
 
 #[test]
+fn test_mailbox_rejects_when_full() {
+  let behavior: Arc<dyn AgentBehavior> = Arc::new(EchoBehavior);
+  let mut proc =
+    AgentProcess::new_with_mailbox_capacity(behavior, serde_json::Value::Null, 3)
+      .unwrap();
+
+  assert!(proc.deliver_message(Message::Text("a".into())).is_ok());
+  assert!(proc.deliver_message(Message::Text("b".into())).is_ok());
+  assert!(proc.deliver_message(Message::Text("c".into())).is_ok());
+
+  let result = proc.deliver_message(Message::Text("d".into()));
+  assert!(result.is_err());
+}
+
+#[test]
+fn test_mailbox_default_capacity_is_1024() {
+  let behavior: Arc<dyn AgentBehavior> = Arc::new(EchoBehavior);
+  let proc = AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
+  assert_eq!(proc.mailbox_capacity, 1024);
+}
+
+#[test]
 fn test_deliver_message_wakes_waiting_process() {
   let behavior = Arc::new(EchoBehavior);
   let mut proc = AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
   proc.status = ProcessStatus::Waiting;
 
-  proc.deliver_message(Message::Text("wake up".into()));
+  proc
+    .deliver_message(Message::Text("wake up".into()))
+    .unwrap();
   assert_eq!(proc.status, ProcessStatus::Runnable);
 }
 
@@ -227,9 +274,11 @@ fn test_message_ordering_fifo() {
   let behavior = Arc::new(EchoBehavior);
   let mut proc = AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
 
-  proc.deliver_message(Message::Text("first".into()));
-  proc.deliver_message(Message::Text("second".into()));
-  proc.deliver_message(Message::Text("third".into()));
+  proc.deliver_message(Message::Text("first".into())).unwrap();
+  proc
+    .deliver_message(Message::Text("second".into()))
+    .unwrap();
+  proc.deliver_message(Message::Text("third".into())).unwrap();
 
   match proc.next_message().unwrap() {
     Message::Text(s) => assert_eq!(s, "first"),
@@ -594,6 +643,60 @@ fn test_scheduler_send_to_missing_process_errors() {
 }
 
 #[test]
+fn test_scheduler_send_returns_error_on_full_mailbox() {
+  let behavior: Arc<dyn AgentBehavior> = Arc::new(EchoBehavior);
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched.enqueue(pid);
+
+  sched.registry.lookup_mut(&pid).unwrap().mailbox_capacity = 2;
+
+  assert!(sched.send(pid, Message::Text("a".into())).is_ok());
+  assert!(sched.send(pid, Message::Text("b".into())).is_ok());
+  let result = sched.send(pid, Message::Text("c".into()));
+  assert!(result.is_err());
+  assert!(result.unwrap_err().contains("mailbox full"));
+}
+
+#[test]
+fn test_scheduler_routes_to_dead_letter_on_full_mailbox() {
+  let behavior: Arc<dyn AgentBehavior> = Arc::new(EchoBehavior);
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched.enqueue(pid);
+  sched.registry.lookup_mut(&pid).unwrap().mailbox_capacity = 1;
+
+  let _ = sched.send(pid, Message::Text("a".into()));
+  let _ = sched.send(pid, Message::Text("b".into()));
+
+  assert_eq!(sched.dead_letter_queue().total_count(), 1);
+  assert_eq!(
+    sched.dead_letter_queue().recent()[0].reason,
+    crate::agent_rt::dead_letter::DeadLetterReason::MailboxFull
+  );
+}
+
+#[test]
+fn test_scheduler_routes_to_dead_letter_on_unknown_pid() {
+  let mut sched = AgentScheduler::new();
+  let fake_pid = AgentPid::from_raw(0xDEAD);
+
+  let result = sched.send(fake_pid, Message::Text("hello".into()));
+  assert!(result.is_err());
+  assert_eq!(sched.dead_letter_queue().total_count(), 1);
+  assert_eq!(
+    sched.dead_letter_queue().recent()[0].reason,
+    crate::agent_rt::dead_letter::DeadLetterReason::ProcessNotFound
+  );
+}
+
+#[test]
 fn test_scheduler_multiple_ticks_drain_mailbox() {
   let mut sched = AgentScheduler::new();
   let behavior = Arc::new(EchoBehavior);
@@ -646,6 +749,31 @@ fn test_bridge_submit_returns_correlation_id() {
 }
 
 #[test]
+fn test_bridge_handle_cancel_operation() {
+  let (mut handle, _worker) = crate::agent_rt::bridge::create_bridge();
+  let pid = AgentPid::from_raw(0xCAFE);
+
+  let cid = handle
+    .submit(
+      pid,
+      IoOp::Timer {
+        duration: std::time::Duration::from_secs(60),
+      },
+    )
+    .unwrap();
+  assert_eq!(cid, 0);
+
+  assert!(
+    handle.cancel(pid),
+    "cancel should return true when pid has in-flight ops"
+  );
+  assert!(
+    !handle.cancel(pid),
+    "cancel should return false after token has been cancelled once"
+  );
+}
+
+#[test]
 fn test_bridge_drain_empty() {
   let (handle, _worker) = crate::agent_rt::bridge::create_bridge();
   assert!(handle.drain_responses().is_empty());
@@ -688,6 +816,7 @@ fn test_supervisor_spec_creation() {
     strategy: RestartStrategy::OneForOne,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![],
   };
   assert_eq!(spec.max_restarts, 5);
@@ -700,6 +829,7 @@ fn test_supervisor_starts_children() {
     strategy: RestartStrategy::OneForOne,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![
       ChildSpec {
         id: "child1".into(),
@@ -732,6 +862,7 @@ fn test_one_for_one_restart() {
     strategy: RestartStrategy::OneForOne,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![ChildSpec {
       id: "child1".into(),
       behavior,
@@ -760,6 +891,7 @@ fn test_transient_not_restarted_on_normal_exit() {
     strategy: RestartStrategy::OneForOne,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![ChildSpec {
       id: "child1".into(),
       behavior,
@@ -784,6 +916,7 @@ fn test_temporary_never_restarted() {
     strategy: RestartStrategy::OneForOne,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![ChildSpec {
       id: "child1".into(),
       behavior,
@@ -808,6 +941,7 @@ fn test_max_restarts_exceeded() {
     strategy: RestartStrategy::OneForOne,
     max_restarts: 2,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![ChildSpec {
       id: "child1".into(),
       behavior,
@@ -837,6 +971,7 @@ fn test_one_for_all_restarts_all() {
     strategy: RestartStrategy::OneForAll,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![
       ChildSpec {
         id: "a".into(),
@@ -867,6 +1002,112 @@ fn test_one_for_all_restarts_all() {
   assert_eq!(sup.children.len(), 2);
   let new_pids: Vec<_> = sup.children.iter().map(|c| c.pid).collect();
   assert!(new_pids.iter().all(|p| !old_pids.contains(p)));
+}
+
+#[test]
+fn test_supervisor_backoff_exponential_calculates_delay() {
+  let backoff = BackoffStrategy::Exponential {
+    base_ms: 100,
+    max_ms: 5000,
+    multiplier: 2.0,
+  };
+
+  assert_eq!(backoff.delay_for_attempt(0), 100);
+  assert_eq!(backoff.delay_for_attempt(1), 200);
+  assert_eq!(backoff.delay_for_attempt(2), 400);
+  assert_eq!(backoff.delay_for_attempt(6), 5000);
+  assert_eq!(backoff.delay_for_attempt(100), 5000);
+}
+
+#[test]
+fn test_supervisor_backoff_fixed_delay() {
+  let backoff = BackoffStrategy::Fixed { delay_ms: 500 };
+  assert_eq!(backoff.delay_for_attempt(0), 500);
+  assert_eq!(backoff.delay_for_attempt(10), 500);
+}
+
+#[test]
+fn test_supervisor_backoff_none_is_zero() {
+  let backoff = BackoffStrategy::None;
+  assert_eq!(backoff.delay_for_attempt(0), 0);
+  assert_eq!(backoff.delay_for_attempt(5), 0);
+}
+
+#[test]
+fn test_supervisor_backoff_tracks_restart_count_per_child() {
+  let behavior = Arc::new(EchoBehavior) as Arc<dyn AgentBehavior>;
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 10,
+    max_seconds: 60,
+    backoff: BackoffStrategy::Exponential {
+      base_ms: 100,
+      max_ms: 5000,
+      multiplier: 2.0,
+    },
+    children: vec![ChildSpec {
+      id: "crashy".to_string(),
+      behavior,
+      args: serde_json::Value::Null,
+      restart: ChildRestart::Permanent,
+      priority: Priority::Normal,
+    }],
+  };
+
+  let mut sched = AgentScheduler::new();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
+
+  assert_eq!(
+    sup.pending_restart_delay("crashy"),
+    100,
+    "first restart delay should be base_ms"
+  );
+  let pid0 = sup.children[0].pid;
+  sup.handle_child_exit(&mut sched, pid0, Reason::Custom("crash".into()));
+
+  assert_eq!(
+    sup.pending_restart_delay("crashy"),
+    200,
+    "second restart delay should be doubled"
+  );
+  let pid1 = sup.children[0].pid;
+  sup.handle_child_exit(&mut sched, pid1, Reason::Custom("crash".into()));
+
+  assert_eq!(sup.pending_restart_delay("crashy"), 400);
+}
+
+#[test]
+fn test_supervisor_escalates_on_intensity_exceeded() {
+  let behavior = Arc::new(EchoBehavior) as Arc<dyn AgentBehavior>;
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 2,
+    max_seconds: 60,
+    backoff: BackoffStrategy::None,
+    children: vec![ChildSpec {
+      id: "crashy".to_string(),
+      behavior,
+      args: serde_json::Value::Null,
+      restart: ChildRestart::Permanent,
+      priority: Priority::Normal,
+    }],
+  };
+
+  let mut sched = AgentScheduler::new();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
+
+  for i in 0..3 {
+    if sup.is_shutdown() {
+      break;
+    }
+    let pid = sup.children[0].pid;
+    sup.handle_child_exit(&mut sched, pid, Reason::Custom(format!("crash_{}", i)));
+  }
+
+  assert!(
+    sup.is_shutdown(),
+    "Supervisor should escalate after exceeding intensity"
+  );
 }
 
 // --- Bug C1: trap_exit cascading death tests ---
@@ -1083,6 +1324,7 @@ fn test_transient_not_restarted_on_shutdown() {
     strategy: RestartStrategy::OneForOne,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![ChildSpec {
       id: "child1".into(),
       behavior,
@@ -1110,6 +1352,7 @@ fn test_rest_for_one_restarts_only_subsequent() {
     strategy: RestartStrategy::RestForOne,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![
       ChildSpec {
         id: "a".into(),
@@ -2016,6 +2259,56 @@ fn test_panic_in_handle_message_terminates_process() {
   );
 }
 
+#[test]
+fn test_crash_isolation_panic_does_not_affect_siblings() {
+  struct PanicBehavior;
+
+  impl AgentBehavior for PanicBehavior {
+    fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+      Ok(Box::new(EchoState { received: vec![] }))
+    }
+    fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
+      panic!("intentional panic for crash isolation test");
+    }
+    fn handle_exit(
+      &self,
+      _from: AgentPid,
+      _reason: Reason,
+      _state: &mut dyn AgentState,
+    ) -> Action {
+      Action::Continue
+    }
+    fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+  }
+
+  let mut sched = AgentScheduler::new();
+  let panic_pid = sched
+    .registry
+    .spawn(Arc::new(PanicBehavior), serde_json::Value::Null)
+    .unwrap();
+  let healthy_pid = sched
+    .registry
+    .spawn(Arc::new(EchoBehavior), serde_json::Value::Null)
+    .unwrap();
+
+  sched.send(panic_pid, Message::Text("boom".into())).unwrap();
+  sched.send(healthy_pid, Message::Text("ok".into())).unwrap();
+  sched.enqueue(panic_pid);
+  sched.enqueue(healthy_pid);
+
+  sched.tick();
+  sched.tick();
+
+  assert!(
+    sched.registry.lookup(&panic_pid).is_none(),
+    "panicking process should be removed"
+  );
+  assert!(
+    sched.registry.lookup(&healthy_pid).is_some(),
+    "healthy sibling should remain alive"
+  );
+}
+
 /// A behavior that panics in handle_exit.
 struct PanicOnExitBehavior;
 
@@ -2183,6 +2476,7 @@ fn test_supervisor_start_linked_auto_restarts_children() {
     strategy: RestartStrategy::OneForOne,
     max_restarts: 5,
     max_seconds: 60,
+    backoff: BackoffStrategy::None,
     children: vec![ChildSpec {
       id: "worker".to_string(),
       behavior: Arc::new(CrashOnMessageBehavior) as Arc<dyn AgentBehavior>,
@@ -2915,6 +3209,24 @@ fn test_scheduler_metrics_track_messages_and_termination() {
   assert_eq!(metrics.process_terminations_total, 1);
 }
 
+#[test]
+fn test_mailbox_rejection_increments_metric() {
+  let behavior: Arc<dyn AgentBehavior> = Arc::new(EchoBehavior);
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched.enqueue(pid);
+  sched.registry.lookup_mut(&pid).unwrap().mailbox_capacity = 1;
+
+  let _ = sched.send(pid, Message::Text("a".into()));
+  let _ = sched.send(pid, Message::Text("b".into()));
+
+  let snap = sched.metrics_snapshot();
+  assert_eq!(snap.mailbox_rejections_total, 1);
+}
+
 #[tokio::test]
 async fn test_bridge_records_io_metrics() {
   let mut sched = AgentScheduler::new();
@@ -3209,7 +3521,7 @@ async fn test_agent_chat_multi_turn_history() {
   let (_handle, mut worker) = create_bridge();
   worker.set_agent_provider_registry(Arc::new(registry));
   worker.set_agent_tool_factory(
-    Arc::new(MockToolFactory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>,
+    Arc::new(MockToolFactory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>
   );
   worker.set_agent_metrics(Arc::new(BridgeMetrics::new()));
 
@@ -3274,7 +3586,7 @@ async fn test_agent_chat_tool_whitelist() {
   let (_handle, mut worker) = create_bridge();
   worker.set_agent_provider_registry(Arc::new(create_mock_provider_registry()));
   worker.set_agent_tool_factory(
-    Arc::new(factory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>,
+    Arc::new(factory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>
   );
   worker.set_agent_metrics(Arc::new(BridgeMetrics::new()));
 
@@ -3284,10 +3596,7 @@ async fn test_agent_chat_tool_whitelist() {
     model: None,
     system_prompt: None,
     prompt: "Search for something".to_string(),
-    tools: Some(vec![
-      "web_search".to_string(),
-      "shell".to_string(),
-    ]),
+    tools: Some(vec!["web_search".to_string(), "shell".to_string()]),
     max_iterations: None,
     timeout_ms: None,
   };
@@ -3315,7 +3624,7 @@ async fn test_bridge_panic_containment_on_agent_chat() {
   let metrics = Arc::new(BridgeMetrics::new());
   worker.set_agent_provider_registry(Arc::new(registry));
   worker.set_agent_tool_factory(
-    Arc::new(MockToolFactory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>,
+    Arc::new(MockToolFactory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>
   );
   worker.set_agent_metrics(metrics.clone());
 
@@ -3341,6 +3650,46 @@ async fn test_bridge_panic_containment_on_agent_chat() {
     1,
     "panic counter should increment"
   );
+}
+
+#[tokio::test]
+async fn test_agent_chat_timeout_ms_enforced() {
+  let mut registry = std::collections::HashMap::new();
+  registry.insert(
+    "slow".to_string(),
+    Arc::new(SlowLLMProvider) as Arc<dyn LLMProvider + Send + Sync>,
+  );
+
+  let (_handle, mut worker) = create_bridge();
+  let metrics = Arc::new(BridgeMetrics::new());
+  worker.set_agent_provider_registry(Arc::new(registry));
+  worker.set_agent_tool_factory(
+    Arc::new(MockToolFactory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>
+  );
+  worker.set_agent_metrics(metrics.clone());
+
+  let pid = AgentPid::from_raw(0x8000_F002);
+  let op = IoOp::AgentChat {
+    provider: "slow".to_string(),
+    model: None,
+    system_prompt: None,
+    prompt: "Will timeout".to_string(),
+    tools: None,
+    max_iterations: None,
+    timeout_ms: Some(1),
+  };
+
+  let result = worker.execute_agent_chat(pid, &op).await;
+  assert!(matches!(result, IoResult::Timeout));
+  assert_eq!(metrics.agent_chat_panics(), 0);
+}
+
+#[test]
+fn test_bridge_agent_chat_applies_default_timeout() {
+  use crate::agent_rt::bridge::DEFAULT_AGENT_CHAT_TIMEOUT_MS;
+
+  assert!(DEFAULT_AGENT_CHAT_TIMEOUT_MS > 0);
+  assert!(DEFAULT_AGENT_CHAT_TIMEOUT_MS <= 300_000);
 }
 
 // --- Task 9: Worker busy rejection ---
@@ -3466,17 +3815,14 @@ fn test_worker_idle_timeout_self_terminates() {
     }))
     .unwrap();
 
-  let action = behavior.handle_message(
-    Message::System(SystemMsg::ReceiveTimeout),
-    state.as_mut(),
-  );
+  let action =
+    behavior.handle_message(Message::System(SystemMsg::ReceiveTimeout), state.as_mut());
   assert!(matches!(action, Action::Stop(Reason::Shutdown)));
 }
 
 #[test]
 fn test_terminate_process_submits_agent_destroy() {
-  use crate::agent_rt::orchestration::WorkerBehavior;
-  use crate::agent_rt::scheduler::AgentScheduler;
+  use crate::agent_rt::{orchestration::WorkerBehavior, scheduler::AgentScheduler};
 
   let (handle, _worker) = create_bridge();
   let mut sched = AgentScheduler::new();
