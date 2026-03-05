@@ -5,3 +5,42 @@
 # erlang  /       2   nativefun_float_div_2
 # erlang  abs     1   nativefun_abs_1
 # erlang  float   1   nativefun_float_1
+#
+# New BIFs for stdlib parity (Task 9):
+#
+# erlang module additions:
+# erlang  element          2   nativefun_element_2
+# erlang  setelement       3   nativefun_setelement_3
+# erlang  tuple_size       1   nativefun_tuple_size_1
+# erlang  map_size         1   nativefun_map_size_1
+# erlang  is_map_key       2   nativefun_is_map_key_2
+# erlang  tuple_to_list    1   nativefun_tuple_to_list_1
+# erlang  list_to_tuple    1   nativefun_list_to_tuple_1
+# erlang  throw            1   NfErlangThrow1::_f
+# erlang  exit             1   NfErlangExit1::_f
+# erlang  max              2   nativefun_max_2
+# erlang  min              2   nativefun_min_2
+# erlang  atom_to_binary   1   nativefun_atom_to_binary_1
+# erlang  binary_to_atom   1   nativefun_binary_to_atom_1
+#
+# maps module (new):
+# maps    new              0   nativefun_maps_new_0
+# maps    get              2   nativefun_maps_get_2
+# maps    get              3   nativefun_maps_get_3
+# maps    put              3   nativefun_maps_put_3
+# maps    keys             1   nativefun_maps_keys_1
+# maps    values           1   nativefun_maps_values_1
+# maps    is_key           2   nativefun_maps_is_key_2
+# maps    size             1   nativefun_maps_size_1
+# maps    merge            2   nativefun_maps_merge_2
+# maps    remove           2   nativefun_maps_remove_2
+# maps    to_list          1   nativefun_maps_to_list_1
+# maps    from_list        1   nativefun_maps_from_list_1
+# maps    find             2   nativefun_maps_find_2
+#
+# lists module additions:
+# lists   sort             1   NfListsSort1::_f
+# lists   append           2   NfListsAppend2::_f
+# lists   flatten          1   NfListsFlatten1::_f
+# lists   nth              2   NfListsNth2::_f
+# lists   last             1   NfListsLast1::_f

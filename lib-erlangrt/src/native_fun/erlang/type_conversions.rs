@@ -1,9 +1,11 @@
 use crate::{
   defs::data_reader::TDataReader,
-  emulator::{atom, heap::THeapOwner, process::Process},
+  emulator::{atom, heap::THeapOwner, process::Process, vm::VM},
   fail::{self, RtResult},
+  native_fun::assert_arity,
   term::{
-    boxed, cons,
+    boxed,
+    cons,
     term_builder::{BinaryBuilder, ListBuilder},
     Term,
   },
@@ -134,4 +136,83 @@ unsafe fn binary_to_list_1(proc: &mut Process, bin: Term) -> RtResult<Term> {
     }
   }
   Ok(lb.make_term())
+}
+
+// ---- erlang:atom_to_binary/1 ----
+// Convert atom to UTF-8 binary.
+pub fn nativefun_atom_to_binary_1(
+  _vm: &mut VM,
+  curr_p: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_arity("erlang:atom_to_binary", 1, args);
+  let atom_val = args[0];
+
+  if !atom_val.is_atom() {
+    return fail::create::badarg();
+  }
+
+  let atom_p = atom::lookup(atom_val);
+  if atom_p.is_null() {
+    return fail::create::badarg();
+  }
+
+  let name = unsafe { &(*atom_p).name };
+  let bytes = name.as_bytes();
+
+  if bytes.is_empty() {
+    return Ok(Term::empty_binary());
+  }
+
+  let hp = curr_p.get_heap_mut();
+  let bin_ptr = unsafe { boxed::Binary::create_with_data(bytes, hp)? };
+  Ok(unsafe { (*bin_ptr).make_term() })
+}
+
+// ---- erlang:binary_to_atom/1 ----
+// Convert binary to atom (UTF-8).
+pub fn nativefun_binary_to_atom_1(
+  _vm: &mut VM,
+  _curr_p: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_arity("erlang:binary_to_atom", 1, args);
+  let bin = args[0];
+
+  if bin == Term::empty_binary() {
+    return Ok(atom::from_str(""));
+  }
+
+  if !bin.is_binary() {
+    return fail::create::badarg();
+  }
+
+  let bin_ptr = unsafe { boxed::Binary::get_trait_from_term(bin) };
+  let bit_size = unsafe { (*bin_ptr).get_bit_size() };
+  if bit_size.get_last_byte_bits() != 0 {
+    return fail::create::badarg();
+  }
+
+  let n_bytes = bit_size.get_byte_size_rounded_down().bytes();
+  let mut buf = Vec::with_capacity(n_bytes);
+
+  unsafe {
+    if let Some(reader) = (*bin_ptr).get_byte_reader() {
+      for i in 0..n_bytes {
+        buf.push(reader.read(i));
+      }
+    } else {
+      let bit_reader = (*bin_ptr).get_bit_reader();
+      for i in 0..n_bytes {
+        buf.push(bit_reader.read(i));
+      }
+    }
+  }
+
+  let s = match std::str::from_utf8(&buf) {
+    Ok(s) => s,
+    Err(_) => return fail::create::badarg(),
+  };
+
+  Ok(atom::from_str(s))
 }

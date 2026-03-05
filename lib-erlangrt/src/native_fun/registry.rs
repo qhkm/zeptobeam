@@ -1,6 +1,6 @@
 use crate::{
   emulator::{atom, mfa::ModFunArity},
-  native_fun::{erlang, erts_internal, lists, module::NativeModule, NativeFn},
+  native_fun::{erlang, erts_internal, lists, maps, module::NativeModule, NativeFn},
   term::Term,
 };
 use std::collections::HashMap;
@@ -30,6 +30,9 @@ impl NativeFunRegistry {
 
     let a_lists = atom::from_str("lists");
     self.modules.insert(a_lists, lists::new());
+
+    let a_maps = atom::from_str("maps");
+    self.modules.insert(a_maps, maps::new());
   }
 
   /// Check whether an MFA is loaded as a native function.
