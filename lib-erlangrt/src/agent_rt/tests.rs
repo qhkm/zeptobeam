@@ -1,5 +1,6 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
+use crate::agent_rt::bridge_metrics::BridgeMetrics;
 use crate::agent_rt::{
   process::*, registry::AgentRegistry, scheduler::AgentScheduler, types::*,
 };
@@ -3161,4 +3162,21 @@ fn test_agent_destroy_io_op() {
     }
     _ => panic!("expected AgentDestroy"),
   }
+}
+
+#[test]
+fn test_bridge_metrics_increment_and_read() {
+  let m = BridgeMetrics::new();
+  assert_eq!(m.agent_destroy_failures(), 0);
+  assert_eq!(m.worker_busy_rejections(), 0);
+  assert_eq!(m.agent_chat_panics(), 0);
+
+  m.inc_destroy_failures();
+  m.inc_destroy_failures();
+  m.inc_busy_rejections();
+  m.inc_chat_panics();
+
+  assert_eq!(m.agent_destroy_failures(), 2);
+  assert_eq!(m.worker_busy_rejections(), 1);
+  assert_eq!(m.agent_chat_panics(), 1);
 }

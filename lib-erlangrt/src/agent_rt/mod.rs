@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod bridge_metrics;
 pub mod checkpoint;
 pub mod cluster;
 pub mod observability;
