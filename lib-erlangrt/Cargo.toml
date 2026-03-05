@@ -25,6 +25,9 @@ default = [
 #   "trace_calls",
 ]
 r22 = []
+r19 = []
+r20 = []
+r21 = []
 trace_opcode_execution = []
 trace_register_changes = []
 trace_stack_changes = []

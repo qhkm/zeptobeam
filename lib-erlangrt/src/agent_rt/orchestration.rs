@@ -7,8 +7,6 @@ use crate::agent_rt::{checkpoint::CheckpointStore, types::*};
 
 const DECOMPOSE_KIND: &str = "decompose_goal";
 const DEFAULT_LLM_PROVIDER: &str = "openai";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-sonnet-latest";
 const DEFAULT_CHECKPOINT_KEY: &str = "orchestrator-default";
 
 /// Orchestrator process behavior.

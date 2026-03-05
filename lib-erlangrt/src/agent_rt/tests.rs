@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use crate::agent_rt::bridge::{create_bridge, BridgeWorker};
+use crate::agent_rt::bridge::create_bridge;
 use crate::agent_rt::bridge_metrics::BridgeMetrics;
 use crate::agent_rt::{
   process::*, registry::AgentRegistry, scheduler::AgentScheduler, types::*,
