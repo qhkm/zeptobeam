@@ -173,6 +173,8 @@ The following features are designated as **Enterprise** — they extend the core
 - Distributed ETS: replicated tables across nodes with eventual/strong consistency options
 - Active-active geo-redundancy with configurable replication factor
 
+**Design:** [`docs/plans/2026-03-06-multi-node-clustering-design.md`](plans/2026-03-06-multi-node-clustering-design.md) — Approach B (Router-Overlay), dual transport (gRPC + HTTP/SSE), SWIM gossip, CRDT registry, Raft checkpoints, feature-gated behind `clustering` Cargo feature.
+
 **Prerequisite:** Core Phases 1–9 (complete).
 
 ---
