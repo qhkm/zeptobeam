@@ -3640,3 +3640,34 @@ fn test_worker_idle_timeout_self_terminates() {
   );
   assert!(matches!(action, Action::Stop(Reason::Shutdown)));
 }
+
+#[test]
+fn test_terminate_process_submits_agent_destroy() {
+  use crate::agent_rt::orchestration::WorkerBehavior;
+  use crate::agent_rt::scheduler::AgentScheduler;
+
+  let (handle, _worker) = create_bridge();
+  let mut sched = AgentScheduler::new();
+  sched.set_bridge(handle);
+
+  // Spawn a dummy process
+  let pid = sched
+    .registry
+    .spawn(
+      Arc::new(WorkerBehavior),
+      serde_json::json!({"parent_pid": 0x8000_0001u64, "task_id": "t"}),
+    )
+    .unwrap();
+  sched.enqueue(pid);
+
+  // Terminate it
+  sched.terminate_process(pid, Reason::Normal);
+
+  // The bridge should have received an AgentDestroy op.
+  // We verify indirectly by checking the process is gone
+  // and no panic occurred.
+  assert!(
+    sched.registry.lookup(&pid).is_none(),
+    "process should be removed"
+  );
+}

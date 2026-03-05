@@ -25,6 +25,7 @@ pub struct AgentScheduler {
   outbound_messages: Vec<(AgentPid, Message)>,
   advantage_count: usize,
   bridge: Option<BridgeHandle>,
+  pending_destroys: Vec<(AgentPid, u8)>,
   metrics: Arc<RuntimeMetrics>,
   exit_handlers: Vec<ExitHandler>,
 }
@@ -40,6 +41,7 @@ impl AgentScheduler {
       outbound_messages: Vec::new(),
       advantage_count: 0,
       bridge: None,
+      pending_destroys: Vec::new(),
       metrics: Arc::new(RuntimeMetrics::new()),
       exit_handlers: Vec::new(),
     }
@@ -300,6 +302,23 @@ impl AgentScheduler {
     }
     for (resp_pid, msg) in responses {
       let _ = self.send(resp_pid, msg);
+    }
+
+    // Retry pending AgentDestroy submissions
+    if let Some(ref mut bridge) = self.bridge {
+      self.pending_destroys.retain_mut(|(pid, retries)| {
+        if *retries >= 3 {
+          warn!(pid = pid.raw(), "AgentDestroy failed after 3 retries");
+          return false;
+        }
+        match bridge.submit(*pid, IoOp::AgentDestroy { target_pid: *pid }) {
+          Ok(_) => false,
+          Err(_) => {
+            *retries += 1;
+            true
+          }
+        }
+      });
     }
 
     // Check receive timeouts on Waiting processes
@@ -675,6 +694,17 @@ impl AgentScheduler {
       self.exit_handlers = handlers;
     }
     self.metrics.record_process_termination();
+
+    // Submit AgentDestroy to bridge for agent registry cleanup
+    if let Some(ref mut bridge) = self.bridge {
+      match bridge.submit(pid, IoOp::AgentDestroy { target_pid: pid }) {
+        Ok(_) => {}
+        Err(_) => {
+          warn!(pid = pid.raw(), "AgentDestroy submit failed, will retry");
+          self.pending_destroys.push((pid, 0));
+        }
+      }
+    }
   }
 }
 
