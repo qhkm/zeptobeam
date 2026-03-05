@@ -7,6 +7,14 @@ use crate::agent_rt::types::Message;
 
 const SCHEMA_VERSION: u32 = 1;
 
+fn fsync_dir(dir: &Path) -> Result<(), AgentRtError> {
+  let d = fs::File::open(dir)
+    .map_err(|e| AgentRtError::DurableMailbox(format!("open dir for fsync: {}", e)))?;
+  d.sync_all()
+    .map_err(|e| AgentRtError::DurableMailbox(format!("fsync dir: {}", e)))?;
+  Ok(())
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct WalHeader {
   schema_version: u32,
@@ -174,6 +182,18 @@ impl DurableMailbox {
   }
 
   pub fn ack(&mut self, seq: u64) -> Result<(), AgentRtError> {
+    if seq <= self.last_acked_seq {
+      return Err(AgentRtError::DurableMailbox(format!(
+        "ack seq {} must be greater than last acked {}",
+        seq, self.last_acked_seq
+      )));
+    }
+    if seq > self.sequence {
+      return Err(AgentRtError::DurableMailbox(format!(
+        "ack seq {} exceeds current seq {}",
+        seq, self.sequence
+      )));
+    }
     let tmp_path = self.dir.join(format!("{}.ack.tmp", self.stable_id));
     fs::write(&tmp_path, seq.to_string())
       .map_err(|e| AgentRtError::DurableMailbox(format!("write ack tmp: {}", e)))?;
@@ -186,6 +206,7 @@ impl DurableMailbox {
     // atomic rename
     fs::rename(&tmp_path, &self.ack_path)
       .map_err(|e| AgentRtError::DurableMailbox(format!("rename ack: {}", e)))?;
+    fsync_dir(&self.dir)?;
     self.last_acked_seq = seq;
     Ok(())
   }
@@ -236,6 +257,7 @@ impl DurableMailbox {
 
     fs::rename(&tmp_path, &self.wal_path)
       .map_err(|e| AgentRtError::DurableMailbox(format!("rename wal: {}", e)))?;
+    fsync_dir(&self.dir)?;
 
     // Reopen writer
     let file = fs::OpenOptions::new()
@@ -255,7 +277,7 @@ impl DurableMailbox {
     self.sequence
   }
 
-  fn replay_all(&self) -> Result<Vec<WalEntry>, AgentRtError> {
+  pub fn replay_all(&self) -> Result<Vec<WalEntry>, AgentRtError> {
     let mut entries = Vec::new();
     if !self.wal_path.exists() {
       return Ok(entries);
@@ -376,6 +398,36 @@ mod tests {
     // .ack file should exist, no .ack.tmp
     assert!(dir.path().join("proc-6.ack").exists());
     assert!(!dir.path().join("proc-6.ack.tmp").exists());
+  }
+
+  #[test]
+  fn test_ack_rejects_non_monotonic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mb = DurableMailbox::open("proc-ack1", dir.path()).unwrap();
+    mb.append(&Message::Text("a".into())).unwrap();
+    mb.append(&Message::Text("b".into())).unwrap();
+    mb.ack(2).unwrap();
+    // Acking same or lower seq should fail
+    assert!(mb.ack(2).is_err());
+    assert!(mb.ack(1).is_err());
+  }
+
+  #[test]
+  fn test_ack_rejects_future_seq() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mb = DurableMailbox::open("proc-ack2", dir.path()).unwrap();
+    mb.append(&Message::Text("a".into())).unwrap();
+    // current_seq is 1, acking 5 should fail
+    assert!(mb.ack(5).is_err());
+  }
+
+  #[test]
+  fn test_ack_rejects_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mb = DurableMailbox::open("proc-ack3", dir.path()).unwrap();
+    mb.append(&Message::Text("a".into())).unwrap();
+    // last_acked is 0, acking 0 should fail (not >)
+    assert!(mb.ack(0).is_err());
   }
 
   #[test]

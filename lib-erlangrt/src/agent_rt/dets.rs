@@ -152,7 +152,9 @@ impl DetsTable {
   pub fn get(
     &self,
     key: &str,
+    caller: AgentPid,
   ) -> Result<Option<serde_json::Value>, AgentRtError> {
+    self.check_read(caller)?;
     Ok(self.cache.get(key).cloned())
   }
 
@@ -212,7 +214,9 @@ impl DetsTable {
   pub fn scan(
     &self,
     prefix: &str,
+    caller: AgentPid,
   ) -> Result<Vec<(String, serde_json::Value)>, AgentRtError> {
+    self.check_read(caller)?;
     Ok(
       self
         .cache
@@ -225,8 +229,10 @@ impl DetsTable {
 
   pub fn filter(
     &self,
+    caller: AgentPid,
     predicate: &dyn Fn(&str, &serde_json::Value) -> bool,
   ) -> Result<Vec<(String, serde_json::Value)>, AgentRtError> {
+    self.check_read(caller)?;
     Ok(
       self
         .cache
@@ -237,8 +243,9 @@ impl DetsTable {
     )
   }
 
-  pub fn count(&self) -> usize {
-    self.cache.len()
+  pub fn count(&self, caller: AgentPid) -> Result<usize, AgentRtError> {
+    self.check_read(caller)?;
+    Ok(self.cache.len())
   }
 
   pub fn compact(&mut self) -> Result<(), AgentRtError> {
@@ -287,6 +294,7 @@ impl DetsTable {
     // Atomic rename
     fs::rename(&dat_tmp, &dat_path)
       .map_err(|e| AgentRtError::Ets(format!("rename: {}", e)))?;
+    fsync_dir(&self.dir)?;
 
     // Truncate log
     let log_file = fs::OpenOptions::new()
@@ -339,6 +347,27 @@ impl DetsTable {
       }
     }
   }
+
+  fn check_read(&self, caller: AgentPid) -> Result<(), AgentRtError> {
+    match self.access {
+      AccessType::Public | AccessType::Protected => Ok(()),
+      AccessType::Private => {
+        if caller == self.owner {
+          Ok(())
+        } else {
+          Err(AgentRtError::Ets("read access denied".into()))
+        }
+      }
+    }
+  }
+}
+
+fn fsync_dir(dir: &Path) -> Result<(), AgentRtError> {
+  let d = std::fs::File::open(dir)
+    .map_err(|e| AgentRtError::Ets(format!("open dir for fsync: {}", e)))?;
+  d.sync_all()
+    .map_err(|e| AgentRtError::Ets(format!("fsync dir: {}", e)))?;
+  Ok(())
 }
 
 #[cfg(test)]
@@ -364,7 +393,7 @@ mod tests {
       .put("key1", &serde_json::json!("val1"), owner)
       .unwrap();
     assert_eq!(
-      table.get("key1").unwrap(),
+      table.get("key1", owner).unwrap(),
       Some(serde_json::json!("val1"))
     );
     table.close().unwrap();
@@ -381,7 +410,7 @@ mod tests {
     )
     .unwrap();
     assert_eq!(
-      table.get("key1").unwrap(),
+      table.get("key1", owner).unwrap(),
       Some(serde_json::json!("val1"))
     );
   }
@@ -414,7 +443,7 @@ mod tests {
       100,
     )
     .unwrap();
-    assert_eq!(table.get("k").unwrap(), None);
+    assert_eq!(table.get("k", owner).unwrap(), None);
   }
 
   #[test]
@@ -467,9 +496,9 @@ mod tests {
       3,
     )
     .unwrap();
-    assert_eq!(table.get("a").unwrap(), Some(serde_json::json!(1)));
-    assert_eq!(table.get("b").unwrap(), Some(serde_json::json!(2)));
-    assert_eq!(table.get("c").unwrap(), Some(serde_json::json!(3)));
+    assert_eq!(table.get("a", owner).unwrap(), Some(serde_json::json!(1)));
+    assert_eq!(table.get("b", owner).unwrap(), Some(serde_json::json!(2)));
+    assert_eq!(table.get("c", owner).unwrap(), Some(serde_json::json!(3)));
   }
 
   #[test]
@@ -504,8 +533,8 @@ mod tests {
       100,
     )
     .unwrap();
-    assert_eq!(table.get("a").unwrap(), Some(serde_json::json!(1)));
-    assert_eq!(table.get("b").unwrap(), Some(serde_json::json!(2)));
+    assert_eq!(table.get("a", owner).unwrap(), Some(serde_json::json!(1)));
+    assert_eq!(table.get("b", owner).unwrap(), Some(serde_json::json!(2)));
   }
 
   #[test]
@@ -532,17 +561,67 @@ mod tests {
       .put("task:1", &serde_json::json!({"done": true}), owner)
       .unwrap();
 
-    let users = table.scan("user:").unwrap();
+    let users = table.scan("user:", owner).unwrap();
     assert_eq!(users.len(), 2);
 
     let older = table
-      .filter(&|_k, v| {
+      .filter(owner, &|_k, v| {
         v.get("age")
           .and_then(|a| a.as_i64())
           .map_or(false, |a| a > 27)
       })
       .unwrap();
     assert_eq!(older.len(), 1);
+  }
+
+  #[test]
+  fn test_dets_private_read_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = AgentPid::new();
+    let other = AgentPid::new();
+    let mut table = DetsTable::open(
+      "test",
+      dir.path(),
+      AccessType::Private,
+      owner,
+      None,
+      100_000,
+      100,
+    )
+    .unwrap();
+    table.put("k", &serde_json::json!(1), owner).unwrap();
+    // Other cannot read
+    assert!(table.get("k", other).is_err());
+    assert!(table.scan("", other).is_err());
+    assert!(table.filter(other, &|_, _| true).is_err());
+    assert!(table.count(other).is_err());
+    // Owner can read
+    assert!(table.get("k", owner).is_ok());
+    assert!(table.scan("", owner).is_ok());
+    assert!(table.filter(owner, &|_, _| true).is_ok());
+    assert!(table.count(owner).is_ok());
+  }
+
+  #[test]
+  fn test_dets_protected_read_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = AgentPid::new();
+    let other = AgentPid::new();
+    let mut table = DetsTable::open(
+      "test",
+      dir.path(),
+      AccessType::Protected,
+      owner,
+      None,
+      100_000,
+      100,
+    )
+    .unwrap();
+    table.put("k", &serde_json::json!(1), owner).unwrap();
+    // Other can read (Protected)
+    assert!(table.get("k", other).is_ok());
+    // Other cannot write
+    assert!(table.put("k2", &serde_json::json!(2), other).is_err());
   }
 
   #[test]

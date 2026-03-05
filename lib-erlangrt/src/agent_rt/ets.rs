@@ -138,11 +138,13 @@ impl EtsRegistry {
         &self,
         tid: &TableId,
         key: &str,
+        caller: AgentPid,
     ) -> Result<Option<serde_json::Value>, AgentRtError> {
         let table = self
             .tables
             .get(tid)
             .ok_or_else(|| AgentRtError::Ets("table not found".into()))?;
+        table.check_read_access(caller)?;
         Ok(table.data.get(key).cloned())
     }
 
@@ -184,22 +186,29 @@ impl EtsRegistry {
         Ok(())
     }
 
-    pub fn count(&self, tid: &TableId) -> Result<usize, AgentRtError> {
+    pub fn count(
+        &self,
+        tid: &TableId,
+        caller: AgentPid,
+    ) -> Result<usize, AgentRtError> {
         let table = self
             .tables
             .get(tid)
             .ok_or_else(|| AgentRtError::Ets("table not found".into()))?;
+        table.check_read_access(caller)?;
         Ok(table.data.len())
     }
 
     pub fn keys(
         &self,
         tid: &TableId,
+        caller: AgentPid,
     ) -> Result<Vec<String>, AgentRtError> {
         let table = self
             .tables
             .get(tid)
             .ok_or_else(|| AgentRtError::Ets("table not found".into()))?;
+        table.check_read_access(caller)?;
         Ok(table.data.keys().cloned().collect())
     }
 
@@ -207,10 +216,12 @@ impl EtsRegistry {
         &self,
         tid: &TableId,
         prefix: &str,
+        caller: AgentPid,
     ) -> Result<Vec<(String, serde_json::Value)>, AgentRtError> {
         let table = self.tables.get(tid).ok_or_else(|| {
             AgentRtError::Ets("table not found".into())
         })?;
+        table.check_read_access(caller)?;
         Ok(table
             .data
             .iter()
@@ -222,30 +233,19 @@ impl EtsRegistry {
     pub fn filter(
         &self,
         tid: &TableId,
+        caller: AgentPid,
         predicate: &dyn Fn(&str, &serde_json::Value) -> bool,
     ) -> Result<Vec<(String, serde_json::Value)>, AgentRtError> {
         let table = self.tables.get(tid).ok_or_else(|| {
             AgentRtError::Ets("table not found".into())
         })?;
+        table.check_read_access(caller)?;
         Ok(table
             .data
             .iter()
             .filter(|(k, v)| predicate(k.as_str(), v))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
-    }
-
-    pub fn get_checked(
-        &self,
-        tid: &TableId,
-        key: &str,
-        caller: AgentPid,
-    ) -> Result<Option<serde_json::Value>, AgentRtError> {
-        let table = self.tables.get(tid).ok_or_else(|| {
-            AgentRtError::Ets("table not found".into())
-        })?;
-        table.check_read_access(caller)?;
-        Ok(table.data.get(key).cloned())
     }
 
     pub fn handle_process_death(&mut self, pid: AgentPid) {
@@ -288,7 +288,7 @@ mod tests {
             .unwrap();
         reg.put(&tid, "key1", &serde_json::json!("value1"), owner)
             .unwrap();
-        let val = reg.get(&tid, "key1").unwrap();
+        let val = reg.get(&tid, "key1", owner).unwrap();
         assert_eq!(val, Some(serde_json::json!("value1")));
     }
 
@@ -301,7 +301,7 @@ mod tests {
             .unwrap();
         reg.put(&tid, "k", &serde_json::json!(42), owner).unwrap();
         reg.delete_key(&tid, "k", owner).unwrap();
-        assert_eq!(reg.get(&tid, "k").unwrap(), None);
+        assert_eq!(reg.get(&tid, "k", owner).unwrap(), None);
     }
 
     #[test]
@@ -313,8 +313,8 @@ mod tests {
             .unwrap();
         reg.put(&tid, "a", &serde_json::json!(1), owner).unwrap();
         reg.put(&tid, "b", &serde_json::json!(2), owner).unwrap();
-        assert_eq!(reg.count(&tid).unwrap(), 2);
-        let mut keys = reg.keys(&tid).unwrap();
+        assert_eq!(reg.count(&tid, owner).unwrap(), 2);
+        let mut keys = reg.keys(&tid, owner).unwrap();
         keys.sort();
         assert_eq!(keys, vec!["a", "b"]);
     }
@@ -327,7 +327,7 @@ mod tests {
             .create("t", AccessType::Public, owner, None)
             .unwrap();
         reg.destroy(&tid, owner).unwrap();
-        assert!(reg.get(&tid, "k").is_err());
+        assert!(reg.get(&tid, "k", owner).is_err());
     }
 
     #[test]
@@ -374,7 +374,7 @@ mod tests {
         reg.put(&tid, "user:1", &serde_json::json!({"name": "Alice"}), owner).unwrap();
         reg.put(&tid, "user:2", &serde_json::json!({"name": "Bob"}), owner).unwrap();
         reg.put(&tid, "task:1", &serde_json::json!({"title": "Do"}), owner).unwrap();
-        let results = reg.scan(&tid, "user:").unwrap();
+        let results = reg.scan(&tid, "user:", owner).unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -386,7 +386,7 @@ mod tests {
         reg.put(&tid, "a", &serde_json::json!(1), owner).unwrap();
         reg.put(&tid, "b", &serde_json::json!(2), owner).unwrap();
         reg.put(&tid, "c", &serde_json::json!(3), owner).unwrap();
-        let results = reg.filter(&tid, &|_k, v| {
+        let results = reg.filter(&tid, owner, &|_k, v| {
             v.as_i64().map_or(false, |n| n > 1)
         }).unwrap();
         assert_eq!(results.len(), 2);
@@ -399,8 +399,8 @@ mod tests {
         let other = AgentPid::new();
         let tid = reg.create("t", AccessType::Protected, owner, None).unwrap();
         reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
-        // Other can read
-        assert!(reg.get(&tid, "k").is_ok());
+        // Other can read (Protected allows reads from non-owners)
+        assert!(reg.get(&tid, "k", other).is_ok());
         // Other cannot write
         assert!(reg.put(&tid, "k2", &serde_json::json!(2), other).is_err());
     }
@@ -412,8 +412,28 @@ mod tests {
         let other = AgentPid::new();
         let tid = reg.create("t", AccessType::Private, owner, None).unwrap();
         reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
-        assert!(reg.get_checked(&tid, "k", other).is_err());
-        assert!(reg.get_checked(&tid, "k", owner).is_ok());
+        // Private: other cannot read
+        assert!(reg.get(&tid, "k", other).is_err());
+        // Private: owner can read
+        assert!(reg.get(&tid, "k", owner).is_ok());
+    }
+
+    #[test]
+    fn test_private_blocks_count_keys_scan_filter() {
+        let mut reg = EtsRegistry::new(256, 100_000);
+        let owner = AgentPid::new();
+        let other = AgentPid::new();
+        let tid = reg.create("t", AccessType::Private, owner, None).unwrap();
+        reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
+        assert!(reg.count(&tid, other).is_err());
+        assert!(reg.keys(&tid, other).is_err());
+        assert!(reg.scan(&tid, "", other).is_err());
+        assert!(reg.filter(&tid, other, &|_, _| true).is_err());
+        // Owner succeeds
+        assert!(reg.count(&tid, owner).is_ok());
+        assert!(reg.keys(&tid, owner).is_ok());
+        assert!(reg.scan(&tid, "", owner).is_ok());
+        assert!(reg.filter(&tid, owner, &|_, _| true).is_ok());
     }
 
     #[test]
@@ -423,7 +443,7 @@ mod tests {
         let tid = reg.create("t", AccessType::Public, owner, None).unwrap();
         reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
         reg.handle_process_death(owner);
-        assert!(reg.get(&tid, "k").is_err()); // table gone
+        assert!(reg.get(&tid, "k", owner).is_err()); // table gone
     }
 
     #[test]
@@ -435,7 +455,7 @@ mod tests {
         reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
         reg.handle_process_death(owner);
         // Table still exists, heir is now owner
-        let val = reg.get(&tid, "k").unwrap();
+        let val = reg.get(&tid, "k", heir).unwrap();
         assert_eq!(val, Some(serde_json::json!(1)));
         // Heir can destroy
         assert!(reg.destroy(&tid, heir).is_ok());

@@ -14,6 +14,15 @@ const DEFAULT_REDUCTIONS: u32 = 200;
 const NORMAL_ADVANTAGE: usize = 8;
 type ExitHandler = Box<dyn FnMut(&mut AgentScheduler, AgentPid, Reason)>;
 
+/// Hook called before each message delivery. Implementations can
+/// persist messages to a WAL (durable mailbox), trigger hot-code
+/// reload, or coordinate release upgrades.
+pub trait MessageHook: Send {
+    /// Called before a message is delivered to a process mailbox.
+    /// Return Ok(()) to proceed with delivery, or Err to reject.
+    fn on_send(&mut self, to: AgentPid, msg: &Message) -> Result<(), String>;
+}
+
 /// Reduction-counting preemptive scheduler with
 /// three priority queues (High > Normal > Low) and
 /// optional Tokio bridge for async I/O.
@@ -30,6 +39,7 @@ pub struct AgentScheduler {
   dead_letters: DeadLetterQueue,
   metrics: Arc<RuntimeMetrics>,
   exit_handlers: Vec<ExitHandler>,
+  message_hook: Option<Box<dyn MessageHook>>,
 }
 
 impl AgentScheduler {
@@ -47,6 +57,7 @@ impl AgentScheduler {
       dead_letters: DeadLetterQueue::new(256),
       metrics: Arc::new(RuntimeMetrics::new()),
       exit_handlers: Vec::new(),
+      message_hook: None,
     }
   }
 
@@ -81,6 +92,17 @@ impl AgentScheduler {
       .collect();
     snapshots.sort_by_key(|s| s.pid);
     snapshots
+  }
+
+  /// Set a message hook that is called before every message delivery.
+  /// Use this to wire durable mailbox WAL, hot-code reload triggers,
+  /// or release coordination into the scheduler's message path.
+  pub fn set_message_hook(&mut self, hook: Box<dyn MessageHook>) {
+    self.message_hook = Some(hook);
+  }
+
+  pub fn clear_message_hook(&mut self) {
+    self.message_hook = None;
   }
 
   pub fn set_bridge(&mut self, bridge: BridgeHandle) {
@@ -261,8 +283,13 @@ impl AgentScheduler {
   }
 
   /// Deliver a message to a process. If the process was
-  /// Waiting, wake it and re-enqueue it.
+  /// Waiting, wake it and re-enqueue it. Calls the message
+  /// hook (if set) before delivery for WAL/durable writes.
   pub fn send(&mut self, to: AgentPid, msg: Message) -> Result<(), String> {
+    // Invoke message hook before delivery
+    if let Some(ref mut hook) = self.message_hook {
+      hook.on_send(to, &msg)?;
+    }
     let msg_kind = message_kind(&msg);
     let was_waiting = if let Some(proc) = self.registry.lookup_mut(&to) {
       let was = proc.status == ProcessStatus::Waiting;

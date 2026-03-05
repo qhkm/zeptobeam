@@ -8,6 +8,31 @@ use crate::agent_rt::error::AgentRtError;
 const MAX_SCHEMA_VERSION: u32 = 1;
 const IN_PROGRESS_FILENAME: &str = ".in_progress.json";
 
+/// Resolve a dotted key path (e.g. "runtime.worker_count") into a nested
+/// JSON value. Falls back to a flat key lookup if no dots are present.
+fn resolve_dotted_key<'a>(
+    config: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    let parts: Vec<&str> = key.split('.').collect();
+    let mut current = config;
+    for part in &parts {
+        match current.get(*part) {
+            Some(v) => current = v,
+            None => return None,
+        }
+    }
+    Some(current)
+}
+
+fn fsync_dir(dir: &Path) -> Result<(), AgentRtError> {
+    let d = std::fs::File::open(dir)
+        .map_err(|e| AgentRtError::Release(format!("open dir for fsync: {}", e)))?;
+    d.sync_all()
+        .map_err(|e| AgentRtError::Release(format!("fsync dir: {}", e)))?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseManifest {
     pub schema_version: u32,
@@ -95,8 +120,7 @@ impl ReleasePlan {
 
         // Config changes
         for (key, new_value) in &manifest.config_changes {
-            let old_value = current_config
-                .get(key)
+            let old_value = resolve_dotted_key(current_config, key)
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             steps.push(ReleaseStep::ApplyConfig {
@@ -108,6 +132,13 @@ impl ReleasePlan {
 
         Self { steps }
     }
+}
+
+/// Trait for executing release steps. Callers implement this to
+/// wire behavior upgrades and config changes into the runtime.
+pub trait StepHandler {
+    fn apply_step(&mut self, step: &ReleaseStep) -> Result<(), AgentRtError>;
+    fn rollback_step(&mut self, step: &ReleaseStep) -> Result<(), AgentRtError>;
 }
 
 pub struct ReleaseManager {
@@ -123,6 +154,60 @@ impl ReleaseManager {
             history: Vec::new(),
             max_history,
         }
+    }
+
+    /// Execute a release plan transactionally. If any step fails,
+    /// all previously completed steps are rolled back in reverse order.
+    pub fn apply(
+        &mut self,
+        manifest: ReleaseManifest,
+        plan: &ReleasePlan,
+        handler: &mut dyn StepHandler,
+    ) -> Result<(), AgentRtError> {
+        let mut completed: Vec<&ReleaseStep> = Vec::new();
+
+        for step in &plan.steps {
+            match handler.apply_step(step) {
+                Ok(()) => {
+                    completed.push(step);
+                }
+                Err(e) => {
+                    // Rollback in reverse order
+                    for done_step in completed.iter().rev() {
+                        if let Err(rb_err) = handler.rollback_step(done_step) {
+                            return Err(AgentRtError::Release(format!(
+                                "apply failed: {}; rollback also failed: {}",
+                                e, rb_err
+                            )));
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        self.record_apply(manifest);
+        Ok(())
+    }
+
+    /// Roll back the current release by reversing all steps using the
+    /// provided plan. On success, removes the current release from
+    /// history tracking.
+    pub fn rollback(
+        &mut self,
+        plan: &ReleasePlan,
+        handler: &mut dyn StepHandler,
+    ) -> Result<(), AgentRtError> {
+        if self.current.is_none() {
+            return Err(AgentRtError::Release("no current release to rollback".into()));
+        }
+        // Rollback steps in reverse order
+        for step in plan.steps.iter().rev() {
+            handler.rollback_step(step)?;
+        }
+        // Remove current, restore previous from history
+        self.current = self.history.pop();
+        Ok(())
     }
 
     pub fn record_apply(&mut self, manifest: ReleaseManifest) {
@@ -164,6 +249,7 @@ pub fn write_in_progress(
     drop(f);
     std::fs::rename(&tmp, &target)
         .map_err(|e| AgentRtError::Release(format!("rename: {}", e)))?;
+    fsync_dir(dir)?;
     Ok(())
 }
 
@@ -271,6 +357,52 @@ mod tests {
     }
 
     #[test]
+    fn test_dotted_key_resolution() {
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            version: "1.0.0".into(),
+            previous: None,
+            behaviors: vec![],
+            config_changes: {
+                let mut m = HashMap::new();
+                m.insert("runtime.worker_count".into(), serde_json::json!(16));
+                m
+            },
+        };
+        let current_config = serde_json::json!({"runtime": {"worker_count": 4}});
+        let plan = ReleasePlan::from_manifest(&manifest, &current_config);
+        match &plan.steps[0] {
+            ReleaseStep::ApplyConfig { old_value, .. } => {
+                assert_eq!(old_value, &serde_json::json!(4));
+            }
+            _ => panic!("expected ApplyConfig"),
+        }
+    }
+
+    #[test]
+    fn test_dotted_key_missing_returns_null() {
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            version: "1.0.0".into(),
+            previous: None,
+            behaviors: vec![],
+            config_changes: {
+                let mut m = HashMap::new();
+                m.insert("runtime.missing_key".into(), serde_json::json!(1));
+                m
+            },
+        };
+        let current_config = serde_json::json!({"runtime": {"worker_count": 4}});
+        let plan = ReleasePlan::from_manifest(&manifest, &current_config);
+        match &plan.steps[0] {
+            ReleaseStep::ApplyConfig { old_value, .. } => {
+                assert_eq!(old_value, &serde_json::Value::Null);
+            }
+            _ => panic!("expected ApplyConfig"),
+        }
+    }
+
+    #[test]
     fn test_in_progress_serialization() {
         let plan = ReleasePlan {
             steps: vec![ReleaseStep::UpgradeBehavior {
@@ -343,6 +475,129 @@ mod tests {
 
         let loaded = read_in_progress(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.completed_steps, 1);
+    }
+
+    struct TestHandler {
+        applied: Vec<String>,
+        fail_on: Option<String>,
+    }
+
+    impl TestHandler {
+        fn new() -> Self {
+            Self { applied: Vec::new(), fail_on: None }
+        }
+        fn failing_on(step_key: &str) -> Self {
+            Self { applied: Vec::new(), fail_on: Some(step_key.to_string()) }
+        }
+    }
+
+    impl StepHandler for TestHandler {
+        fn apply_step(&mut self, step: &ReleaseStep) -> Result<(), AgentRtError> {
+            let key = match step {
+                ReleaseStep::UpgradeBehavior { name, .. } => name.clone(),
+                ReleaseStep::ApplyConfig { key, .. } => key.clone(),
+            };
+            if self.fail_on.as_deref() == Some(&key) {
+                return Err(AgentRtError::Release(format!("fail on {}", key)));
+            }
+            self.applied.push(key);
+            Ok(())
+        }
+        fn rollback_step(&mut self, step: &ReleaseStep) -> Result<(), AgentRtError> {
+            let key = match step {
+                ReleaseStep::UpgradeBehavior { name, .. } => name.clone(),
+                ReleaseStep::ApplyConfig { key, .. } => key.clone(),
+            };
+            self.applied.retain(|k| k != &key);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_apply_success() {
+        let mut mgr = ReleaseManager::new(5);
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            version: "1.0.0".into(),
+            previous: None,
+            behaviors: vec![BehaviorUpgrade {
+                name: "worker".into(),
+                version: "v2".into(),
+                upgrade_from: "v1".into(),
+                extra: serde_json::json!({}),
+            }],
+            config_changes: {
+                let mut m = HashMap::new();
+                m.insert("key".into(), serde_json::json!(42));
+                m
+            },
+        };
+        let plan = ReleasePlan::from_manifest(&manifest, &serde_json::json!({}));
+        let mut handler = TestHandler::new();
+        mgr.apply(manifest, &plan, &mut handler).unwrap();
+        assert_eq!(handler.applied.len(), 2);
+        assert_eq!(mgr.current().unwrap().version, "1.0.0");
+    }
+
+    #[test]
+    fn test_apply_rollback_on_failure() {
+        let mut mgr = ReleaseManager::new(5);
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            version: "1.0.0".into(),
+            previous: None,
+            behaviors: vec![BehaviorUpgrade {
+                name: "worker".into(),
+                version: "v2".into(),
+                upgrade_from: "v1".into(),
+                extra: serde_json::json!({}),
+            }],
+            config_changes: {
+                let mut m = HashMap::new();
+                m.insert("fail_key".into(), serde_json::json!(1));
+                m
+            },
+        };
+        let plan = ReleasePlan::from_manifest(&manifest, &serde_json::json!({}));
+        let mut handler = TestHandler::failing_on("fail_key");
+        let result = mgr.apply(manifest, &plan, &mut handler);
+        assert!(result.is_err());
+        // Behavior step was rolled back
+        assert!(handler.applied.is_empty());
+        // No current release was set
+        assert!(mgr.current().is_none());
+    }
+
+    #[test]
+    fn test_rollback_current_release() {
+        let mut mgr = ReleaseManager::new(5);
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            version: "1.0.0".into(),
+            previous: None,
+            behaviors: vec![],
+            config_changes: HashMap::new(),
+        };
+        let plan = ReleasePlan { steps: vec![
+            ReleaseStep::ApplyConfig {
+                key: "k".into(),
+                old_value: serde_json::json!(1),
+                new_value: serde_json::json!(2),
+            },
+        ]};
+        let mut handler = TestHandler::new();
+        mgr.apply(manifest, &plan, &mut handler).unwrap();
+        assert!(mgr.current().is_some());
+        mgr.rollback(&plan, &mut handler).unwrap();
+        assert!(mgr.current().is_none());
+    }
+
+    #[test]
+    fn test_rollback_without_current_fails() {
+        let mut mgr = ReleaseManager::new(5);
+        let plan = ReleasePlan { steps: vec![] };
+        let mut handler = TestHandler::new();
+        assert!(mgr.rollback(&plan, &mut handler).is_err());
     }
 
     #[test]
