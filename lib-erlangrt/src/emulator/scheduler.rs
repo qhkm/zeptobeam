@@ -290,13 +290,17 @@ impl Scheduler {
       return ScheduleHint::TakeAnotherProcess;
     }
 
-    println!("Catching {}:{}", p_error.0, p_error.1);
-    println!("{}", proc.context);
-    proc.get_heap().stack_dump();
+    if cfg!(feature = "trace_opcode_execution") {
+      println!("Catching {}:{}", p_error.0, p_error.1);
+      println!("{}", proc.context);
+      proc.get_heap().stack_dump();
+    }
 
     match unsafe { proc.get_heap().unroll_stack_until_catch() } {
       Some(next_catch) => {
-        println!("Catch found: {:p}", next_catch.loc);
+        if cfg!(feature = "trace_opcode_execution") {
+          println!("Catch found: {:p}", next_catch.loc);
+        }
         proc.context.set_x(0, Term::non_value());
         proc.context.set_x(1, p_error.0.to_atom());
         proc.context.set_x(2, p_error.1);
@@ -310,7 +314,9 @@ impl Scheduler {
       }
 
       None => {
-        println!("Catch not found, terminating...");
+        if cfg!(feature = "trace_opcode_execution") {
+          println!("Catch not found, terminating...");
+        }
         if proc.process_flags.get(process_flags::TRAP_EXIT) {
           panic!("todo: on terminate implement trap_exit");
         }

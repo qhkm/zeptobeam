@@ -31,6 +31,26 @@ fn main() {
   args.populate_with(in_args.iter());
   println!("{args:?}");
 
+  // Parse -m module -f function from command line (default: test2:test)
+  let mut module = "test2".to_string();
+  let mut function = "test".to_string();
+  let mut iter = in_args.iter().skip(1);
+  while let Some(arg) = iter.next() {
+    match arg.as_str() {
+      "-m" => {
+        if let Some(val) = iter.next() {
+          module = val.clone();
+        }
+      }
+      "-f" => {
+        if let Some(val) = iter.next() {
+          function = val.clone();
+        }
+      }
+      _ => {}
+    }
+  }
+
   // TODO: For windows, support ERL_CONSOLE_MODE, with ERL_EMULATOR_DLL from erlexec.c
   // TODO: For non-Windows, support CERL_DETACHED_PROG?
 
@@ -38,7 +58,7 @@ fn main() {
   args.search_path = default_search_path();
 
   // Get going now
-  if let Err(err) = run_emulator(&mut args) {
+  if let Err(err) = run_emulator(&mut args, &module, &function) {
     eprintln!("erlexec: {:?}", err);
     process::exit(1);
   }

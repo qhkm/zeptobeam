@@ -10,7 +10,6 @@ use crate::{
     Term,
   },
 };
-use core::ptr;
 
 /// Another type of binary. Refers to a slice in another binary.
 #[repr(C)]

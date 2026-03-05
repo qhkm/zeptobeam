@@ -39,7 +39,9 @@ impl OpcodeBsStartMatch3 {
     live: usize,
     dst: Term,
   ) -> RtResult<DispatchResult> {
-    println!("bs_start_match3 {fail}, context={match_context}, live={live}, dst={dst}");
+    if cfg!(feature = "trace_opcode_execution") {
+      println!("bs_start_match3 {fail}, context={match_context}, live={live}, dst={dst}");
+    }
 
     // Must be either a binary or a binary_match_context
     if !match_context.is_boxed() {
@@ -150,7 +152,9 @@ impl OpcodeBsStartMatch4 {
     live: usize,
     dst: Term,
   ) -> RtResult<DispatchResult> {
-    println!("bs_start_match4 {fail}, context={match_context}, live={live}, dst={dst}");
+    if cfg!(feature = "trace_opcode_execution") {
+      println!("bs_start_match4 {fail}, context={match_context}, live={live}, dst={dst}");
+    }
 
     // Must be either a binary or a binary_match_context
     if !match_context.is_boxed() {

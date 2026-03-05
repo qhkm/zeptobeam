@@ -63,12 +63,26 @@ define_opcode!(_vm, ctx, curr_p,
 impl OpcodePutTuple2 {
   #[inline]
   pub fn put_tuple2(
-    _ctx: &mut RuntimeContext,
-    _curr_p: &mut Process,
-    _dst: Term,
-    _initializer: Term,
+    ctx: &mut RuntimeContext,
+    curr_p: &mut Process,
+    dst: Term,
+    initializer: Term,
   ) -> RtResult<DispatchResult> {
-    unimplemented!("put_tuple2")
+    debug_assert!(initializer.is_tuple());
+    let init_ptr = initializer.get_tuple_ptr();
+    let arity = unsafe { (*init_ptr).get_arity() };
+    let hp = curr_p.get_heap_mut();
+    let tuple_p = boxed::Tuple::create_into(hp, arity)?;
+
+    for i in 0..arity {
+      let raw_val = unsafe { (*init_ptr).get_element(i) };
+      // Each element might be a register reference that needs loading
+      let val = ctx.load(raw_val, hp);
+      unsafe { (*tuple_p).set_element(i, val) };
+    }
+
+    ctx.store_value(Term::make_boxed(tuple_p), dst, hp)?;
+    Ok(DispatchResult::Normal)
   }
 }
 

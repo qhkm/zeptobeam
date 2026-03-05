@@ -1,24 +1,57 @@
-.PHONY: build codegen ct submodule otp
+.PHONY: build codegen ct submodule otp test test-rust test-beam test-all
 
-build: otp codegen
+build: codegen
 	cargo +nightly build
 
-build_tests: submodule
+build_tests:
 	cd priv && $(MAKE)
 
 codegen:
 	cd lib-erlangrt && $(MAKE) codegen
 
 ct: build
-	mkdir tmp; cd tmp && ../target/debug/ct_run 1 2 3 -erl_args 4 5 6
+	mkdir -p tmp; cd tmp && ../target/debug/ct_run 1 2 3 -erl_args 4 5 6
 
+# Run default module (test2:test)
 run: build build_tests
-	cargo +nightly run --bin erlexec
+	set -a && . ./.env && set +a && cargo +nightly run --bin erlexec
 
+# Run a specific module:  make run-mod M=smoke F=test
+run-mod: build build_tests
+	set -a && . ./.env && set +a && cargo +nightly run --bin erlexec -- -m $(M) -f $(or $(F),test)
+
+# Rust unit/integration tests (423 tests)
+test-rust:
+	cargo +nightly test -p erlangrt --lib
+
+# BEAM integration tests — run each test module through the emulator
+test-beam: build build_tests
+	@set -a && . ./.env && set +a && \
+	failed=0; passed=0; \
+	for mod in smoke test2 test_bs_nostdlib; do \
+		printf "  %-25s" "$$mod:test/0..."; \
+		output=$$(cargo +nightly run --bin erlexec -- -m $$mod -f test 2>&1); \
+		if echo "$$output" | grep -q "reason=<exit>:normal"; then \
+			echo "OK"; \
+			passed=$$((passed + 1)); \
+		else \
+			echo "FAIL"; \
+			echo "$$output" | grep -E "reason=|error|panic" | head -3; \
+			failed=$$((failed + 1)); \
+		fi; \
+	done; \
+	echo ""; \
+	echo "BEAM tests: $$passed passed, $$failed failed"; \
+	test $$failed -eq 0
+
+# Run everything: Rust tests + BEAM integration tests
+test-all: test-rust test-beam
+
+# Alias for backward compat
 test: build build_tests
-	RUST_BACKTRACE=1 cargo +nightly run --bin ct_run
+	set -a && . ./.env && set +a && RUST_BACKTRACE=1 cargo +nightly run --bin ct_run
 
-# Graphical user inteface for GDB - Gede
+# Graphical user interface for GDB - Gede
 .PHONY: test-gede
 test-gede: build
 	RUST_BACKTRACE=1 gede --args target/debug/ct_run

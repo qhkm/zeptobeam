@@ -23,7 +23,9 @@ impl LoaderState {
     for rf in &self.beam_file.lambdas {
       let fun_name = self.atom_from_loadtime_index(rf.fun_atom_i);
       let mfa = ModFunArity::new(self.module_name(), fun_name, rf.arity);
-      println!("{}stage2_fill_lambdas mfa={}", module(), mfa);
+      if cfg!(feature = "trace_beam_loader") {
+        println!("{}stage2_fill_lambdas mfa={}", module(), mfa);
+      }
       self.lambdas.push(FunEntry::new(mfa, rf.nfrozen))
     }
   }

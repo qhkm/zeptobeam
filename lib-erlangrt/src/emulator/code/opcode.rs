@@ -1,9 +1,10 @@
 //! Opcode enum wraps the opcode from opcode table. Special conversion rules
 //! may be used when running in debug mode for extra safety checks, in release
 //! no checks are done and simple opcode is stored.
+use crate::defs::Word;
+#[cfg(debug_assertions)]
 use crate::{
   beam::gen_op,
-  defs::Word,
   term::{SpecialTag, Term},
 };
 

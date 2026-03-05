@@ -19,7 +19,9 @@ impl TGc for CopyingGc {
     mut walker: HeapWalker,
     mut roots: Box<dyn TRootIterator>,
   ) -> RtResult<()> {
-    println!("Copying GC");
+    if cfg!(feature = "trace_opcode_execution") {
+      println!("Copying GC");
+    }
 
     roots.roots_begin();
     loop {
@@ -27,7 +29,9 @@ impl TGc for CopyingGc {
       if r.is_null() {
         break;
       }
-      println!("root: {:?}", unsafe { *r });
+      if cfg!(feature = "trace_opcode_execution") {
+        println!("root: {:?}", unsafe { *r });
+      }
     }
 
     loop {
@@ -35,8 +39,10 @@ impl TGc for CopyingGc {
       if p.is_null() {
         break;
       }
-      let pval = unsafe { Term::from_raw(*p) };
-      println!("Heapwalker: {pval}");
+      if cfg!(feature = "trace_opcode_execution") {
+        let pval = unsafe { Term::from_raw(*p) };
+        println!("Heapwalker: {pval}");
+      }
     }
 
     unimplemented!("Copying GC: Done")

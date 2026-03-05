@@ -212,7 +212,9 @@ fn first_exists_in_search_path(
     if p.exists() {
       return Some(p.to_path_buf());
     }
-    println!("Tried {full_path}: not found");
+    if cfg!(feature = "trace_beam_loader") {
+      println!("Tried {full_path}: not found");
+    }
   }
   None
 }

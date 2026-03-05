@@ -55,7 +55,10 @@ impl BoxHeader {
   }
 
   #[cfg(not(debug_assertions))]
-  pub const fn create_bare(header_word: usize, trait_vtab: *mut ()) -> Self {
+  pub const fn create_bare(
+    header_word: usize,
+    trait_vtab: DynMetadata<dyn TBoxed>,
+  ) -> Self {
     BoxHeader {
       header_word,
       trait_vtab,

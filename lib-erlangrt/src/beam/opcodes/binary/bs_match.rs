@@ -68,6 +68,44 @@ impl OpcodeBsMatch {
     Some(n as u64)
   }
 
+  /// Read `total_bits` from the match state at the current offset as a
+  /// big-endian unsigned integer and return it as a Term small integer.
+  #[inline]
+  unsafe fn extract_integer(
+    rt_ctx: &mut RuntimeContext,
+    proc: &mut Process,
+    match_state: *mut BinaryMatchState,
+    _live: usize,
+    _flags: Term,
+    bits: usize,
+    unit: usize,
+    dst: Term,
+  ) -> RtResult<bool> {
+    let total_bits = bits * unit;
+    if !Self::ensure_remaining(match_state, BitSize::with_bits(total_bits)) {
+      return Ok(false);
+    }
+
+    let src_bin = (*match_state).get_src_binary();
+    let offset = (*match_state).get_offset();
+    let reader = (*src_bin).get_bit_reader().add_bit_offset(offset);
+
+    // Read bits into a u64, big-endian
+    let mut value: u64 = 0;
+    for i in 0..total_bits {
+      let byte_val = reader.read(i / 8);
+      let bit = (byte_val >> (7 - (i % 8))) & 1;
+      value = (value << 1) | (bit as u64);
+    }
+
+    (*match_state).increase_offset(BitSize::with_bits(total_bits));
+
+    // TODO: handle signed flag, bignums for > 60 bits
+    let result = Term::make_small_unsigned(value as usize);
+    rt_ctx.store_value(result, dst, proc.get_heap_mut())?;
+    Ok(true)
+  }
+
   #[inline]
   unsafe fn match_bits_eq(
     match_state: *mut BinaryMatchState,
@@ -196,6 +234,24 @@ impl OpcodeBsMatch {
       }
       (*match_state).increase_offset(BitSize::with_bits(bits));
       return Ok(true);
+    }
+
+    if op == atom::from_str("integer") && arity == 6 {
+      let live = match Self::to_usize(t.get_element(1)) {
+        Some(v) => v,
+        None => return Ok(false),
+      };
+      let flags = t.get_element(2);
+      let bits = match Self::to_usize(t.get_element(3)) {
+        Some(v) => v,
+        None => return Ok(false),
+      };
+      let unit = match Self::to_usize(t.get_element(4)) {
+        Some(v) => v,
+        None => return Ok(false),
+      };
+      let dst = t.get_element(5);
+      return Self::extract_integer(rt_ctx, proc, match_state, live, flags, bits, unit, dst);
     }
 
     if op == atom::from_str("get_tail") && arity == 4 {
@@ -341,6 +397,32 @@ impl OpcodeBsMatch {
         }
         (*match_state).increase_offset(BitSize::with_bits(bits));
         i += 2;
+        continue;
+      }
+
+      if op == atom::from_str("integer") {
+        // Format: integer, Live, Flags, Bits, Unit, Dst
+        if i + 5 >= terms.len() {
+          return Ok(false);
+        }
+        let live = match Self::to_usize(terms[i + 1]) {
+          Some(v) => v,
+          None => return Ok(false),
+        };
+        let flags = terms[i + 2];
+        let bits = match Self::to_usize(terms[i + 3]) {
+          Some(v) => v,
+          None => return Ok(false),
+        };
+        let unit = match Self::to_usize(terms[i + 4]) {
+          Some(v) => v,
+          None => return Ok(false),
+        };
+        let dst = terms[i + 5];
+        if !Self::extract_integer(rt_ctx, proc, match_state, live, flags, bits, unit, dst)? {
+          return Ok(false);
+        }
+        i += 6;
         continue;
       }
 

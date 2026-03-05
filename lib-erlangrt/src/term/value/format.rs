@@ -150,6 +150,7 @@ fn format_special(term: Term, f: &mut fmt::Formatter) -> fmt::Result {
         panic!("Unknown special reg tag {:?}", r_tag)
       }
     }
+    #[cfg(debug_assertions)]
     SpecialTag::OPCODE => return write!(f, "Opcode({})", term.get_opcode_value()),
     SpecialTag::CATCH => return write!(f, "Catch({:p})", term.get_catch_ptr()),
     SpecialTag::LOAD_TIME => {

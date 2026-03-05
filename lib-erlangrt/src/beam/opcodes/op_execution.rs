@@ -271,7 +271,7 @@ impl OpcodeFuncInfo {
     f: Term,
     arity: usize,
   ) -> RtResult<DispatchResult> {
-    if cfg!(debug_assertions) {
+    if cfg!(feature = "trace_calls") {
       println!("{}function_clause {}:{}/{}", module(), m, f, arity);
       proc.context.dump_registers(arity);
     }

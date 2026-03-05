@@ -3,14 +3,18 @@ use crate::{
   emulator::{heap::THeapOwner, process::Process},
   fail,
   fail::RtResult,
-  term::{boxed, Term},
+  term::{
+    boxed::{self, binary::match_state::BinaryMatchState, boxtype},
+    Term,
+  },
 };
 
 // Return byte size of a binary, rounded up.
+// OTP 28 may pass a BinaryMatchState (match context) — return remaining bytes.
 define_nativefun!(_vm, _proc, args,
   name: "erlang:byte_size/1", struct_name: NfErlangByteSize1, arity: 1,
   invoke: { byte_size_1(t) },
-  args: binary(t),
+  args: term(t),
 );
 
 #[inline]
@@ -19,22 +23,45 @@ fn byte_size_1(t: Term) -> RtResult<Term> {
     return Ok(Term::make_small_unsigned(0));
   }
 
+  if t.is_boxed_of_type(boxtype::BOXTYPETAG_BINARY_MATCH_STATE) {
+    let ms_ptr = t.get_box_ptr::<BinaryMatchState>();
+    let remaining = unsafe { (*ms_ptr).get_bits_remaining() };
+    return Ok(Term::make_small_unsigned(
+      remaining.get_byte_size_rounded_up().bytes(),
+    ));
+  }
+
+  if !t.is_binary() {
+    return fail::create::badarg();
+  }
+
   let bin_ptr = unsafe { boxed::Binary::get_trait_from_term(t) };
   let bin_size = unsafe { (*bin_ptr).get_byte_size() };
   Ok(Term::make_small_unsigned(bin_size.bytes()))
 }
 
 // Return bit size of a binary.
+// OTP 28 may pass a BinaryMatchState (match context) — return remaining bits.
 define_nativefun!(_vm, _proc, args,
   name: "erlang:bit_size/1", struct_name: NfErlangBitSize1, arity: 1,
   invoke: { bit_size_1(t) },
-  args: binary(t),
+  args: term(t),
 );
 
 #[inline]
 fn bit_size_1(t: Term) -> RtResult<Term> {
   if t == Term::empty_binary() {
     return Ok(Term::make_small_unsigned(0));
+  }
+
+  if t.is_boxed_of_type(boxtype::BOXTYPETAG_BINARY_MATCH_STATE) {
+    let ms_ptr = t.get_box_ptr::<BinaryMatchState>();
+    let remaining = unsafe { (*ms_ptr).get_bits_remaining() };
+    return Ok(Term::make_small_unsigned(remaining.bits));
+  }
+
+  if !t.is_binary() {
+    return fail::create::badarg();
   }
 
   let bin_ptr = unsafe { boxed::Binary::get_trait_from_term(t) };

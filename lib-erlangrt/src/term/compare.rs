@@ -283,7 +283,24 @@ fn cmp_terms_immed(a: Term, b: Term, _exact: bool) -> RtResult<Ordering> {
 fn cmp_terms_immed_box(a: Term, b: Term) -> RtResult<Ordering> {
   if a.is_tuple() {
     if b.is_tuple() {
-      unimplemented!("cmp tuple vs tuple")
+      let a_ptr = a.get_tuple_ptr();
+      let b_ptr = b.get_tuple_ptr();
+      let a_arity = unsafe { (*a_ptr).get_arity() };
+      let b_arity = unsafe { (*b_ptr).get_arity() };
+      // Tuples are compared first by arity, then element-by-element
+      match a_arity.cmp(&b_arity) {
+        Ordering::Equal => {}
+        other => return Ok(other),
+      }
+      for i in 0..a_arity {
+        let ea = unsafe { (*a_ptr).get_element(i) };
+        let eb = unsafe { (*b_ptr).get_element(i) };
+        match cmp_terms(ea, eb, true)? {
+          Ordering::Equal => continue,
+          other => return Ok(other),
+        }
+      }
+      return Ok(Ordering::Equal);
     } else {
       return cmp_mixed_types(a, b);
     }
@@ -408,12 +425,14 @@ unsafe fn cmp_binary(a: Term, b: Term) -> RtResult<Ordering> {
     return Ok(a_size.cmp(&b_size));
   }
 
-  println!("Going to compare {a} ? {b}");
-  println!(
-    "sizes - {a_size} {} vs {b_size} {}",
-    (*a_trait).get_byte_size(),
-    (*b_trait).get_byte_size()
-  );
+  if cfg!(feature = "trace_comparisons") {
+    println!("Going to compare {a} ? {b}");
+    println!(
+      "sizes - {a_size} {} vs {b_size} {}",
+      (*a_trait).get_byte_size(),
+      (*b_trait).get_byte_size()
+    );
+  }
 
   // Try figure out a compatible byte- or bit-reader combination for A arg and
   // B arg and then call a branch function which will do the same for B.

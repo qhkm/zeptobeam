@@ -90,11 +90,13 @@ impl<GC: TGc> THeap for IncrementalHeap<GC> {
 
   fn get_y(&self, index: Word) -> RtResult<Term> {
     if !self.stack_have_y(index) {
-      println!(
-        "Stack value requested y{}, depth={}",
-        index,
-        self.stack_depth()
-      );
+      if cfg!(feature = "trace_stack_changes") {
+        println!(
+          "Stack value requested y{}, depth={}",
+          index,
+          self.stack_depth()
+        );
+      }
       return Err(RtErr::StackIndexRange(index));
     }
     let pos = index + self.stack_top + 1;
@@ -204,7 +206,9 @@ impl<GC: TGc> THeap for IncrementalHeap<GC> {
   /// Sets the stack top.
   /// Arg: new_stack_top - offset from the heap end
   fn drop_stack_words(&mut self, n_drop: usize) {
-    println!("drop_stack_words {n_drop}");
+    if cfg!(feature = "trace_stack_changes") {
+      println!("drop_stack_words {n_drop}");
+    }
     assert!(self.stack_top + n_drop < self.capacity);
     self.stack_top += n_drop;
   }
@@ -252,19 +256,21 @@ impl<GC: TGc> THeap for IncrementalHeap<GC> {
   }
 
   fn stack_dump(&self) {
-    if self.stack_depth() == 0 {
-      println!("stack: empty");
-      return;
-    }
-
-    let mut i = 0;
-    let max_i = self.stack_depth() - 1;
-    loop {
-      if i >= max_i || i >= 10 {
-        break;
+    if cfg!(feature = "trace_stack_changes") {
+      if self.stack_depth() == 0 {
+        println!("stack: empty");
+        return;
       }
-      println!("stack Y[{}] = {}", i, self.get_y_unchecked(i));
-      i += 1;
+
+      let mut i = 0;
+      let max_i = self.stack_depth() - 1;
+      loop {
+        if i >= max_i || i >= 10 {
+          break;
+        }
+        println!("stack Y[{}] = {}", i, self.get_y_unchecked(i));
+        i += 1;
+      }
     }
   }
 }
@@ -356,7 +362,9 @@ impl<GC: TGc> IncrementalHeap<GC> {
 
   #[allow(dead_code)]
   pub fn stack_info(&self) {
-    println!("Stack (s_top {}, s_end {})", self.stack_top, self.capacity)
+    if cfg!(feature = "trace_stack_changes") {
+      println!("Stack (s_top {}, s_end {})", self.stack_top, self.capacity)
+    }
   }
 
   /// Check whether `y+1`-th element can be found in stack

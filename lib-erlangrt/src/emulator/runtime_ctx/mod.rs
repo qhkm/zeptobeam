@@ -304,7 +304,9 @@ impl RuntimeContext {
   #[inline]
   pub fn jump(&mut self, cp: Term) {
     debug_assert!(cp.is_cp());
-    println!("{} {:p}", "jump to".purple(), cp.get_cp_ptr::<Word>());
+    if cfg!(feature = "trace_opcode_execution") {
+      println!("{} {:p}", "jump to".purple(), cp.get_cp_ptr::<Word>());
+    }
     self.ip = CodePtr::from_cp(cp);
   }
 
@@ -344,13 +346,15 @@ impl RuntimeContext {
 
   #[allow(dead_code)]
   pub fn dump_registers(&self, arity: usize) {
-    if arity == 0 {
-      println!("registers: empty");
-      return;
-    }
+    if cfg!(feature = "trace_register_changes") {
+      if arity == 0 {
+        println!("registers: empty");
+        return;
+      }
 
-    for i in 0..arity {
-      println!("reg X[{}] = {}", i, self.get_x(i));
+      for i in 0..arity {
+        println!("reg X[{}] = {}", i, self.get_x(i));
+      }
     }
   }
 

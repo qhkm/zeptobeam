@@ -107,3 +107,70 @@ define_opcode!(
   },
   args: cp_or_nil(fail), IGNORE(s1), load(s2), IGNORE(unit), term(dst),
 );
+
+// Extract the remaining binary from a match context.
+// Structure: bs_get_tail(Ctx, Dst, Live)
+define_opcode!(
+  _vm, rt_ctx, proc, name: OpcodeBsGetTail, arity: 3,
+  run: { Self::bs_get_tail(rt_ctx, proc, match_state, dst, live) },
+  args: binary_match_state(match_state), term(dst), usize(live),
+);
+
+impl OpcodeBsGetTail {
+  #[inline]
+  fn bs_get_tail(
+    rt_ctx: &mut RuntimeContext,
+    proc: &mut Process,
+    match_state: *mut BinaryMatchState,
+    dst: Term,
+    live: usize,
+  ) -> RtResult<DispatchResult> {
+    use crate::term::boxed::binary::BinarySlice;
+    let remaining = unsafe { (*match_state).get_bits_remaining() };
+    if remaining.bits == 0 {
+      rt_ctx.store_value(Term::empty_binary(), dst, proc.get_heap_mut())?;
+      return Ok(DispatchResult::Normal);
+    }
+
+    rt_ctx.live = live;
+    proc.ensure_heap(BinarySlice::storage_size())?;
+
+    let src_bin = unsafe { (*match_state).get_src_binary() };
+    let bit_offset = unsafe { (*match_state).get_offset() };
+    let slice = unsafe {
+      BinarySlice::create_into(src_bin, bit_offset, remaining, proc.get_heap_mut())?
+    };
+    rt_ctx.store_value(unsafe { (*slice).make_term() }, dst, proc.get_heap_mut())?;
+    Ok(DispatchResult::Normal)
+  }
+}
+
+// Save the current match position as a small integer.
+// Structure: bs_get_position(Ctx, Dst, Live)
+define_opcode!(
+  _vm, rt_ctx, proc, name: OpcodeBsGetPosition, arity: 3,
+  run: {
+    let offset = unsafe { (*match_state).get_offset().bits };
+    let pos = Term::make_small_unsigned(offset);
+    rt_ctx.store_value(pos, dst, proc.get_heap_mut())?;
+    Ok(DispatchResult::Normal)
+  },
+  args: binary_match_state(match_state), term(dst), IGNORE(live),
+);
+
+// Restore a previously saved match position.
+// Structure: bs_set_position(Ctx, Pos)
+define_opcode!(
+  _vm, rt_ctx, proc, name: OpcodeBsSetPosition, arity: 2,
+  run: {
+    let pos = rt_ctx.load(pos, proc.get_heap());
+    let bits = if pos.is_small() {
+      pos.get_small_unsigned()
+    } else {
+      0
+    };
+    unsafe { (*match_state).set_offset(BitSize::with_bits(bits)) };
+    Ok(DispatchResult::Normal)
+  },
+  args: binary_match_state(match_state), term(pos),
+);

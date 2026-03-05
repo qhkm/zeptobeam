@@ -41,7 +41,9 @@ impl Heap {
         }
       }
 
-      println!("{output}")
+      if cfg!(feature = "trace_opcode_execution") {
+        println!("{output}")
+      }
     } // for
   }
 }

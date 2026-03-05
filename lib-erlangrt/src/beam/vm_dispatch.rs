@@ -87,11 +87,6 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeInit::__run(vm, ctx, curr_p);
     },
 
-    OPCODE_INIT_YREGS => {
-      assert_arity(OPCODE_INIT_YREGS, OpcodeInitYregs::ARITY);
-      return OpcodeInitYregs::__run(vm, ctx, curr_p);
-    },
-
     OPCODE_DEALLOCATE => {
       assert_arity(OPCODE_DEALLOCATE, OpcodeDeallocate::ARITY);
       return OpcodeDeallocate::__run(vm, ctx, curr_p);
@@ -232,11 +227,6 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeMove::__run(vm, ctx, curr_p);
     },
 
-    OPCODE_SWAP => {
-      assert_arity(OPCODE_SWAP, OpcodeSwap::ARITY);
-      return OpcodeSwap::__run(vm, ctx, curr_p);
-    },
-
     OPCODE_GET_LIST => {
       assert_arity(OPCODE_GET_LIST, OpcodeGetList::ARITY);
       return OpcodeGetList::__run(vm, ctx, curr_p);
@@ -272,11 +262,6 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeCallFun::__run(vm, ctx, curr_p);
     },
 
-    OPCODE_CALL_FUN2 => {
-      assert_arity(OPCODE_CALL_FUN2, OpcodeCallFun2::ARITY);
-      return OpcodeCallFun2::__run(vm, ctx, curr_p);
-    },
-
     OPCODE_IS_FUNCTION => {
       assert_arity(OPCODE_IS_FUNCTION, OpcodeIsFunction::ARITY);
       return OpcodeIsFunction::__run(vm, ctx, curr_p);
@@ -300,11 +285,6 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_MAKE_FUN2 => {
       assert_arity(OPCODE_MAKE_FUN2, OpcodeMakeFun2::ARITY);
       return OpcodeMakeFun2::__run(vm, ctx, curr_p);
-    },
-
-    OPCODE_MAKE_FUN3 => {
-      assert_arity(OPCODE_MAKE_FUN3, OpcodeMakeFun3::ARITY);
-      return OpcodeMakeFun3::__run(vm, ctx, curr_p);
     },
 
     OPCODE_TRY => {
@@ -407,9 +387,29 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodePutTuple2::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_BS_GET_TAIL => {
+      assert_arity(OPCODE_BS_GET_TAIL, OpcodeBsGetTail::ARITY);
+      return OpcodeBsGetTail::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_BS_START_MATCH3 => {
       assert_arity(OPCODE_BS_START_MATCH3, OpcodeBsStartMatch3::ARITY);
       return OpcodeBsStartMatch3::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_GET_POSITION => {
+      assert_arity(OPCODE_BS_GET_POSITION, OpcodeBsGetPosition::ARITY);
+      return OpcodeBsGetPosition::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_SET_POSITION => {
+      assert_arity(OPCODE_BS_SET_POSITION, OpcodeBsSetPosition::ARITY);
+      return OpcodeBsSetPosition::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_SWAP => {
+      assert_arity(OPCODE_SWAP, OpcodeSwap::ARITY);
+      return OpcodeSwap::__run(vm, ctx, curr_p);
     },
 
     OPCODE_BS_START_MATCH4 => {
@@ -417,9 +417,24 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeBsStartMatch4::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_MAKE_FUN3 => {
+      assert_arity(OPCODE_MAKE_FUN3, OpcodeMakeFun3::ARITY);
+      return OpcodeMakeFun3::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_INIT_YREGS => {
+      assert_arity(OPCODE_INIT_YREGS, OpcodeInitYregs::ARITY);
+      return OpcodeInitYregs::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_BS_CREATE_BIN => {
       assert_arity(OPCODE_BS_CREATE_BIN, OpcodeBsCreateBin::ARITY);
       return OpcodeBsCreateBin::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_CALL_FUN2 => {
+      assert_arity(OPCODE_CALL_FUN2, OpcodeCallFun2::ARITY);
+      return OpcodeCallFun2::__run(vm, ctx, curr_p);
     },
 
     OPCODE_BS_MATCH => {
@@ -431,3 +446,4 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
   }
   Ok(DispatchResult::Yield(YieldType::EndOfTheQueue))
 }
+

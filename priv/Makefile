@@ -1,5 +1,5 @@
 OTP_DIR=../otp
-ERLC=$(OTP_DIR)/bin/erlc
+ERLC=$(shell which erlc 2>/dev/null || echo $(OTP_DIR)/bin/erlc)
 # OTP_EMU_DIR=../otp/erts/emulator
 # OTP_EMU_TEST_DIR=$(OTP_EMU_DIR)/test
 

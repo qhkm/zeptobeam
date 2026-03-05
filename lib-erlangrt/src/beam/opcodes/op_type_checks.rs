@@ -61,7 +61,9 @@ impl OpcodeIsFunction2 {
     arity_as_term: Term,
   ) -> RtResult<DispatchResult> {
     let arity = Self::fetch_arity(arity_as_term)?;
-    println!("is_function2? {val}");
+    if cfg!(feature = "trace_calls") {
+      println!("is_function2? {val}");
+    }
     if !val.is_fun_of_arity(arity) {
       ctx.jump(fail_label)
     }

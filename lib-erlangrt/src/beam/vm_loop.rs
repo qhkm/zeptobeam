@@ -60,7 +60,9 @@ impl VM {
       // Handle next opcode
       let disp_result = match dispatch_op_inline(self, op, ctx, curr_p) {
         Err(RtErr::Exception(exc_type, exc_reason)) => {
-          println!("vm: Exception type={exc_type} reason={exc_reason}");
+          if cfg!(feature = "trace_opcode_execution") {
+            println!("vm: Exception type={exc_type} reason={exc_reason}");
+          }
           curr_p.set_exception(exc_type, exc_reason);
           curr_p.timeslice_result = SliceResult::Exception;
           return Ok(true);

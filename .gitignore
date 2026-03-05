@@ -15,3 +15,4 @@ variables-ct*
 /tmp/
 
 __pycache__
+.env

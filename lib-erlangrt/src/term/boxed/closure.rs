@@ -81,13 +81,15 @@ impl Closure {
     let this = hp.alloc(n_words, AllocInit::Uninitialized)? as *mut Self;
 
     assert_eq!(frozen.len(), fun_entry.nfrozen);
-    println!(
-      "{}new closure: {} frozen={} nfrozen={}",
-      module(),
-      fun_entry.mfa,
-      frozen.len(),
-      fun_entry.nfrozen
-    );
+    if cfg!(feature = "trace_calls") {
+      println!(
+        "{}new closure: {} frozen={} nfrozen={}",
+        module(),
+        fun_entry.mfa,
+        frozen.len(),
+        fun_entry.nfrozen
+      );
+    }
 
     this.write(Self::new(fun_entry.mfa, fun_entry.nfrozen));
 

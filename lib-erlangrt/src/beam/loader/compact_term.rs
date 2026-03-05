@@ -343,24 +343,24 @@ impl CompactTermReader {
         return Self::bytes_to_small(sign, &long_bytes);
       }
 
-      let limbs = big::make_limbs_from_bytes(Endianness::Little, long_bytes);
+      let limbs = big::make_limbs_from_bytes(Endianness::Big, long_bytes);
       debug_assert!(
         !limbs.is_empty(),
         "Limbs vec can't be empty for creating a bigint"
       );
       let r = unsafe { boxed::Bignum::create_into(&mut (*self.heap), sign, &limbs)? };
-      println!("Creating bigint with {limbs:?}");
+      if cfg!(feature = "trace_beam_loader") {
+        println!("Creating bigint with {limbs:?}");
+      }
       Ok(Term::make_boxed(r))
     } // if larger than 11 bits
   }
 
   fn bytes_to_small(sign: Sign, long_bytes: &[u8]) -> RtResult<Term> {
     let mut n = 0isize;
-    // Assume little endian, so each next digit costs more
-    let mut shift = 0usize;
+    // Compact term format stores integers in big-endian byte order
     for digit in long_bytes {
-      n |= (*digit as isize) << shift;
-      shift += defs::BYTE_BITS;
+      n = (n << defs::BYTE_BITS) | (*digit as isize);
     }
     if sign == Sign::Negative {
       n = -n;

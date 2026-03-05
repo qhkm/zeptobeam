@@ -31,12 +31,14 @@ pub fn apply(
 
   let mfa = unsafe { (*export).exp.mfa };
   if mfa.arity != arity as Arity {
-    println!(
-      "{}badarity target_arity={} expected_arity={}",
-      module(),
-      mfa.arity,
-      arity
-    );
+    if cfg!(feature = "trace_calls") {
+      println!(
+        "{}badarity target_arity={} expected_arity={}",
+        module(),
+        mfa.arity,
+        arity
+      );
+    }
     return fail::create::badarity();
   }
 

@@ -208,7 +208,7 @@ impl LoaderState {
           // Label definitely is a loadtime index, resolve it to the location
           // The resolution will happen later when code writing has completed,
           // for now just store the location to patch in the patch table
-          if !label_index.is_loadtime() {
+          if !label_index.is_loadtime() && cfg!(feature = "trace_beam_loader") {
             println!("{}WARN: jump table label is not loadtime: {}", module(), label_index);
           }
         }

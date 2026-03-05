@@ -313,8 +313,8 @@ impl BeamFile {
       #[allow(clippy::if_same_then_else)]
       if val.is_small() {
         // self.linerefs.push((_fname_index, w));
-      } else if val.is_atom() {
-        // _fname_index = a as u32
+      } else if val.is_atom() || val.is_loadtime() {
+        // _fname_index = a as u32 (loadtime atoms from OTP 28 compact term encoding)
       } else {
         panic!("{}Unexpected data in line info section: {}", module(), val)
       }

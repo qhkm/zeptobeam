@@ -1,6 +1,37 @@
 use erlangrt::command_line_args::ErlStartArgs;
 use std::env;
 
+fn read_path_list(var_name: &str) -> Vec<String> {
+  let Ok(raw) = env::var(var_name) else {
+    return Vec::new();
+  };
+  env::split_paths(&raw)
+    .map(|path| path.to_string_lossy().trim().to_string())
+    .filter(|path| !path.is_empty())
+    .collect()
+}
+
+fn default_search_path() -> Vec<String> {
+  let mut paths = vec!["priv/".to_string()];
+
+  if let Ok(stdlib_ebin) = env::var("ZEPTOBEAM_STDLIB_EBIN") {
+    if !stdlib_ebin.trim().is_empty() {
+      paths.push(stdlib_ebin.trim().to_string());
+    }
+  }
+
+  paths.extend(read_path_list("ZEPTOBEAM_BEAM_PATHS"));
+  paths.extend(read_path_list("ERL_LIBS"));
+
+  // Fallback to hardcoded otp/ paths if no env vars set
+  if paths.len() == 1 {
+    paths.push("otp/erts/preloaded/ebin/".to_string());
+    paths.push("otp/lib/stdlib/ebin/".to_string());
+  }
+
+  paths
+}
+
 // const ERLNAME: &'static str = "erl";
 
 enum CtMode {
@@ -144,11 +175,7 @@ fn main() {
   //    cnt += 1;
   //  }
 
-  erl_args.search_path = vec![
-    "priv/".to_string(),
-    "otp/erts/preloaded/ebin/".to_string(),
-    "otp/lib/stdlib/ebin/".to_string(),
-  ];
+  erl_args.search_path = default_search_path();
 
   //  println!("{:?}", cmd);
   //  let mut child = cmd.spawn().unwrap();
