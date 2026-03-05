@@ -590,19 +590,10 @@ fn build_llm_request_from_task(task: &serde_json::Value) -> IoOp {
     .unwrap_or(DEFAULT_LLM_PROVIDER)
     .to_string();
 
-  let provider_key = provider.to_ascii_lowercase();
-  let default_model = if provider_key == "anthropic" || provider_key.contains("anthropic")
-  {
-    DEFAULT_ANTHROPIC_MODEL
-  } else {
-    DEFAULT_OPENAI_MODEL
-  };
-
   let model = task
     .get("model")
     .and_then(|v| v.as_str())
-    .unwrap_or(default_model)
-    .to_string();
+    .map(str::to_string);
 
   let prompt = task
     .get("prompt")
@@ -616,31 +607,30 @@ fn build_llm_request_from_task(task: &serde_json::Value) -> IoOp {
     .and_then(|v| v.as_str())
     .map(str::to_string);
 
-  let max_tokens = task
-    .get("max_tokens")
-    .and_then(|v| v.as_u64())
-    .and_then(|v| {
-      if v <= u32::MAX as u64 {
-        Some(v as u32)
-      } else {
-        None
-      }
+  let tools = task
+    .get("tools")
+    .and_then(|v| v.as_array())
+    .map(|arr| {
+      arr
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect::<Vec<String>>()
     });
 
-  let temperature = task
-    .get("temperature")
-    .and_then(|v| v.as_f64())
-    .map(|v| v as f32);
+  let max_iterations = task
+    .get("max_iterations")
+    .and_then(|v| v.as_u64())
+    .map(|v| v as usize);
 
   let timeout_ms = task.get("timeout_ms").and_then(|v| v.as_u64());
 
-  IoOp::LlmRequest {
+  IoOp::AgentChat {
     provider,
     model,
-    prompt,
     system_prompt,
-    max_tokens,
-    temperature,
+    prompt,
+    tools,
+    max_iterations,
     timeout_ms,
   }
 }
@@ -789,17 +779,17 @@ mod tests {
       state.as_mut(),
     );
     match action {
-      Action::IoRequest(IoOp::LlmRequest {
+      Action::IoRequest(IoOp::AgentChat {
         provider,
         model,
         prompt,
         ..
       }) => {
         assert_eq!(provider, "openai");
-        assert_eq!(model, DEFAULT_OPENAI_MODEL);
+        assert!(model.is_none(), "model should be None when not specified");
         assert_eq!(prompt, "draft summary");
       }
-      _ => panic!("expected worker IoRequest"),
+      _ => panic!("expected worker IoRequest with AgentChat"),
     }
 
     let action = behavior.handle_message(
