@@ -1,6 +1,7 @@
 use crate::agent_rt::{
   bridge_metrics::BridgeMetrics,
   config::McpServerEntry,
+  decomposition::{build_decomposition_chat_op, parse_decomposition_response},
   mcp_client::McpClientManager,
   observability::RuntimeMetrics,
   rate_limiter::RateLimiter,
@@ -424,6 +425,38 @@ impl BridgeWorker {
                   let mut reg = agent_reg.lock().unwrap();
                   let removed = reg.remove(target_pid).is_some();
                   IoResult::Ok(serde_json::json!({ "destroyed": removed }))
+                }
+                IoOp::Custom { kind, payload } if kind == "decompose_goal" => {
+                  let goal =
+                    payload.get("goal").cloned().unwrap_or(payload.clone());
+                  let chat_op =
+                    build_decomposition_chat_op(&goal, None, None);
+                  let chat_result = execute_agent_chat_standalone(
+                    req.source_pid,
+                    &chat_op,
+                    agent_reg,
+                    agent_prov,
+                    agent_tf,
+                    agent_met,
+                    mcp_mgr,
+                  )
+                  .await;
+                  match chat_result {
+                    IoResult::Ok(val) => {
+                      let response_text = val
+                        .get("response")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                      IoResult::Ok(parse_decomposition_response(
+                        response_text,
+                        &goal,
+                      ))
+                    }
+                    _ => {
+                      warn!("decompose_goal LLM call failed, using single-task fallback");
+                      IoResult::Ok(parse_decomposition_response("", &goal))
+                    }
+                  }
                 }
                 _ => execute_io_op(&req.op, rl.as_ref()).await,
               }
