@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -50,7 +51,7 @@ pub enum Action {
   Send { to: AgentPid, msg: Message },
   IoRequest(IoOp),
   Spawn {
-    behavior: Box<dyn AgentBehavior>,
+    behavior: Arc<dyn AgentBehavior>,
     args: serde_json::Value,
   },
   Stop(Reason),

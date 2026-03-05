@@ -117,7 +117,7 @@ impl AgentScheduler {
     let mut pending_sends: Vec<(AgentPid, Message)> =
       Vec::new();
     let mut pending_spawns: Vec<(
-      Box<dyn AgentBehavior>,
+      std::sync::Arc<dyn AgentBehavior>,
       serde_json::Value,
     )> = Vec::new();
     let mut should_stop: Option<Reason> = None;
@@ -238,11 +238,8 @@ impl AgentScheduler {
 
     // Process pending spawns
     for (behavior, args) in pending_spawns {
-      use std::sync::Arc;
-      let boxed: Arc<dyn AgentBehavior> =
-        Arc::from(behavior);
       if let Ok(child_pid) =
-        self.registry.spawn(boxed, args)
+        self.registry.spawn(behavior, args)
       {
         self.enqueue(child_pid);
       }
