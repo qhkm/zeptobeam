@@ -138,6 +138,10 @@ impl LoaderState {
         // add nothing for line, but TODO: Record line contents
         gen_op::OPCODE_LINE => {}
 
+        // executable_line and debug_line are no-ops (debug/coverage info only)
+        gen_op::OPCODE_EXECUTABLE_LINE => {}
+        gen_op::OPCODE_DEBUG_LINE => {}
+
         gen_op::OPCODE_FUNC_INFO => {
           // arg[0] mod name, arg[1] fun name, arg[2] arity
           let funarity = FunArity {

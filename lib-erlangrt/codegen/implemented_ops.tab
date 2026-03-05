@@ -108,3 +108,12 @@ bs_set_position
 bs_start_match3
 bs_start_match4
 bs_test_tail2
+
+#=== === Map Operations === ===
+put_map_assoc
+put_map_exact
+is_map
+has_map_fields
+get_map_elements
+update_record
+badrecord

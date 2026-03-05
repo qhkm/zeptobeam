@@ -12,7 +12,10 @@ badarg
 badarith
 badarity
 badfun
+badkey
+badmap
 badmatch
+badrecord
 
 #--- C
 case_clause

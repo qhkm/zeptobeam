@@ -367,6 +367,31 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeGcBif3::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_PUT_MAP_ASSOC => {
+      assert_arity(OPCODE_PUT_MAP_ASSOC, OpcodePutMapAssoc::ARITY);
+      return OpcodePutMapAssoc::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_PUT_MAP_EXACT => {
+      assert_arity(OPCODE_PUT_MAP_EXACT, OpcodePutMapExact::ARITY);
+      return OpcodePutMapExact::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_IS_MAP => {
+      assert_arity(OPCODE_IS_MAP, OpcodeIsMap::ARITY);
+      return OpcodeIsMap::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_HAS_MAP_FIELDS => {
+      assert_arity(OPCODE_HAS_MAP_FIELDS, OpcodeHasMapFields::ARITY);
+      return OpcodeHasMapFields::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_GET_MAP_ELEMENTS => {
+      assert_arity(OPCODE_GET_MAP_ELEMENTS, OpcodeGetMapElements::ARITY);
+      return OpcodeGetMapElements::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_IS_TAGGED_TUPLE => {
       assert_arity(OPCODE_IS_TAGGED_TUPLE, OpcodeIsTaggedTuple::ARITY);
       return OpcodeIsTaggedTuple::__run(vm, ctx, curr_p);
@@ -435,6 +460,16 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_CALL_FUN2 => {
       assert_arity(OPCODE_CALL_FUN2, OpcodeCallFun2::ARITY);
       return OpcodeCallFun2::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BADRECORD => {
+      assert_arity(OPCODE_BADRECORD, OpcodeBadrecord::ARITY);
+      return OpcodeBadrecord::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_UPDATE_RECORD => {
+      assert_arity(OPCODE_UPDATE_RECORD, OpcodeUpdateRecord::ARITY);
+      return OpcodeUpdateRecord::__run(vm, ctx, curr_p);
     },
 
     OPCODE_BS_MATCH => {
