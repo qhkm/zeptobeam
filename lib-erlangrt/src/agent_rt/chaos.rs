@@ -64,6 +64,7 @@ impl<S: crate::agent_rt::checkpoint::CheckpointStore> FaultyCheckpointStore<S> {
 #[cfg(test)]
 use crate::agent_rt::error::AgentRtError;
 
+#[cfg(test)]
 impl<S: crate::agent_rt::checkpoint::CheckpointStore> crate::agent_rt::checkpoint::CheckpointStore
   for FaultyCheckpointStore<S>
 {

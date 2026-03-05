@@ -1,0 +1,16 @@
+[package]
+name = "zeptoclaw-rtd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "zeptoclaw-rtd"
+path = "src/main.rs"
+
+[dependencies]
+erlangrt = { path = "../lib-erlangrt" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+serde_json = "1"
