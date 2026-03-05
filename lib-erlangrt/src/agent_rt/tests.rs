@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::agent_rt::process::*;
@@ -46,6 +48,68 @@ impl AgentBehavior for EchoBehavior {
     _reason: Reason,
     _state: &mut dyn AgentState,
   ) -> Action {
+    Action::Continue
+  }
+
+  fn terminate(
+    &self,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) {
+  }
+}
+
+struct ExitAwareState {
+  message_count: usize,
+  exit_count: usize,
+}
+
+impl AgentState for ExitAwareState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+struct ExitAwareBehavior;
+
+impl AgentBehavior for ExitAwareBehavior {
+  fn init(
+    &self,
+    _args: serde_json::Value,
+  ) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(ExitAwareState {
+      message_count: 0,
+      exit_count: 0,
+    }))
+  }
+
+  fn handle_message(
+    &self,
+    _msg: Message,
+    state: &mut dyn AgentState,
+  ) -> Action {
+    let s = state
+      .as_any_mut()
+      .downcast_mut::<ExitAwareState>()
+      .unwrap();
+    s.message_count += 1;
+    Action::Continue
+  }
+
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    state: &mut dyn AgentState,
+  ) -> Action {
+    let s = state
+      .as_any_mut()
+      .downcast_mut::<ExitAwareState>()
+      .unwrap();
+    s.exit_count += 1;
     Action::Continue
   }
 
@@ -250,6 +314,122 @@ fn test_scheduler_dispatches_message() {
     .unwrap();
   sched.enqueue(pid);
   assert!(sched.tick());
+}
+
+#[test]
+fn test_scheduler_exit_message_calls_handle_exit() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(ExitAwareBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  sched
+    .send(
+      pid,
+      Message::System(SystemMsg::Exit {
+        from: AgentPid::new().raw(),
+        reason: Reason::Custom("boom".into()),
+      }),
+    )
+    .unwrap();
+  sched.enqueue(pid);
+  assert!(sched.tick());
+
+  let proc = sched.registry.lookup(&pid).unwrap();
+  let state = proc
+    .state
+    .as_ref()
+    .unwrap()
+    .as_any()
+    .downcast_ref::<ExitAwareState>()
+    .unwrap();
+  assert_eq!(
+    state.exit_count, 1,
+    "System Exit should dispatch to handle_exit"
+  );
+  assert_eq!(
+    state.message_count, 0,
+    "System Exit should not go through handle_message"
+  );
+}
+
+#[test]
+fn test_scheduler_skips_stale_queue_entries() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+
+  let waiting_pid = sched
+    .registry
+    .spawn(
+      behavior.clone(),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  if let Some(proc) =
+    sched.registry.lookup_mut(&waiting_pid)
+  {
+    proc.status = ProcessStatus::Waiting;
+  }
+  sched.enqueue(waiting_pid);
+
+  let runnable_pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched
+    .send(
+      runnable_pid,
+      Message::Text("run".into()),
+    )
+    .unwrap();
+  sched.enqueue(runnable_pid);
+
+  let did_work = sched.tick();
+  assert!(
+    did_work,
+    "scheduler should skip stale waiting pid and run runnable pid"
+  );
+  let proc = sched.registry.lookup(&runnable_pid).unwrap();
+  assert_eq!(proc.status, ProcessStatus::Waiting);
+  assert!(!proc.has_messages());
+}
+
+#[test]
+fn test_scheduler_exit_handler_is_invoked() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  let seen = Rc::new(RefCell::new(None::<(
+    u64,
+    String,
+  )>));
+  let seen_closure = Rc::clone(&seen);
+  sched.set_exit_handler(move |_sched, exited, reason| {
+    let reason_label = match reason {
+      Reason::Normal => "normal".to_string(),
+      Reason::Shutdown => "shutdown".to_string(),
+      Reason::Custom(s) => s,
+    };
+    *seen_closure.borrow_mut() =
+      Some((exited.raw(), reason_label));
+  });
+
+  sched.terminate_process(
+    pid,
+    Reason::Custom("boom".into()),
+  );
+
+  let seen = seen.borrow();
+  let (seen_pid, seen_reason) =
+    seen.as_ref().expect("exit handler should be called");
+  assert_eq!(*seen_pid, pid.raw());
+  assert_eq!(seen_reason, "boom");
 }
 
 #[test]

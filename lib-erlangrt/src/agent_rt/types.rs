@@ -17,6 +17,10 @@ impl AgentPid {
     Self(NEXT_AGENT_PID.fetch_add(1, Ordering::Relaxed))
   }
 
+  pub fn from_raw(raw: u64) -> Self {
+    Self(raw)
+  }
+
   pub fn raw(&self) -> u64 {
     self.0
   }

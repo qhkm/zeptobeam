@@ -7,6 +7,8 @@ use crate::agent_rt::types::*;
 
 const DEFAULT_REDUCTIONS: u32 = 200;
 const NORMAL_ADVANTAGE: usize = 8;
+type ExitHandler =
+  Box<dyn FnMut(&mut AgentScheduler, AgentPid, Reason)>;
 
 /// Reduction-counting preemptive scheduler with
 /// three priority queues (High > Normal > Low) and
@@ -18,6 +20,7 @@ pub struct AgentScheduler {
   queue_low: VecDeque<AgentPid>,
   advantage_count: usize,
   bridge: Option<BridgeHandle>,
+  exit_handler: Option<ExitHandler>,
 }
 
 impl AgentScheduler {
@@ -29,11 +32,22 @@ impl AgentScheduler {
       queue_low: VecDeque::new(),
       advantage_count: 0,
       bridge: None,
+      exit_handler: None,
     }
   }
 
   pub fn set_bridge(&mut self, bridge: BridgeHandle) {
     self.bridge = bridge.into();
+  }
+
+  /// Register an optional process-exit hook.
+  /// The hook can drive supervision by reacting to
+  /// process terminations and restarting children.
+  pub fn set_exit_handler<F>(&mut self, handler: F)
+  where
+    F: FnMut(&mut AgentScheduler, AgentPid, Reason) + 'static,
+  {
+    self.exit_handler = Some(Box::new(handler));
   }
 
   /// Add a process to the appropriate priority queue
@@ -113,21 +127,22 @@ impl AgentScheduler {
       let _ = self.send(resp_pid, msg);
     }
 
-    let pid = match self.next_runnable() {
-      Some(p) => p,
-      None => return false,
-    };
-
-    // Verify process still exists and is runnable
-    {
-      let proc = match self.registry.lookup(&pid) {
+    // Skip stale/non-runnable queue entries until we
+    // find runnable work or run out of queued processes.
+    let pid = loop {
+      let candidate = match self.next_runnable() {
         Some(p) => p,
         None => return false,
       };
-      if proc.status != ProcessStatus::Runnable {
-        return false;
+      let is_runnable = self
+        .registry
+        .lookup(&candidate)
+        .map(|p| p.status == ProcessStatus::Runnable)
+        .unwrap_or(false);
+      if is_runnable {
+        break candidate;
       }
-    }
+    };
 
     // Reset reductions
     if let Some(proc) = self.registry.lookup_mut(&pid) {
@@ -178,7 +193,7 @@ impl AgentScheduler {
       };
 
       // Dispatch message: get behavior + state, call
-      // handle_message, then put state back
+      // the appropriate callback, then put state back.
       let action = {
         let proc =
           match self.registry.lookup_mut(&pid) {
@@ -192,8 +207,20 @@ impl AgentScheduler {
           Some(s) => s,
           None => break,
         };
-        let action = behavior
-          .handle_message(msg, state.as_mut());
+        let action = match msg {
+          Message::System(SystemMsg::Exit {
+            from,
+            reason,
+          }) => behavior.handle_exit(
+            AgentPid::from_raw(from),
+            reason,
+            state.as_mut(),
+          ),
+          other => behavior.handle_message(
+            other,
+            state.as_mut(),
+          ),
+        };
         proc.state = Some(state);
         action
       };
@@ -369,6 +396,15 @@ impl AgentScheduler {
         cascade_pid,
         reason.clone(),
       );
+    }
+
+    // Notify optional exit handler (for supervisor
+    // integration) after termination is complete.
+    if let Some(mut handler) =
+      self.exit_handler.take()
+    {
+      handler(self, pid, reason);
+      self.exit_handler = Some(handler);
     }
   }
 }
