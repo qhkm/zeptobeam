@@ -101,9 +101,9 @@ impl BeamFile {
 
       // println!("Chunk {}", chunk_h);
       match chunk_h.as_ref() {
-        "Atom" => beam_file.load_atoms_latin1(&mut r),
+        "Atom" => beam_file.load_atoms_latin1(&mut r)?,
         "Attr" => beam_file.load_attributes(&mut r)?,
-        "AtU8" => beam_file.load_atoms_utf8(&mut r),
+        "AtU8" => beam_file.load_atoms_utf8(&mut r)?,
         "CInf" => beam_file.load_compiler_info(&mut r)?,
         "Code" => beam_file.load_code(&mut r, chunk_sz as defs::Word)?,
         "ExpT" => beam_file.exports = beam_file.load_exports(&mut r),
@@ -135,27 +135,47 @@ impl BeamFile {
   /// Approaching AtU8 section, populate atoms table in the Loader state.
   /// The format is: "Atom"|"AtU8", u32/big count { u8 length, "atomname" }.
   /// Formats are absolutely compatible except that Atom is latin-1
-  fn load_atoms_utf8(&mut self, r: &mut BinaryReader) {
+  fn load_atoms_utf8(&mut self, r: &mut BinaryReader) -> RtResult<()> {
     let n_atoms = r.read_u32be();
     self.atoms.reserve(n_atoms as usize);
-    for _i in 0..n_atoms {
+    for i in 0..n_atoms {
       let atom_bytes = r.read_u8();
-      let atom_text = r.read_str_utf8(atom_bytes as defs::Word).unwrap();
+      let atom_text = r
+        .read_str_utf8(atom_bytes as defs::Word)
+        .map_err(|err| {
+          let msg = format!(
+            "{}AtU8 atom parse failed at index {}: {}. This BEAM may be from a newer OTP release than this runtime supports.",
+            module(),
+            i,
+            err
+          );
+          RtErr::CodeLoadingFailed(msg)
+        })?;
       self.atoms.push(atom_text);
     }
+    Ok(())
   }
 
   /// Approaching Atom section, populate atoms table in the Loader state.
   /// The format is: "Atom"|"AtU8", u32/big count { u8 length, "atomname" }.
   /// Same as `load_atoms_utf8` but interprets strings per-character as latin-1
-  fn load_atoms_latin1(&mut self, r: &mut BinaryReader) {
+  fn load_atoms_latin1(&mut self, r: &mut BinaryReader) -> RtResult<()> {
     let n_atoms = r.read_u32be();
     self.atoms.reserve(n_atoms as usize);
-    for _i in 0..n_atoms {
+    for i in 0..n_atoms {
       let atom_bytes = r.read_u8();
-      let atom_text = r.read_str_latin1(atom_bytes as defs::Word).unwrap();
+      let atom_text = r.read_str_latin1(atom_bytes as defs::Word).map_err(|err| {
+        let msg = format!(
+          "{}Atom section parse failed at index {}: {}",
+          module(),
+          i,
+          err
+        );
+        RtErr::CodeLoadingFailed(msg)
+      })?;
       self.atoms.push(atom_text);
     }
+    Ok(())
   }
 
   /// Read Attr section: two terms (module attributes and compiler info) encoded
@@ -181,7 +201,7 @@ impl BeamFile {
     //  code_ver, min_opcode, max_opcode, n_labels, n_funs);
 
     if max_opcode > gen_op::OPCODE_MAX.get() as u32 {
-      let msg = "BEAM file comes from a never and unsupported OTP version".to_string();
+      let msg = "BEAM file comes from a newer and unsupported OTP version".to_string();
       return Err(RtErr::CodeLoadingFailed(msg));
     }
 
@@ -319,6 +339,31 @@ impl BeamFile {
       let literal = etf::decode(&mut r, &mut self.lit_heap).unwrap();
 
       self.lit_tab.push(literal);
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::{
+    beam::loader::beam_file::BeamFile, fail::RtErr, rt_util::bin_reader::BinaryReader,
+  };
+
+  #[test]
+  fn load_atoms_utf8_returns_error_instead_of_panicking_on_invalid_utf8() {
+    let mut r = BinaryReader::from_bytes(vec![
+      0, 0, 0, 1,    // one atom
+      1,    // length
+      0xff, // invalid UTF-8 byte
+    ]);
+    let mut bf = BeamFile::new();
+
+    let err = bf.load_atoms_utf8(&mut r).unwrap_err();
+    match err {
+      RtErr::CodeLoadingFailed(msg) => {
+        assert!(msg.contains("AtU8 atom parse failed"));
+      }
+      other => panic!("unexpected error: {:?}", other),
     }
   }
 }

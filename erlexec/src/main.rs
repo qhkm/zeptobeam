@@ -1,6 +1,30 @@
 use erlangrt::{command_line_args::ErlStartArgs, lib_main::start_emulator};
 use std::env;
 
+fn read_path_list(var_name: &str) -> Vec<String> {
+  let Ok(raw) = env::var(var_name) else {
+    return Vec::new();
+  };
+  env::split_paths(&raw)
+    .map(|path| path.to_string_lossy().trim().to_string())
+    .filter(|path| !path.is_empty())
+    .collect()
+}
+
+fn default_search_path() -> Vec<String> {
+  let mut paths = vec!["priv/".to_string()];
+
+  if let Ok(stdlib_ebin) = env::var("ZEPTOBEAM_STDLIB_EBIN") {
+    if !stdlib_ebin.trim().is_empty() {
+      paths.push(stdlib_ebin.trim().to_string());
+    }
+  }
+
+  paths.extend(read_path_list("ZEPTOBEAM_BEAM_PATHS"));
+  paths.extend(read_path_list("ERL_LIBS"));
+  paths
+}
+
 fn main() {
   let in_args: Vec<String> = env::args().collect();
   let mut args = ErlStartArgs::new(&in_args);
@@ -11,10 +35,7 @@ fn main() {
   // TODO: For non-Windows, support CERL_DETACHED_PROG?
 
   // TODO: add -pa, -pz options
-  args.search_path = vec![
-    "priv/".to_string(),
-    // "/home/kv/r20/lib/erts-9.1/ebin/".to_string(),
-  ];
+  args.search_path = default_search_path();
 
   // Get going now
   start_emulator(&mut args);
