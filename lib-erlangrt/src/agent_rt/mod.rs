@@ -25,6 +25,7 @@ pub mod rate_limiter;
 pub mod resource_budget;
 pub mod retry_policy;
 pub mod registry;
+pub mod release;
 pub mod result_aggregator;
 pub mod scheduler;
 pub mod server;
