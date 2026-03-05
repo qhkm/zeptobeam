@@ -215,7 +215,7 @@ impl RuntimeContext {
         let y_result = hp.get_y(y_index);
         return y_result.unwrap();
       } else if r_tag == SpecialReg::REG_FLOAT {
-        todo!("fpreg load")
+        panic!("FP register load via general load() is not supported; use fmove/fconv opcodes to access FP registers")
       } else {
         panic!("special tag not supported")
       }
@@ -277,7 +277,15 @@ impl RuntimeContext {
         let y = dst.get_reg_value();
         return hp.set_y(y, val);
       } else if r_tag == SpecialReg::REG_FLOAT {
-        panic!("todo fpreg store");
+        let fp_index = dst.get_reg_value();
+        if val.is_float() {
+          self.fpregs[fp_index] = unsafe { val.get_float_unchecked() };
+        } else if val.is_small() {
+          self.fpregs[fp_index] = val.get_small_signed() as f64;
+        } else {
+          panic!("Cannot store non-numeric value into FP register");
+        }
+        return Ok(());
       } else {
         panic!("store: specialtag {:?} not supported", r_tag);
       }

@@ -117,3 +117,14 @@ has_map_fields
 get_map_elements
 update_record
 badrecord
+
+#=== === Float Operations === ===
+fclearerror
+fcheckerror
+fmove
+fconv
+fadd
+fsub
+fmul
+fdiv
+fnegate

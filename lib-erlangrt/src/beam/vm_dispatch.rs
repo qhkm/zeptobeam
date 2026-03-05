@@ -282,6 +282,51 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeBsPutBinary::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_FCLEARERROR => {
+      assert_arity(OPCODE_FCLEARERROR, OpcodeFclearerror::ARITY);
+      return OpcodeFclearerror::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FCHECKERROR => {
+      assert_arity(OPCODE_FCHECKERROR, OpcodeFcheckerror::ARITY);
+      return OpcodeFcheckerror::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FMOVE => {
+      assert_arity(OPCODE_FMOVE, OpcodeFmove::ARITY);
+      return OpcodeFmove::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FCONV => {
+      assert_arity(OPCODE_FCONV, OpcodeFconv::ARITY);
+      return OpcodeFconv::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FADD => {
+      assert_arity(OPCODE_FADD, OpcodeFadd::ARITY);
+      return OpcodeFadd::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FSUB => {
+      assert_arity(OPCODE_FSUB, OpcodeFsub::ARITY);
+      return OpcodeFsub::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FMUL => {
+      assert_arity(OPCODE_FMUL, OpcodeFmul::ARITY);
+      return OpcodeFmul::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FDIV => {
+      assert_arity(OPCODE_FDIV, OpcodeFdiv::ARITY);
+      return OpcodeFdiv::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FNEGATE => {
+      assert_arity(OPCODE_FNEGATE, OpcodeFnegate::ARITY);
+      return OpcodeFnegate::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_MAKE_FUN2 => {
       assert_arity(OPCODE_MAKE_FUN2, OpcodeMakeFun2::ARITY);
       return OpcodeMakeFun2::__run(vm, ctx, curr_p);
