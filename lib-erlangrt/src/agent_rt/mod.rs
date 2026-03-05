@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod bridge_metrics;
+pub mod behaviors;
 pub mod chaos;
 pub mod checkpoint;
 pub mod checkpoint_sqlite;
