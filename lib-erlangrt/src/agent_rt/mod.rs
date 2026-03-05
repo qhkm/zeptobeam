@@ -9,6 +9,7 @@ pub mod checkpoint_sqlite;
 pub mod cluster;
 pub mod config;
 pub mod dead_letter;
+pub mod decomposition;
 pub mod dets;
 pub mod durable_mailbox;
 pub mod error;
