@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub checkpoint: CheckpointConfig,
     pub server: ServerConfig,
     pub logging: LogConfig,
+    pub orchestration: OrchestrationConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,7 +50,55 @@ impl Default for AppConfig {
             checkpoint: CheckpointConfig::default(),
             server: ServerConfig::default(),
             logging: LogConfig::default(),
+            orchestration: OrchestrationConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct OrchestrationConfig {
+    pub max_concurrency: usize,
+    pub max_orchestration_depth: usize,
+    pub default_retry: String,
+    pub budget: BudgetConfig,
+    pub aggregator: AggregatorConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BudgetConfig {
+    pub max_tokens: u64,
+    pub max_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AggregatorConfig {
+    pub strategy: String,
+}
+
+impl Default for OrchestrationConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrency: 4,
+            max_orchestration_depth: 3,
+            default_retry: "none".into(),
+            budget: BudgetConfig::default(),
+            aggregator: AggregatorConfig::default(),
+        }
+    }
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self { max_tokens: 0, max_cost_usd: 0.0 }
+    }
+}
+
+impl Default for AggregatorConfig {
+    fn default() -> Self {
+        Self { strategy: "concat".into() }
     }
 }
 
@@ -171,5 +220,36 @@ worker_count = 16
     fn test_invalid_toml_returns_error() {
         let result = load_config_from_str("not [valid toml {{{}");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_orchestration_config_defaults() {
+        let config = AppConfig::default();
+        assert_eq!(config.orchestration.max_concurrency, 4);
+        assert_eq!(config.orchestration.max_orchestration_depth, 3);
+        assert_eq!(config.orchestration.default_retry, "none");
+        assert_eq!(config.orchestration.budget.max_tokens, 0);
+        assert_eq!(config.orchestration.aggregator.strategy, "concat");
+    }
+
+    #[test]
+    fn test_orchestration_config_from_toml() {
+        let toml_str = r#"
+[orchestration]
+max_concurrency = 8
+default_retry = "backoff:3:1000:30000"
+
+[orchestration.budget]
+max_tokens = 100000
+max_cost_usd = 5.0
+
+[orchestration.aggregator]
+strategy = "merge"
+"#;
+        let config = load_config_from_str(toml_str).unwrap();
+        assert_eq!(config.orchestration.max_concurrency, 8);
+        assert_eq!(config.orchestration.budget.max_tokens, 100000);
+        assert_eq!(config.orchestration.budget.max_cost_usd, 5.0);
+        assert_eq!(config.orchestration.aggregator.strategy, "merge");
     }
 }

@@ -271,6 +271,7 @@ mod tests {
     let orch_behavior = OrchestratorBehavior {
       max_concurrency: 1,
       checkpoint_store: None,
+      ..Default::default()
     };
     let orch_pid = sched
       .registry
