@@ -12,6 +12,7 @@ pub mod dets;
 pub mod durable_mailbox;
 pub mod error;
 pub mod ets;
+pub mod hot_code;
 pub mod mcp_jsonrpc;
 pub mod mcp_server;
 pub mod mcp_stdio;
