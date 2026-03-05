@@ -86,6 +86,8 @@ No 3 AM pages. No cascade failures.
 
 **[Erlang/BEAM](https://www.erlang.org/)** — The "let it crash" philosophy. The BEAM VM runs WhatsApp (2B+ users) and Discord with nine nines of uptime. ZeptoBeam brings BEAM's process isolation and supervision trees to AI agents.
 
+**[ErlangRT](https://github.com/kvakvs/ErlangRT)** — This project was originally forked from ErlangRT, an experimental BEAM runtime in Rust by Dmytro Lytovchenko. While ZeptoBeam has diverged significantly to focus on AI agent orchestration, we acknowledge the foundational work on BEAM-compatible runtime implementation in Rust.
+
 ---
 
 ## Status
