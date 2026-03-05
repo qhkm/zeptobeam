@@ -1,5 +1,6 @@
 use crate::agent_rt::{
   bridge_metrics::BridgeMetrics,
+  mcp_client::McpClientManager,
   observability::RuntimeMetrics,
   rate_limiter::RateLimiter,
   tool_factory::{DefaultToolFactory, ToolFactory},
@@ -18,7 +19,7 @@ use std::{
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-use zeptoclaw::{agent::ZeptoAgent, providers::LLMProvider};
+use zeptoclaw::{agent::ZeptoAgent, providers::LLMProvider, tools::Tool};
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
 const RESPONSE_QUEUE_SIZE: usize = 4096;
@@ -79,6 +80,8 @@ pub struct BridgeWorker {
   agent_tool_factory: Arc<dyn ToolFactory>,
   agent_metrics: Arc<BridgeMetrics>,
   cancellation: Arc<Mutex<HashMap<AgentPid, CancellationEntry>>>,
+  // MCP client manager for external MCP server connections
+  mcp_client_manager: Arc<McpClientManager>,
 }
 
 impl Clone for BridgeHandle {
@@ -130,6 +133,7 @@ pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorke
       agent_tool_factory: Arc::new(DefaultToolFactory::from_env()),
       agent_metrics: agent_metrics.clone(),
       cancellation: cancellation.clone(),
+      mcp_client_manager: Arc::new(McpClientManager::empty()),
     });
   }
   (handle, workers)
@@ -295,6 +299,10 @@ impl BridgeWorker {
     self.agent_metrics = metrics;
   }
 
+  pub fn set_mcp_client_manager(&mut self, manager: Arc<McpClientManager>) {
+    self.mcp_client_manager = manager;
+  }
+
   pub async fn execute_agent_chat(&self, pid: AgentPid, op: &IoOp) -> IoResult {
     execute_agent_chat_standalone(
       pid,
@@ -303,6 +311,7 @@ impl BridgeWorker {
       self.agent_provider_registry.clone(),
       self.agent_tool_factory.clone(),
       self.agent_metrics.clone(),
+      self.mcp_client_manager.clone(),
     )
     .await
   }
@@ -329,6 +338,7 @@ impl BridgeWorker {
     let agent_tool_factory = self.agent_tool_factory;
     let agent_metrics = self.agent_metrics;
     let cancellation = self.cancellation;
+    let mcp_client_manager = self.mcp_client_manager;
     loop {
       while in_flight.try_join_next().is_some() {}
 
@@ -349,6 +359,7 @@ impl BridgeWorker {
           let agent_tf = agent_tool_factory.clone();
           let agent_met = agent_metrics.clone();
           let cancellation = cancellation.clone();
+          let mcp_mgr = mcp_client_manager.clone();
           in_flight.spawn(async move {
             let op_kind = io_op_kind(&req.op);
             if let Some(ref m) = metrics {
@@ -365,6 +376,7 @@ impl BridgeWorker {
               let state = cancellation.lock().unwrap();
               state.get(&req.source_pid).map(|entry| entry.token.clone())
             };
+            let mcp_mgr_for_destroy = mcp_mgr.clone();
             let execute_op = async {
               match &req.op {
                 IoOp::AgentChat { .. } => {
@@ -375,10 +387,16 @@ impl BridgeWorker {
                     agent_prov,
                     agent_tf,
                     agent_met,
+                    mcp_mgr,
                   )
                   .await
                 }
                 IoOp::AgentDestroy { target_pid } => {
+                  // Close MCP session first (async), then remove from registry
+                  // Close MCP session for this agent if MCP is enabled
+                  if mcp_mgr_for_destroy.is_enabled() {
+                    let _ = mcp_mgr_for_destroy.close_session(*target_pid).await;
+                  }
                   let mut reg = agent_reg.lock().unwrap();
                   let removed = reg.remove(target_pid).is_some();
                   IoResult::Ok(serde_json::json!({ "destroyed": removed }))
@@ -483,6 +501,7 @@ async fn execute_agent_chat_standalone(
   provider_registry: Arc<HashMap<String, Arc<dyn LLMProvider + Send + Sync>>>,
   tool_factory: Arc<dyn ToolFactory>,
   metrics: Arc<BridgeMetrics>,
+  mcp_manager: Arc<McpClientManager>,
 ) -> IoResult {
   let (
     provider_name,
@@ -529,8 +548,39 @@ async fn execute_agent_chat_standalone(
               .clone()
           });
 
-        let tools =
+        // Build local tools
+        let mut tools =
           tool_factory.build_tools(tools_whitelist.as_ref().map(|v| v.as_slice()));
+
+        // Build MCP remote tools if MCP is enabled and whitelist has MCP tools
+        // This runs synchronously in the or_insert_with closure, but the actual
+        // MCP session creation happens lazily on first tool use
+        if mcp_manager.is_enabled() {
+          if let Some(whitelist) = tools_whitelist {
+            let has_mcp_tools = whitelist.iter().any(|n| n.contains("__"));
+            if has_mcp_tools {
+              // Try to get MCP tools synchronously
+              // This will return empty if no session exists yet (lazy init)
+              match mcp_manager.try_get_tools_for_agent(pid) {
+                Ok(mcp_tools) => {
+                  let mcp_names: std::collections::HashSet<&str> = whitelist
+                    .iter()
+                    .filter(|n| n.contains("__"))
+                    .map(|n| n.as_str())
+                    .collect();
+                  for tool in mcp_tools {
+                    if mcp_names.contains(tool.name()) {
+                      tools.push(Box::new(tool));
+                    }
+                  }
+                }
+                Err(e) => {
+                  tracing::warn!(pid = pid.raw(), error = %e, "Failed to get MCP tools for agent");
+                }
+              }
+            }
+          }
+        }
 
         let mut builder = ZeptoAgent::builder()
           .provider_arc(llm_provider)

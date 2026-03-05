@@ -8,6 +8,7 @@ pub mod approval_gate;
 pub mod config;
 pub mod dead_letter;
 pub mod error;
+pub mod mcp_client;
 pub mod observability;
 pub mod orchestration;
 pub mod process;
