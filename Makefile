@@ -56,6 +56,21 @@ test: build build_tests
 test-gede: build
 	RUST_BACKTRACE=1 gede --args target/debug/ct_run
 
+# Differential test: compare Zeptobeam vs Erlang VM
+test-diff: build build_tests
+	@set -a && . ./.env 2>/dev/null && set +a; \
+	failed=0; passed=0; \
+	for mod in smoke test2 test_bs_nostdlib; do \
+		bash scripts/diff_test.sh $$mod test 2>&1 | tail -5; \
+		if echo "$$output" | grep -q "PASS"; then \
+			passed=$$((passed + 1)); \
+		else \
+			failed=$$((failed + 1)); \
+		fi; \
+	done; \
+	echo ""; \
+	echo "Diff tests: $$passed passed, $$failed failed"
+
 otp:
 	git submodule init && git submodule update && cd otp && MAKE_FLAGS=-j8 ./otp_build setup
 
