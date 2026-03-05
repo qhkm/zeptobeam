@@ -28,7 +28,7 @@ pub struct AgentProcess {
 }
 
 /// Scheduling status of an agent process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ProcessStatus {
   Runnable,
   Waiting,
@@ -37,7 +37,7 @@ pub enum ProcessStatus {
 }
 
 /// Scheduling priority level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Priority {
   High,
   Normal,

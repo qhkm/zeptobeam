@@ -10,6 +10,16 @@ pub trait CheckpointStore: Send + Sync {
   fn save(&self, key: &str, checkpoint: &serde_json::Value) -> Result<(), String>;
   fn load(&self, key: &str) -> Result<Option<serde_json::Value>, String>;
   fn delete(&self, key: &str) -> Result<(), String>;
+
+  fn list_keys(&self) -> Result<Vec<String>, String> {
+    Ok(vec![])
+  }
+
+  /// Delete checkpoints with updated_at before the given epoch timestamp (seconds).
+  /// Returns count of pruned entries.
+  fn prune_before(&self, _epoch_secs: i64) -> Result<u64, String> {
+    Ok(0)
+  }
 }
 
 /// In-memory checkpoint store for tests and ephemeral runs.

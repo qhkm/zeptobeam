@@ -9,7 +9,7 @@ use crate::agent_rt::{
 };
 
 /// Point-in-time process metadata for runtime introspection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProcessSnapshot {
   pub pid: u64,
   pub status: ProcessStatus,
@@ -22,7 +22,7 @@ pub struct ProcessSnapshot {
 }
 
 /// Point-in-time runtime metrics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeMetricsSnapshot {
   pub uptime_secs: u64,
   pub active_processes: u64,
