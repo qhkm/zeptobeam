@@ -9,6 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 static NEXT_AGENT_PID: AtomicU64 = AtomicU64::new(0x8000_0000);
+static NEXT_MONITOR_REF: AtomicU64 = AtomicU64::new(1);
 
 /// Unique process identifier in the agent runtime.
 /// PIDs start at 0x8000_0000 to avoid collision with
@@ -36,6 +37,24 @@ impl Default for AgentPid {
   }
 }
 
+/// Opaque reference identifying a monitor relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MonitorRef(u64);
+
+impl MonitorRef {
+  pub fn new() -> Self {
+    Self(NEXT_MONITOR_REF.fetch_add(1, Ordering::Relaxed))
+  }
+
+  pub fn from_raw(raw: u64) -> Self {
+    Self(raw)
+  }
+
+  pub fn raw(&self) -> u64 {
+    self.0
+  }
+}
+
 /// Messages passed between agent processes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
@@ -58,6 +77,12 @@ pub enum SystemMsg {
   },
   SpawnResult {
     child_pid: u64,
+    monitor_ref: Option<u64>,
+  },
+  Down {
+    monitor_ref: u64,
+    pid: u64,
+    reason: Reason,
   },
 }
 
@@ -89,6 +114,8 @@ pub enum Action {
   Spawn {
     behavior: Arc<dyn AgentBehavior>,
     args: serde_json::Value,
+    link: bool,
+    monitor: bool,
   },
   Stop(Reason),
 }

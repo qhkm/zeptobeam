@@ -28,6 +28,7 @@ pub struct OrchestratorState {
   pending_tasks: VecDeque<serde_json::Value>,
   pending_spawn_tasks: VecDeque<serde_json::Value>,
   active_workers: HashMap<u64, String>,
+  worker_monitors: HashMap<u64, u64>,
   results: Vec<serde_json::Value>,
   requester: Option<AgentPid>,
   goal: serde_json::Value,
@@ -77,6 +78,7 @@ impl AgentBehavior for OrchestratorBehavior {
       pending_tasks: VecDeque::new(),
       pending_spawn_tasks: VecDeque::new(),
       active_workers: HashMap::new(),
+      worker_monitors: HashMap::new(),
       results: Vec::new(),
       requester,
       goal,
@@ -94,11 +96,17 @@ impl AgentBehavior for OrchestratorBehavior {
     match msg {
       Message::Json(payload) => {
         if let Some(result) = parse_worker_result(&payload) {
-          if let Some(worker_pid) = result.worker_pid {
-            s.active_workers.remove(&worker_pid);
-          }
           s.results.push(result.as_json);
-          self.next_or_finalize(s)
+          if let Some(worker_pid) = result.worker_pid {
+            Action::Send {
+              to: AgentPid::from_raw(worker_pid),
+              msg: Message::Json(serde_json::json!({
+                "type": "shutdown_worker",
+              })),
+            }
+          } else {
+            self.next_or_finalize(s)
+          }
         } else {
           // Treat JSON payload as a new orchestration goal.
           s.requester = parse_pid(payload.get("requester_pid")).or(s.requester);
@@ -107,6 +115,7 @@ impl AgentBehavior for OrchestratorBehavior {
           s.pending_tasks.clear();
           s.pending_spawn_tasks.clear();
           s.active_workers.clear();
+          s.worker_monitors.clear();
           s.results.clear();
           s.awaiting_decomposition = true;
           s.decomposition_done = false;
@@ -129,22 +138,48 @@ impl AgentBehavior for OrchestratorBehavior {
         }
         self.next_or_finalize(s)
       }
-      Message::System(SystemMsg::SpawnResult { child_pid }) => {
+      Message::System(SystemMsg::SpawnResult {
+        child_pid,
+        monitor_ref,
+      }) => {
         let task = match s.pending_spawn_tasks.pop_front() {
           Some(t) => t,
           None => return self.next_or_finalize(s),
         };
         let task_id = extract_task_id(&task, &format!("task-{}", child_pid));
         s.active_workers.insert(child_pid, task_id.clone());
+        if let Some(mon_ref) = monitor_ref {
+          s.worker_monitors.insert(child_pid, mon_ref);
+        }
         Action::Send {
           to: AgentPid::from_raw(child_pid),
           msg: Message::Json(serde_json::json!({
             "type": "run_task",
             "worker_pid": child_pid,
+            "monitor_ref": monitor_ref,
             "task_id": task_id,
             "task": task,
           })),
         }
+      }
+      Message::System(SystemMsg::Down {
+        monitor_ref: _,
+        pid,
+        reason,
+      }) => {
+        let removed = s.active_workers.remove(&pid);
+        s.worker_monitors.remove(&pid);
+        if let Some(task_id) = removed {
+          if !matches!(reason, Reason::Normal) {
+            s.results.push(serde_json::json!({
+              "type": "worker_error",
+              "worker_pid": pid,
+              "task_id": task_id,
+              "reason": reason_to_value(reason),
+            }));
+          }
+        }
+        self.next_or_finalize(s)
       }
       _ => Action::Continue,
     }
@@ -196,6 +231,8 @@ impl OrchestratorBehavior {
           "parent_pid": parent_pid,
           "task_id": task_id,
         }),
+        link: false,
+        monitor: true,
       };
     }
 
@@ -261,6 +298,11 @@ impl AgentBehavior for WorkerBehavior {
       .expect("worker state type");
     match msg {
       Message::Json(payload) => {
+        if payload.get("type").and_then(|v| v.as_str())
+          == Some("shutdown_worker")
+        {
+          return Action::Stop(Reason::Normal);
+        }
         if payload.get("type").and_then(|v| v.as_str()) != Some("run_task") {
           return Action::Continue;
         }
@@ -441,9 +483,16 @@ mod tests {
       state.as_mut(),
     );
     match action {
-      Action::Spawn { args, .. } => {
+      Action::Spawn {
+        args,
+        link,
+        monitor,
+        ..
+      } => {
         assert_eq!(args["parent_pid"], 0x8000_0010u64);
         assert_eq!(args["task_id"], "t1");
+        assert!(!link);
+        assert!(monitor);
       }
       _ => panic!("expected Spawn action"),
     }
@@ -475,6 +524,7 @@ mod tests {
     let action = behavior.handle_message(
       Message::System(SystemMsg::SpawnResult {
         child_pid: 0x8000_0200u64,
+        monitor_ref: Some(42),
       }),
       state.as_mut(),
     );
@@ -543,5 +593,57 @@ mod tests {
       }
       _ => panic!("expected send result to parent"),
     }
+  }
+
+  #[test]
+  fn test_orchestrator_survives_worker_crash_via_down() {
+    let behavior = OrchestratorBehavior { max_concurrency: 1 };
+    let mut state = behavior
+      .init(serde_json::json!({
+        "self_pid": 0x8000_0555u64,
+      }))
+      .unwrap();
+
+    let _ = behavior.handle_message(
+      Message::Json(serde_json::json!({
+        "goal": "recover from crash",
+      })),
+      state.as_mut(),
+    );
+    let _ = behavior.handle_message(
+      Message::System(SystemMsg::IoResponse {
+        correlation_id: 1,
+        result: IoResult::Ok(serde_json::json!({
+          "tasks": [{"task_id": "crashy"}]
+        })),
+      }),
+      state.as_mut(),
+    );
+    let _ = behavior.handle_message(
+      Message::System(SystemMsg::SpawnResult {
+        child_pid: 0x8000_0666u64,
+        monitor_ref: Some(999),
+      }),
+      state.as_mut(),
+    );
+
+    let action = behavior.handle_message(
+      Message::System(SystemMsg::Down {
+        monitor_ref: 999,
+        pid: 0x8000_0666u64,
+        reason: Reason::Custom("panic".into()),
+      }),
+      state.as_mut(),
+    );
+
+    // No crash / panic path: orchestrator handles DOWN and
+    // moves to completion behavior.
+    assert!(matches!(action, Action::Stop(Reason::Normal)));
+    let s = state
+      .as_any()
+      .downcast_ref::<OrchestratorState>()
+      .unwrap();
+    assert_eq!(s.results.len(), 1);
+    assert_eq!(s.results[0]["type"], "worker_error");
   }
 }

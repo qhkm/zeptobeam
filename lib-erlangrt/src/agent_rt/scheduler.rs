@@ -21,7 +21,7 @@ pub struct AgentScheduler {
   queue_low: VecDeque<AgentPid>,
   advantage_count: usize,
   bridge: Option<BridgeHandle>,
-  exit_handler: Option<ExitHandler>,
+  exit_handlers: Vec<ExitHandler>,
 }
 
 impl AgentScheduler {
@@ -33,7 +33,7 @@ impl AgentScheduler {
       queue_low: VecDeque::new(),
       advantage_count: 0,
       bridge: None,
-      exit_handler: None,
+      exit_handlers: Vec::new(),
     }
   }
 
@@ -44,11 +44,60 @@ impl AgentScheduler {
   /// Register an optional process-exit hook.
   /// The hook can drive supervision by reacting to
   /// process terminations and restarting children.
-  pub fn set_exit_handler<F>(&mut self, handler: F)
+  pub fn add_exit_handler<F>(&mut self, handler: F)
   where
     F: FnMut(&mut AgentScheduler, AgentPid, Reason) + 'static,
   {
-    self.exit_handler = Some(Box::new(handler));
+    self.exit_handlers.push(Box::new(handler));
+  }
+
+  pub fn monitor(
+    &mut self,
+    watcher: AgentPid,
+    target: AgentPid,
+  ) -> Result<MonitorRef, String> {
+    if self.registry.lookup(&watcher).is_none() {
+      return Err(format!("Watcher {:?} not found", watcher));
+    }
+    if self.registry.lookup(&target).is_none() {
+      return Err(format!("Target {:?} not found", target));
+    }
+    let mon_ref = MonitorRef::new();
+    if let Some(watcher_proc) = self.registry.lookup_mut(&watcher) {
+      watcher_proc.monitors.push((mon_ref, target));
+    }
+    if let Some(target_proc) = self.registry.lookup_mut(&target) {
+      target_proc.monitored_by.push((mon_ref, watcher));
+    }
+    Ok(mon_ref)
+  }
+
+  pub fn demonitor(
+    &mut self,
+    watcher: AgentPid,
+    mon_ref: MonitorRef,
+  ) -> bool {
+    let target = {
+      let watcher_proc = match self.registry.lookup_mut(&watcher) {
+        Some(proc) => proc,
+        None => return false,
+      };
+      let pos = match watcher_proc
+        .monitors
+        .iter()
+        .position(|(r, _)| *r == mon_ref)
+      {
+        Some(i) => i,
+        None => return false,
+      };
+      watcher_proc.monitors.swap_remove(pos).1
+    };
+    if let Some(target_proc) = self.registry.lookup_mut(&target) {
+      target_proc
+        .monitored_by
+        .retain(|(r, w)| !(*r == mon_ref && *w == watcher));
+    }
+    true
   }
 
   /// Add a process to the appropriate priority queue
@@ -141,8 +190,12 @@ impl AgentScheduler {
     }
 
     let mut pending_sends: Vec<(AgentPid, Message)> = Vec::new();
-    let mut pending_spawns: Vec<(std::sync::Arc<dyn AgentBehavior>, serde_json::Value)> =
-      Vec::new();
+    let mut pending_spawns: Vec<(
+      std::sync::Arc<dyn AgentBehavior>,
+      serde_json::Value,
+      bool,
+      bool,
+    )> = Vec::new();
     let mut should_stop: Option<Reason> = None;
     let mut should_wait = false;
     let mut out_of_reductions = false;
@@ -265,11 +318,16 @@ impl AgentScheduler {
           }
           break;
         }
-        Action::Spawn { behavior, args } => {
+        Action::Spawn {
+          behavior,
+          args,
+          link,
+          monitor,
+        } => {
           if let Some(proc) = self.registry.lookup_mut(&pid) {
             proc.reductions = proc.reductions.saturating_sub(10);
           }
-          pending_spawns.push((behavior, args));
+          pending_spawns.push((behavior, args, link, monitor));
         }
       }
     }
@@ -291,19 +349,28 @@ impl AgentScheduler {
     }
 
     // Process pending spawns
-    for (behavior, args) in pending_spawns {
+    for (behavior, args, link, monitor) in pending_spawns {
       if let Ok(child_pid) = self.registry.spawn(behavior, args) {
-        // Auto-link parent <-> child
-        if let Some(parent_proc) = self.registry.lookup_mut(&pid) {
-          parent_proc.links.push(child_pid);
+        if link {
+          // Auto-link parent <-> child
+          if let Some(parent_proc) = self.registry.lookup_mut(&pid) {
+            parent_proc.links.push(child_pid);
+          }
+          if let Some(child_proc) = self.registry.lookup_mut(&child_pid) {
+            child_proc.links.push(pid);
+          }
         }
-        if let Some(child_proc) = self.registry.lookup_mut(&child_pid) {
-          child_proc.links.push(pid);
-        }
+
+        let monitor_ref = if monitor {
+          self.monitor(pid, child_pid).ok().map(|r| r.raw())
+        } else {
+          None
+        };
 
         // Notify parent with SpawnResult
         let spawn_msg = Message::System(SystemMsg::SpawnResult {
           child_pid: child_pid.raw(),
+          monitor_ref,
         });
         let _ = self.send(pid, spawn_msg);
 
@@ -326,11 +393,21 @@ impl AgentScheduler {
   /// is not Normal, cascade termination. Normal exits
   /// with trap_exit=false do not propagate.
   pub fn terminate_process(&mut self, pid: AgentPid, reason: Reason) {
-    // Collect links before terminating
-    let links: Vec<AgentPid> = self
+    // Collect links and monitor relations before terminating
+    let (links, monitored_by, monitors): (
+      Vec<AgentPid>,
+      Vec<(MonitorRef, AgentPid)>,
+      Vec<(MonitorRef, AgentPid)>,
+    ) = self
       .registry
       .lookup(&pid)
-      .map(|p| p.links.clone())
+      .map(|p| {
+        (
+          p.links.clone(),
+          p.monitored_by.clone(),
+          p.monitors.clone(),
+        )
+      })
       .unwrap_or_default();
 
     // Call terminate on the process
@@ -342,9 +419,23 @@ impl AgentScheduler {
     // to prevent infinite recursion on mutual links
     self.registry.remove(&pid);
 
+    // Remove reverse monitor records for monitors owned by
+    // this process.
+    for (mon_ref, target_pid) in monitors {
+      if let Some(target_proc) =
+        self.registry.lookup_mut(&target_pid)
+      {
+        target_proc.monitored_by.retain(|(r, w)| {
+          !(*r == mon_ref && *w == pid)
+        });
+      }
+    }
+
     // Notify linked processes
     let mut pids_to_cascade: Vec<AgentPid> = Vec::new();
     let mut pids_to_wake: Vec<AgentPid> = Vec::new();
+    let mut down_to_send: Vec<(AgentPid, Message)> =
+      Vec::new();
 
     for linked_pid in &links {
       let trap = self
@@ -377,9 +468,33 @@ impl AgentScheduler {
       // Normal + no trap_exit = do nothing
     }
 
+    // Notify monitor watchers via DOWN messages
+    for (mon_ref, watcher_pid) in monitored_by {
+      if let Some(watcher_proc) =
+        self.registry.lookup_mut(&watcher_pid)
+      {
+        watcher_proc
+          .monitors
+          .retain(|(r, t)| !(*r == mon_ref && *t == pid));
+      }
+      down_to_send.push((
+        watcher_pid,
+        Message::System(SystemMsg::Down {
+          monitor_ref: mon_ref.raw(),
+          pid: pid.raw(),
+          reason: reason.clone(),
+        }),
+      ));
+    }
+
     // Wake processes that were Waiting
     for wake_pid in pids_to_wake {
       self.enqueue(wake_pid);
+    }
+
+    // Send DOWN notifications after monitor cleanup.
+    for (watcher_pid, down_msg) in down_to_send {
+      let _ = self.send(watcher_pid, down_msg);
     }
 
     // Cascade termination after the loop
@@ -387,11 +502,14 @@ impl AgentScheduler {
       self.terminate_process(cascade_pid, reason.clone());
     }
 
-    // Notify optional exit handler (for supervisor
+    // Notify optional exit handlers (for supervisor
     // integration) after termination is complete.
-    if let Some(mut handler) = self.exit_handler.take() {
-      handler(self, pid, reason);
-      self.exit_handler = Some(handler);
+    if !self.exit_handlers.is_empty() {
+      let mut handlers = std::mem::take(&mut self.exit_handlers);
+      for handler in &mut handlers {
+        handler(self, pid, reason.clone());
+      }
+      self.exit_handlers = handlers;
     }
   }
 }

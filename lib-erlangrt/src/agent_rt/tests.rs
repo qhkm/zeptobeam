@@ -353,7 +353,7 @@ fn test_scheduler_exit_handler_is_invoked() {
 
   let seen = Rc::new(RefCell::new(None::<(u64, String)>));
   let seen_closure = Rc::clone(&seen);
-  sched.set_exit_handler(move |_sched, exited, reason| {
+  sched.add_exit_handler(move |_sched, exited, reason| {
     let reason_label = match reason {
       Reason::Normal => "normal".to_string(),
       Reason::Shutdown => "shutdown".to_string(),
@@ -1300,6 +1300,8 @@ impl AgentBehavior for SpawnBehavior {
     Action::Spawn {
       behavior: Arc::new(EchoBehavior),
       args: serde_json::Value::Null,
+      link: true,
+      monitor: false,
     }
   }
   fn handle_exit(
@@ -1365,13 +1367,18 @@ impl AgentBehavior for SpawnAndTrackBehavior {
       .downcast_mut::<SpawnAndTrackState>()
       .unwrap();
     match msg {
-      Message::System(SystemMsg::SpawnResult { child_pid }) => {
+      Message::System(SystemMsg::SpawnResult {
+        child_pid,
+        monitor_ref: _,
+      }) => {
         s.child_pid = Some(AgentPid::from_raw(child_pid));
         Action::Continue
       }
       Message::Text(_) => Action::Spawn {
         behavior: Arc::new(EchoBehavior),
         args: serde_json::Value::Null,
+        link: true,
+        monitor: false,
       },
       _ => Action::Continue,
     }
@@ -1464,6 +1471,302 @@ fn test_spawn_auto_links_parent_to_child() {
     child_proc.links.contains(&parent),
     "Child should have link back to parent"
   );
+}
+
+#[test]
+fn test_monitor_ref_is_unique_per_call() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let watcher = sched
+    .registry
+    .spawn(behavior.clone(), serde_json::Value::Null)
+    .unwrap();
+  let target = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  let r1 = sched.monitor(watcher, target).unwrap();
+  let r2 = sched.monitor(watcher, target).unwrap();
+  assert_ne!(r1.raw(), r2.raw());
+}
+
+#[test]
+fn test_monitor_gets_down_on_monitored_exit() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let watcher = sched
+    .registry
+    .spawn(behavior.clone(), serde_json::Value::Null)
+    .unwrap();
+  let target = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  let mon_ref = sched.monitor(watcher, target).unwrap();
+  sched.terminate_process(target, Reason::Custom("boom".into()));
+
+  let watcher_proc = sched.registry.lookup_mut(&watcher).unwrap();
+  let msg = watcher_proc.next_message().expect("expected DOWN message");
+  match msg {
+    Message::System(SystemMsg::Down {
+      monitor_ref,
+      pid,
+      reason,
+    }) => {
+      assert_eq!(monitor_ref, mon_ref.raw());
+      assert_eq!(pid, target.raw());
+      assert!(matches!(reason, Reason::Custom(_)));
+    }
+    _ => panic!("expected DOWN system message"),
+  }
+}
+
+#[test]
+fn test_monitor_gets_down_on_normal_exit() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let watcher = sched
+    .registry
+    .spawn(behavior.clone(), serde_json::Value::Null)
+    .unwrap();
+  let target = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  let mon_ref = sched.monitor(watcher, target).unwrap();
+  sched.terminate_process(target, Reason::Normal);
+
+  let watcher_proc = sched.registry.lookup_mut(&watcher).unwrap();
+  let msg = watcher_proc.next_message().expect("expected DOWN message");
+  match msg {
+    Message::System(SystemMsg::Down {
+      monitor_ref,
+      pid,
+      reason,
+    }) => {
+      assert_eq!(monitor_ref, mon_ref.raw());
+      assert_eq!(pid, target.raw());
+      assert!(matches!(reason, Reason::Normal));
+    }
+    _ => panic!("expected DOWN system message"),
+  }
+}
+
+#[test]
+fn test_demonitor_prevents_down_delivery() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+  let watcher = sched
+    .registry
+    .spawn(behavior.clone(), serde_json::Value::Null)
+    .unwrap();
+  let target = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  let mon_ref = sched.monitor(watcher, target).unwrap();
+  assert!(sched.demonitor(watcher, mon_ref));
+  sched.terminate_process(target, Reason::Custom("boom".into()));
+
+  let watcher_proc = sched.registry.lookup(&watcher).unwrap();
+  assert!(
+    !watcher_proc.has_messages(),
+    "DOWN should not be delivered after demonitor"
+  );
+}
+
+struct SpawnNoLinkBehavior;
+struct SpawnNoLinkState {
+  child_pid: Option<AgentPid>,
+}
+
+impl AgentState for SpawnNoLinkState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for SpawnNoLinkBehavior {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(SpawnNoLinkState { child_pid: None }))
+  }
+  fn handle_message(&self, msg: Message, state: &mut dyn AgentState) -> Action {
+    let s = state
+      .as_any_mut()
+      .downcast_mut::<SpawnNoLinkState>()
+      .unwrap();
+    match msg {
+      Message::System(SystemMsg::SpawnResult {
+        child_pid,
+        monitor_ref: _,
+      }) => {
+        s.child_pid = Some(AgentPid::from_raw(child_pid));
+        Action::Continue
+      }
+      Message::Text(_) => Action::Spawn {
+        behavior: Arc::new(EchoBehavior),
+        args: serde_json::Value::Null,
+        link: false,
+        monitor: false,
+      },
+      _ => Action::Continue,
+    }
+  }
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+}
+
+#[test]
+fn test_spawn_with_link_false_does_not_cascade() {
+  let mut sched = AgentScheduler::new();
+  let parent = sched
+    .registry
+    .spawn(
+      Arc::new(SpawnNoLinkBehavior),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  sched.send(parent, Message::Text("spawn".into())).unwrap();
+  sched.enqueue(parent);
+  sched.tick();
+  sched.enqueue(parent);
+  sched.tick();
+
+  let parent_proc = sched.registry.lookup(&parent).unwrap();
+  let parent_state = parent_proc
+    .state
+    .as_ref()
+    .unwrap()
+    .as_any()
+    .downcast_ref::<SpawnNoLinkState>()
+    .unwrap();
+  let child = parent_state.child_pid.expect("child pid");
+
+  sched.terminate_process(parent, Reason::Custom("boom".into()));
+  assert!(
+    sched.registry.lookup(&child).is_some(),
+    "Child should survive when spawned without link"
+  );
+}
+
+struct SpawnMonitorBehavior;
+struct SpawnMonitorState {
+  monitor_ref: Option<u64>,
+}
+
+impl AgentState for SpawnMonitorState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for SpawnMonitorBehavior {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(SpawnMonitorState { monitor_ref: None }))
+  }
+  fn handle_message(&self, msg: Message, state: &mut dyn AgentState) -> Action {
+    let s = state
+      .as_any_mut()
+      .downcast_mut::<SpawnMonitorState>()
+      .unwrap();
+    match msg {
+      Message::System(SystemMsg::SpawnResult {
+        child_pid: _,
+        monitor_ref,
+      }) => {
+        s.monitor_ref = monitor_ref;
+        Action::Continue
+      }
+      Message::Text(_) => Action::Spawn {
+        behavior: Arc::new(EchoBehavior),
+        args: serde_json::Value::Null,
+        link: false,
+        monitor: true,
+      },
+      _ => Action::Continue,
+    }
+  }
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+}
+
+#[test]
+fn test_spawn_with_monitor_true_includes_monitor_ref() {
+  let mut sched = AgentScheduler::new();
+  let parent = sched
+    .registry
+    .spawn(
+      Arc::new(SpawnMonitorBehavior),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  sched.send(parent, Message::Text("spawn".into())).unwrap();
+  sched.enqueue(parent);
+  sched.tick();
+  sched.enqueue(parent);
+  sched.tick();
+
+  let parent_proc = sched.registry.lookup(&parent).unwrap();
+  let parent_state = parent_proc
+    .state
+    .as_ref()
+    .unwrap()
+    .as_any()
+    .downcast_ref::<SpawnMonitorState>()
+    .unwrap();
+  assert!(
+    parent_state.monitor_ref.is_some(),
+    "SpawnResult should include monitor_ref when monitor=true"
+  );
+}
+
+#[test]
+fn test_multiple_exit_handlers_all_fire() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(EchoBehavior), serde_json::Value::Null)
+    .unwrap();
+  let hits = Rc::new(RefCell::new(Vec::<u64>::new()));
+
+  let hits_a = Rc::clone(&hits);
+  sched.add_exit_handler(move |_sched, exited, _reason| {
+    hits_a.borrow_mut().push(exited.raw());
+  });
+  let hits_b = Rc::clone(&hits);
+  sched.add_exit_handler(move |_sched, exited, _reason| {
+    hits_b.borrow_mut().push(exited.raw());
+  });
+
+  sched.terminate_process(pid, Reason::Custom("bye".into()));
+  let hits = hits.borrow();
+  assert_eq!(hits.len(), 2, "Both exit handlers should fire");
+  assert_eq!(hits[0], pid.raw());
+  assert_eq!(hits[1], pid.raw());
 }
 
 // --- Runtime gap: extensible IoOp ---

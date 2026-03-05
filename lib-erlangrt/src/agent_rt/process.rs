@@ -13,6 +13,8 @@ pub struct AgentProcess {
   pub status: ProcessStatus,
   pub priority: Priority,
   pub links: Vec<AgentPid>,
+  pub monitors: Vec<(MonitorRef, AgentPid)>,
+  pub monitored_by: Vec<(MonitorRef, AgentPid)>,
   pub supervisor: Option<AgentPid>,
   pub trap_exit: bool,
 }
@@ -56,6 +58,8 @@ impl AgentProcess {
       status: ProcessStatus::Runnable,
       priority: Priority::Normal,
       links: Vec::new(),
+      monitors: Vec::new(),
+      monitored_by: Vec::new(),
       supervisor: None,
       trap_exit: false,
     })

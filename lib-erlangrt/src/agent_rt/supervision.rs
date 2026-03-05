@@ -79,7 +79,7 @@ impl Supervisor {
   ) -> Result<Rc<RefCell<Self>>, Reason> {
     let sup = Rc::new(RefCell::new(Self::start(sched, spec)?));
     let sup_ref = sup.clone();
-    sched.set_exit_handler(move |sched, pid, reason| {
+    sched.add_exit_handler(move |sched, pid, reason| {
       sup_ref.borrow_mut().handle_child_exit(sched, pid, reason);
     });
     Ok(sup)
