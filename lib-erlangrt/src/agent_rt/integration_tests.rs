@@ -62,6 +62,7 @@ mod tests {
       strategy: RestartStrategy::OneForOne,
       max_restarts: 10,
       max_seconds: 60,
+      backoff: BackoffStrategy::None,
       children: vec![ChildSpec {
         id: "counter".to_string(),
         behavior: behavior.clone(),
@@ -163,6 +164,7 @@ mod tests {
       strategy: RestartStrategy::OneForOne,
       max_restarts: 3,
       max_seconds: 60,
+      backoff: BackoffStrategy::None,
       children: vec![ChildSpec {
         id: "fast_crash".to_string(),
         behavior: behavior.clone(),
@@ -341,6 +343,7 @@ mod tests {
       strategy: RestartStrategy::OneForAll,
       max_restarts: 5,
       max_seconds: 60,
+      backoff: BackoffStrategy::None,
       children: vec![
         ChildSpec {
           id: "worker_a".to_string(),

@@ -1,6 +1,7 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 
 use crate::agent_rt::{process::Priority, scheduler::AgentScheduler, types::*};
+use tracing::{info, warn};
 
 /// Strategy for restarting children when one dies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +17,47 @@ pub enum ChildRestart {
   Permanent,
   Transient,
   Temporary,
+}
+
+/// Strategy for delaying child restarts.
+#[derive(Debug, Clone)]
+pub enum BackoffStrategy {
+  /// Restart immediately.
+  None,
+  /// Restart after a fixed delay for every attempt.
+  Fixed { delay_ms: u64 },
+  /// Restart with exponential delay:
+  /// base_ms * multiplier^attempt, capped at max_ms.
+  Exponential {
+    base_ms: u64,
+    max_ms: u64,
+    multiplier: f64,
+  },
+}
+
+impl BackoffStrategy {
+  /// Return delay in milliseconds for restart attempt.
+  pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
+    match self {
+      BackoffStrategy::None => 0,
+      BackoffStrategy::Fixed { delay_ms } => *delay_ms,
+      BackoffStrategy::Exponential {
+        base_ms,
+        max_ms,
+        multiplier,
+      } => {
+        let delay = (*base_ms as f64) * multiplier.powi(attempt as i32);
+        let clamped = delay.min(*max_ms as f64) as u64;
+        clamped.min(*max_ms)
+      }
+    }
+  }
+}
+
+impl Default for BackoffStrategy {
+  fn default() -> Self {
+    BackoffStrategy::None
+  }
 }
 
 /// Specification for a supervised child process.
@@ -46,6 +88,7 @@ pub struct SupervisorSpec {
   pub max_restarts: u32,
   pub max_seconds: u32,
   pub children: Vec<ChildSpec>,
+  pub backoff: BackoffStrategy,
 }
 
 /// A currently running supervised child.
@@ -65,6 +108,8 @@ pub struct Supervisor {
   pub children: Vec<RunningChild>,
   restart_timestamps: Vec<Instant>,
   shutdown: bool,
+  backoff: BackoffStrategy,
+  restart_counts: HashMap<String, u32>,
 }
 
 impl Supervisor {
@@ -111,6 +156,8 @@ impl Supervisor {
       children,
       restart_timestamps: Vec::new(),
       shutdown: false,
+      backoff: spec.backoff,
+      restart_counts: HashMap::new(),
     })
   }
 
@@ -122,6 +169,12 @@ impl Supervisor {
     pid: AgentPid,
     reason: Reason,
   ) {
+    info!(
+      child_pid = pid.raw(),
+      ?reason,
+      strategy = ?self.strategy,
+      "supervisor.child_exit"
+    );
     if self.shutdown {
       return;
     }
@@ -146,6 +199,12 @@ impl Supervisor {
 
     // Check restart intensity
     if self.exceeds_max_restarts() {
+      warn!(
+        child_pid = pid.raw(),
+        max_restarts = self.max_restarts,
+        max_seconds = self.max_seconds,
+        "supervisor.intensity_exceeded"
+      );
       self.shutdown = true;
       return;
     }
@@ -171,6 +230,12 @@ impl Supervisor {
     self.children.iter().map(|c| c.pid).collect()
   }
 
+  /// Return the next restart delay (ms) for a child.
+  pub fn pending_restart_delay(&self, child_id: &str) -> u64 {
+    let attempt = self.restart_counts.get(child_id).copied().unwrap_or(0);
+    self.backoff.delay_for_attempt(attempt)
+  }
+
   /// Check whether the restart intensity has been
   /// exceeded (more than max_restarts in the last
   /// max_seconds window).
@@ -189,6 +254,13 @@ impl Supervisor {
   /// OneForOne: restart only the dead child at idx.
   fn restart_one(&mut self, sched: &mut AgentScheduler, idx: usize) {
     let dead = self.children.remove(idx);
+    info!(
+      child_id = dead.id,
+      old_pid = dead.pid.raw(),
+      strategy = "one_for_one",
+      "supervisor.restart"
+    );
+    self.increment_restart_count(&dead.id);
     // Dead child is already terminated — don't call
     // terminate_process again (avoids duplicate exit
     // notifications to linked processes).
@@ -216,6 +288,7 @@ impl Supervisor {
 
     // Respawn all from specs
     for spec in specs {
+      self.increment_restart_count(&spec.id);
       if let Some(new) = self.spawn_child(sched, &spec) {
         self.children.push(new);
       }
@@ -244,6 +317,7 @@ impl Supervisor {
 
     // Respawn the collected specs
     for spec in specs {
+      self.increment_restart_count(&spec.id);
       if let Some(new) = self.spawn_child(sched, &spec) {
         self.children.push(new);
       }
@@ -270,5 +344,10 @@ impl Supervisor {
       pid,
       spec: spec.clone_spec(),
     })
+  }
+
+  fn increment_restart_count(&mut self, child_id: &str) {
+    let count = self.restart_counts.entry(child_id.to_owned()).or_insert(0);
+    *count += 1;
   }
 }
