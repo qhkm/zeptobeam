@@ -6,7 +6,9 @@ use std::{
 use crate::agent_rt::types::*;
 
 const DECOMPOSE_KIND: &str = "decompose_goal";
-const WORKER_KIND: &str = "llm_request";
+const DEFAULT_LLM_PROVIDER: &str = "openai";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-sonnet-latest";
 
 /// Orchestrator process behavior.
 ///
@@ -298,9 +300,7 @@ impl AgentBehavior for WorkerBehavior {
       .expect("worker state type");
     match msg {
       Message::Json(payload) => {
-        if payload.get("type").and_then(|v| v.as_str())
-          == Some("shutdown_worker")
-        {
+        if payload.get("type").and_then(|v| v.as_str()) == Some("shutdown_worker") {
           return Action::Stop(Reason::Normal);
         }
         if payload.get("type").and_then(|v| v.as_str()) != Some("run_task") {
@@ -315,13 +315,7 @@ impl AgentBehavior for WorkerBehavior {
           .cloned()
           .unwrap_or(serde_json::Value::Null);
         s.awaiting_result = true;
-        Action::IoRequest(IoOp::Custom {
-          kind: WORKER_KIND.to_string(),
-          payload: serde_json::json!({
-            "task_id": s.task_id,
-            "task": task,
-          }),
-        })
+        Action::IoRequest(build_llm_request_from_task(&task))
       }
       Message::System(SystemMsg::IoResponse {
         correlation_id: _,
@@ -426,6 +420,68 @@ fn parse_worker_result(payload: &serde_json::Value) -> Option<WorkerResult> {
     worker_pid: payload.get("worker_pid").and_then(|v| v.as_u64()),
     as_json: payload.clone(),
   })
+}
+
+fn build_llm_request_from_task(task: &serde_json::Value) -> IoOp {
+  let provider = task
+    .get("provider")
+    .and_then(|v| v.as_str())
+    .unwrap_or(DEFAULT_LLM_PROVIDER)
+    .to_string();
+
+  let provider_key = provider.to_ascii_lowercase();
+  let default_model = if provider_key == "anthropic" || provider_key.contains("anthropic")
+  {
+    DEFAULT_ANTHROPIC_MODEL
+  } else {
+    DEFAULT_OPENAI_MODEL
+  };
+
+  let model = task
+    .get("model")
+    .and_then(|v| v.as_str())
+    .unwrap_or(default_model)
+    .to_string();
+
+  let prompt = task
+    .get("prompt")
+    .and_then(|v| v.as_str())
+    .or_else(|| task.get("goal").and_then(|v| v.as_str()))
+    .map(str::to_string)
+    .unwrap_or_else(|| task.to_string());
+
+  let system_prompt = task
+    .get("system")
+    .and_then(|v| v.as_str())
+    .map(str::to_string);
+
+  let max_tokens = task
+    .get("max_tokens")
+    .and_then(|v| v.as_u64())
+    .and_then(|v| {
+      if v <= u32::MAX as u64 {
+        Some(v as u32)
+      } else {
+        None
+      }
+    });
+
+  let temperature = task
+    .get("temperature")
+    .and_then(|v| v.as_f64())
+    .map(|v| v as f32);
+
+  let timeout_ms = task.get("timeout_ms").and_then(|v| v.as_u64());
+
+  IoOp::LlmRequest {
+    provider,
+    model,
+    prompt,
+    system_prompt,
+    max_tokens,
+    temperature,
+    timeout_ms,
+  }
 }
 
 #[cfg(test)]
@@ -562,9 +618,15 @@ mod tests {
       state.as_mut(),
     );
     match action {
-      Action::IoRequest(IoOp::Custom { kind, payload }) => {
-        assert_eq!(kind, WORKER_KIND);
-        assert_eq!(payload["task_id"], "task-42");
+      Action::IoRequest(IoOp::LlmRequest {
+        provider,
+        model,
+        prompt,
+        ..
+      }) => {
+        assert_eq!(provider, "openai");
+        assert_eq!(model, DEFAULT_OPENAI_MODEL);
+        assert_eq!(prompt, "draft summary");
       }
       _ => panic!("expected worker IoRequest"),
     }
@@ -639,10 +701,7 @@ mod tests {
     // No crash / panic path: orchestrator handles DOWN and
     // moves to completion behavior.
     assert!(matches!(action, Action::Stop(Reason::Normal)));
-    let s = state
-      .as_any()
-      .downcast_ref::<OrchestratorState>()
-      .unwrap();
+    let s = state.as_any().downcast_ref::<OrchestratorState>().unwrap();
     assert_eq!(s.results.len(), 1);
     assert_eq!(s.results[0]["type"], "worker_error");
   }

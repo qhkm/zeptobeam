@@ -132,6 +132,15 @@ pub enum IoOp {
     body: Option<Vec<u8>>,
     timeout_ms: Option<u64>,
   },
+  LlmRequest {
+    provider: String,
+    model: String,
+    prompt: String,
+    system_prompt: Option<String>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    timeout_ms: Option<u64>,
+  },
   Timer {
     duration: Duration,
   },
