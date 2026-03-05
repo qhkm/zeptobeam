@@ -105,22 +105,10 @@ impl TaskGraph {
   }
 
   pub fn mark_running(&mut self, task_id: &str) {
-    // Mark the specified task as running
+    // Mark only the specified task as running.
+    // Other ready tasks remain ready until explicitly dispatched.
     if let Some(node) = self.tasks.get_mut(task_id) {
       node.status = TaskStatus::Running;
-    }
-
-    // Also mark all other Ready tasks as Running (parallel execution semantics)
-    // This handles the case where multiple tasks become ready at the same time
-    // and should be executed in parallel
-    for id in &self.insertion_order {
-      if id != task_id {
-        if let Some(node) = self.tasks.get_mut(id) {
-          if node.status == TaskStatus::Ready {
-            node.status = TaskStatus::Running;
-          }
-        }
-      }
     }
   }
 
@@ -383,7 +371,7 @@ mod tests {
 
     graph.mark_running("left");
     graph.mark_completed("left");
-    assert_eq!(graph.ready_tasks().len(), 0);
+    assert_eq!(graph.ready_tasks().len(), 1);
 
     graph.mark_running("right");
     graph.mark_completed("right");
