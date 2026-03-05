@@ -103,18 +103,18 @@ Sophisticated multi-agent coordination patterns.
 
 ---
 
-## Phase 7: MCP Integration [PLANNED]
+## Phase 7: MCP Integration [DONE]
 
 Expose the runtime as an MCP server and consume MCP tools natively.
 
-- **MCP server mode**: Expose runtime as Model Context Protocol server — external agents can spawn processes, send messages, read metrics
-- **MCP tool consumer**: Agents natively discover and call MCP tool servers (filesystem, databases, APIs)
-- **Tool discovery**: Runtime-level MCP tool registry — agents share discovered tools
-- **Session management**: Map MCP sessions to agent process lifecycles
-- **Transport**: stdio and SSE transports for MCP protocol
-- **Authentication**: Token-based auth for MCP server endpoints
+- **MCP server mode**: Axum-based HTTP MCP server with SSE transport, runtime tool handlers (spawn, send, kill, metrics, list processes)
+- **MCP client**: Connect to external MCP tool servers via stdio transport, tool discovery and invocation
+- **JSON-RPC layer**: Full MCP JSON-RPC 2.0 protocol with initialize/tools/call lifecycle
+- **Tool factory integration**: McpToolFactory wires discovered MCP tools into agent ToolFactory
+- **Session management**: Token-based auth, session expiry, map MCP sessions to runtime lifecycle
+- **HTTP daemon wiring**: MCP runtime ops wired into health server endpoints
 
-**Prerequisite:** Phase 5 (HTTP server for SSE transport), Phase 3 (ToolFactory already supports pluggable tools).
+**Commits:** `0e6b33d` through `f4600e0`
 
 ---
 
@@ -132,6 +132,8 @@ Distribute agents across multiple runtime nodes.
 
 **Prerequisite:** Phase 5 (production readiness), Phase 7 (MCP transport layer reusable for node communication).
 
+**Status:** This is the only remaining core phase.
+
 ---
 
 ## Phase Summary
@@ -144,9 +146,10 @@ Distribute agents across multiple runtime nodes.
 | 4 | Reliability Hardening | Done | 146 |
 | 5 | Production Readiness | Done | ~20 |
 | 6 | Advanced Orchestration | Done | 48 |
-| 7 | MCP Integration | Planned | — |
+| 7 | MCP Integration | Done | ~18 |
 | 8 | Multi-Node Clustering | Planned | — |
-| 9 | BEAM Parity | Done | ~63 |
+| 9 | BEAM Parity | Done | ~80 |
+| **Total** | | **9 of 9 core phases done** | **343** |
 
 ---
 
