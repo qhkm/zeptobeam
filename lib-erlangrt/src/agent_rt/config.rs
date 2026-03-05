@@ -5,6 +5,24 @@ use serde::Deserialize;
 use crate::agent_rt::error::AgentRtError;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct AgentConfig {
+  pub name: String,
+  pub provider: String,
+  #[serde(default)]
+  pub model: Option<String>,
+  #[serde(default)]
+  pub system_prompt: Option<String>,
+  #[serde(default)]
+  pub tools: Vec<String>,
+  #[serde(default)]
+  pub auto_start: bool,
+  #[serde(default)]
+  pub max_iterations: Option<usize>,
+  #[serde(default)]
+  pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
   pub runtime: RuntimeConfig,
@@ -17,6 +35,7 @@ pub struct AppConfig {
   pub durable_mailbox: DurableMailboxConfig,
   pub hot_code: HotCodeConfig,
   pub release: ReleaseConfig,
+  pub agents: Vec<AgentConfig>,
 }
 
 /// MCP configuration section.
@@ -184,6 +203,7 @@ impl Default for AppConfig {
       durable_mailbox: DurableMailboxConfig::default(),
       hot_code: HotCodeConfig::default(),
       release: ReleaseConfig::default(),
+      agents: Vec::new(),
     }
   }
 }
@@ -575,5 +595,49 @@ max_history = 5
     assert_eq!(config.hot_code.stale_policy, "terminate");
     assert_eq!(config.release.manifest_dir, "/opt/releases");
     assert_eq!(config.release.max_history, 5);
+  }
+
+  #[test]
+  fn test_parse_agents_config() {
+    let toml_str = r#"
+[[agents]]
+name = "researcher"
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4"
+system_prompt = "You are a research assistant."
+tools = ["web_fetch", "longterm_memory"]
+auto_start = true
+
+[[agents]]
+name = "coder"
+provider = "openai"
+system_prompt = "You are a coding assistant."
+tools = ["shell", "filesystem"]
+auto_start = false
+"#;
+    let config = load_config_from_str(toml_str).unwrap();
+    assert_eq!(config.agents.len(), 2);
+
+    let r = &config.agents[0];
+    assert_eq!(r.name, "researcher");
+    assert_eq!(r.provider, "openrouter");
+    assert_eq!(r.model, Some("anthropic/claude-sonnet-4".into()));
+    assert_eq!(
+      r.system_prompt,
+      Some("You are a research assistant.".into())
+    );
+    assert_eq!(r.tools, vec!["web_fetch", "longterm_memory"]);
+    assert!(r.auto_start);
+
+    let c = &config.agents[1];
+    assert_eq!(c.name, "coder");
+    assert!(!c.auto_start);
+    assert!(c.model.is_none());
+  }
+
+  #[test]
+  fn test_empty_agents_defaults_to_empty_vec() {
+    let config = load_config_from_str("").unwrap();
+    assert!(config.agents.is_empty());
   }
 }
