@@ -3740,7 +3740,10 @@ async fn test_agent_destroy_not_blocked_by_pid_cancellation() {
       },
     )
     .unwrap();
-  assert!(handle.cancel(pid), "pid should have cancellable in-flight ops");
+  assert!(
+    handle.cancel(pid),
+    "pid should have cancellable in-flight ops"
+  );
   handle
     .submit(pid, IoOp::AgentDestroy { target_pid: pid })
     .unwrap();

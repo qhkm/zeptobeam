@@ -1,5 +1,4 @@
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use zeptoclaw::tools::{
   filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool},
@@ -8,8 +7,7 @@ use zeptoclaw::tools::{
   GitTool, HttpRequestTool, Tool,
 };
 
-use crate::agent_rt::mcp_client::McpClientManager;
-use crate::agent_rt::types::AgentPid;
+use crate::agent_rt::{mcp_client::McpClientManager, types::AgentPid};
 
 /// Builds tool sets for ZeptoAgent instances.
 /// Implementations know about available tools and filter
@@ -44,7 +42,11 @@ pub struct McpToolFactory {
 
 impl McpToolFactory {
   /// Create a new MCP tool factory.
-  pub fn new(inner: DefaultToolFactory, mcp_manager: Arc<McpClientManager>, agent_pid: AgentPid) -> Self {
+  pub fn new(
+    inner: DefaultToolFactory,
+    mcp_manager: Arc<McpClientManager>,
+    agent_pid: AgentPid,
+  ) -> Self {
     Self {
       inner,
       mcp_manager,
@@ -84,7 +86,7 @@ impl ToolFactory for McpToolFactory {
         .cloned()
         .collect::<Vec<_>>()
     });
-    
+
     let mut tools = self.inner.build_tools(local_whitelist.as_deref());
 
     // If MCP is enabled and whitelist contains MCP tools, add them
@@ -95,12 +97,13 @@ impl ToolFactory for McpToolFactory {
           .filter(|n| n.contains("__"))
           .map(|n| n.as_str())
           .collect();
-        
+
         if !mcp_tool_names.is_empty() {
           // Try to get tools from the session
           // This is synchronous, so we use try_get_tools_for_agent which returns
           // immediately if no session exists (lazy initialization on first use)
-          if let Ok(mcp_tools) = self.mcp_manager.try_get_tools_for_agent(self.agent_pid) {
+          if let Ok(mcp_tools) = self.mcp_manager.try_get_tools_for_agent(self.agent_pid)
+          {
             for tool in mcp_tools {
               if mcp_tool_names.contains(&tool.name()) {
                 tools.push(Box::new(tool));
@@ -266,8 +269,7 @@ fn parse_csv_env(key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
   use super::{DefaultToolFactory, McpToolFactory, ToolFactory};
-  use crate::agent_rt::mcp_client::McpClientManager;
-  use crate::agent_rt::types::AgentPid;
+  use crate::agent_rt::{mcp_client::McpClientManager, types::AgentPid};
 
   #[test]
   fn test_default_tool_factory_returns_empty_when_no_whitelist() {
@@ -295,9 +297,9 @@ mod tests {
     let inner = DefaultToolFactory::from_env();
     let mcp_manager = std::sync::Arc::new(McpClientManager::empty());
     let factory = McpToolFactory::new(inner, mcp_manager, AgentPid::new());
-    
+
     assert!(!factory.mcp_manager().is_enabled());
-    
+
     // Should still return local tools
     let tools = factory.build_tools(Some(&["shell".to_string()]));
     assert_eq!(tools.len(), 1);
@@ -309,12 +311,10 @@ mod tests {
     let inner = DefaultToolFactory::from_env();
     let mcp_manager = std::sync::Arc::new(McpClientManager::empty());
     let factory = McpToolFactory::new(inner, mcp_manager, AgentPid::new());
-    
-    let tools = factory.build_tools(Some(&[
-      "read_file".to_string(),
-      "write_file".to_string(),
-    ]));
-    
+
+    let tools =
+      factory.build_tools(Some(&["read_file".to_string(), "write_file".to_string()]));
+
     assert_eq!(tools.len(), 2);
     let names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
     assert!(names.contains(&"read_file".to_string()));

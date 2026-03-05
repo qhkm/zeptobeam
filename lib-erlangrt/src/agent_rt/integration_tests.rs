@@ -202,15 +202,17 @@ mod tests {
 
   #[tokio::test]
   async fn test_orchestrator_agent_chat_roundtrip() {
-    use crate::agent_rt::bridge::create_bridge;
-    use crate::agent_rt::bridge_metrics::BridgeMetrics;
-    use crate::agent_rt::orchestration::OrchestratorBehavior;
-    use crate::agent_rt::tool_factory::ToolFactory;
-    use zeptoclaw::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
-    use zeptoclaw::session::Message as ZeptoMessage;
-    use zeptoclaw::tools::Tool;
-    use zeptoclaw::error::Result as ZeptoResult;
+    use crate::agent_rt::{
+      bridge::create_bridge, bridge_metrics::BridgeMetrics,
+      orchestration::OrchestratorBehavior, tool_factory::ToolFactory,
+    };
     use std::collections::HashMap;
+    use zeptoclaw::{
+      error::Result as ZeptoResult,
+      providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition},
+      session::Message as ZeptoMessage,
+      tools::Tool,
+    };
 
     // Mock provider that returns predictable responses
     struct RoundtripMockProvider;
@@ -328,11 +330,7 @@ mod tests {
 
     // Clean up
     drop(sched);
-    let _ = tokio::time::timeout(
-      std::time::Duration::from_secs(2),
-      bridge_handle,
-    )
-    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), bridge_handle).await;
   }
 
   #[test]

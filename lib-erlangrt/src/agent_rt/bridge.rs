@@ -1,5 +1,6 @@
 use crate::agent_rt::{
   bridge_metrics::BridgeMetrics,
+  config::McpServerEntry,
   mcp_client::McpClientManager,
   observability::RuntimeMetrics,
   rate_limiter::RateLimiter,
@@ -108,6 +109,27 @@ pub fn create_bridge() -> (BridgeHandle, BridgeWorker) {
 /// The returned handle can be cloned and shared across
 /// schedulers; workers consume from one request queue.
 pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorker>) {
+  create_bridge_pool_with_mcp_manager(worker_count, Arc::new(McpClientManager::empty()))
+}
+
+/// Create a shared bridge handle and a worker pool pre-configured with
+/// external MCP servers.
+pub fn create_bridge_pool_with_mcp_servers(
+  worker_count: usize,
+  server_configs: Vec<McpServerEntry>,
+) -> (BridgeHandle, Vec<BridgeWorker>) {
+  create_bridge_pool_with_mcp_manager(
+    worker_count,
+    Arc::new(McpClientManager::new(server_configs)),
+  )
+}
+
+/// Create a shared bridge handle and a worker pool using an explicit MCP
+/// client manager.
+pub fn create_bridge_pool_with_mcp_manager(
+  worker_count: usize,
+  mcp_client_manager: Arc<McpClientManager>,
+) -> (BridgeHandle, Vec<BridgeWorker>) {
   let worker_count = worker_count.max(1);
   let (req_tx, req_rx) = bounded(REQUEST_QUEUE_SIZE);
   let (resp_tx, resp_rx) = bounded(RESPONSE_QUEUE_SIZE);
@@ -133,7 +155,7 @@ pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorke
       agent_tool_factory: Arc::new(DefaultToolFactory::from_env()),
       agent_metrics: agent_metrics.clone(),
       cancellation: cancellation.clone(),
-      mcp_client_manager: Arc::new(McpClientManager::empty()),
+      mcp_client_manager: mcp_client_manager.clone(),
     });
   }
   (handle, workers)
@@ -249,10 +271,12 @@ impl BridgeHandle {
 
   fn reserve_cancellation_slot(&self, pid: AgentPid) {
     let mut cancellation = self.cancellation.lock().unwrap();
-    let entry = cancellation.entry(pid).or_insert_with(|| CancellationEntry {
-      token: CancellationToken::new(),
-      in_flight: 0,
-    });
+    let entry = cancellation
+      .entry(pid)
+      .or_insert_with(|| CancellationEntry {
+        token: CancellationToken::new(),
+        in_flight: 0,
+      });
     entry.in_flight = entry.in_flight.saturating_add(1);
   }
 
@@ -532,72 +556,73 @@ async fn execute_agent_chat_standalone(
     _ => return IoResult::Error("not an AgentChat op".into()),
   };
 
-  let agent_arc = {
-    let mut registry = agent_registry.lock().unwrap();
-    registry
-      .entry(pid)
-      .or_insert_with(|| {
-        let llm_provider = provider_registry
-          .get(provider_name)
-          .cloned()
-          .unwrap_or_else(|| {
-            provider_registry
-              .values()
-              .next()
-              .expect("at least one provider")
-              .clone()
-          });
+  let existing = {
+    let registry = agent_registry.lock().unwrap();
+    registry.get(&pid).cloned()
+  };
 
-        // Build local tools
-        let mut tools =
-          tool_factory.build_tools(tools_whitelist.as_ref().map(|v| v.as_slice()));
+  let agent_arc = if let Some(existing_agent) = existing {
+    existing_agent
+  } else {
+    let llm_provider = provider_registry
+      .get(provider_name)
+      .cloned()
+      .unwrap_or_else(|| {
+        provider_registry
+          .values()
+          .next()
+          .expect("at least one provider")
+          .clone()
+      });
 
-        // Build MCP remote tools if MCP is enabled and whitelist has MCP tools
-        // This runs synchronously in the or_insert_with closure, but the actual
-        // MCP session creation happens lazily on first tool use
-        if mcp_manager.is_enabled() {
-          if let Some(whitelist) = tools_whitelist {
-            let has_mcp_tools = whitelist.iter().any(|n| n.contains("__"));
-            if has_mcp_tools {
-              // Try to get MCP tools synchronously
-              // This will return empty if no session exists yet (lazy init)
-              match mcp_manager.try_get_tools_for_agent(pid) {
-                Ok(mcp_tools) => {
-                  let mcp_names: std::collections::HashSet<&str> = whitelist
-                    .iter()
-                    .filter(|n| n.contains("__"))
-                    .map(|n| n.as_str())
-                    .collect();
-                  for tool in mcp_tools {
-                    if mcp_names.contains(tool.name()) {
-                      tools.push(Box::new(tool));
-                    }
-                  }
-                }
-                Err(e) => {
-                  tracing::warn!(pid = pid.raw(), error = %e, "Failed to get MCP tools for agent");
+    // Build local tools.
+    let mut tools =
+      tool_factory.build_tools(tools_whitelist.as_ref().map(|v| v.as_slice()));
+
+    // Build MCP remote tools if MCP is enabled and whitelist includes namespaced tools.
+    if mcp_manager.is_enabled() {
+      if let Some(whitelist) = tools_whitelist {
+        let mcp_names: std::collections::HashSet<&str> = whitelist
+          .iter()
+          .filter(|n| n.contains("__"))
+          .map(|n| n.as_str())
+          .collect();
+        if !mcp_names.is_empty() {
+          match mcp_manager.get_tools_for_agent(pid).await {
+            Ok(mcp_tools) => {
+              for tool in mcp_tools {
+                if mcp_names.contains(tool.name()) {
+                  tools.push(Box::new(tool));
                 }
               }
             }
+            Err(e) => {
+              tracing::warn!(pid = pid.raw(), error = %e, "Failed to initialize MCP tools for agent");
+            }
           }
         }
+      }
+    }
 
-        let mut builder = ZeptoAgent::builder()
-          .provider_arc(llm_provider)
-          .tools(tools);
+    let mut builder = ZeptoAgent::builder()
+      .provider_arc(llm_provider)
+      .tools(tools);
 
-        if let Some(sp) = system_prompt {
-          builder = builder.system_prompt(sp);
-        }
-        if let Some(m) = model {
-          builder = builder.model(m);
-        }
-        if let Some(mi) = max_iterations {
-          builder = builder.max_iterations(*mi);
-        }
+    if let Some(sp) = system_prompt {
+      builder = builder.system_prompt(sp);
+    }
+    if let Some(m) = model {
+      builder = builder.model(m);
+    }
+    if let Some(mi) = max_iterations {
+      builder = builder.max_iterations(*mi);
+    }
 
-        Arc::new(TokioMutex::new(builder.build().expect("agent build")))
-      })
+    let created = Arc::new(TokioMutex::new(builder.build().expect("agent build")));
+    let mut registry = agent_registry.lock().unwrap();
+    registry
+      .entry(pid)
+      .or_insert_with(|| created.clone())
       .clone()
   };
 
