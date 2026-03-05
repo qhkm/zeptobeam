@@ -7,6 +7,7 @@ pub mod cluster;
 pub mod approval_gate;
 pub mod config;
 pub mod dead_letter;
+pub mod dets;
 pub mod error;
 pub mod ets;
 pub mod mcp_jsonrpc;
