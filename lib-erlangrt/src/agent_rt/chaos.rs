@@ -65,13 +65,15 @@ impl<S: crate::agent_rt::checkpoint::CheckpointStore> FaultyCheckpointStore<S> {
 use crate::agent_rt::error::AgentRtError;
 
 #[cfg(test)]
-impl<S: crate::agent_rt::checkpoint::CheckpointStore> crate::agent_rt::checkpoint::CheckpointStore
-  for FaultyCheckpointStore<S>
+impl<S: crate::agent_rt::checkpoint::CheckpointStore>
+  crate::agent_rt::checkpoint::CheckpointStore for FaultyCheckpointStore<S>
 {
   fn save(&self, key: &str, checkpoint: &serde_json::Value) -> Result<(), AgentRtError> {
     let attempt = self.attempt.fetch_add(1, Ordering::Relaxed);
     if self.config.should_fail(attempt) {
-      return Err(AgentRtError::Checkpoint("chaos: injected save failure".into()));
+      return Err(AgentRtError::Checkpoint(
+        "chaos: injected save failure".into(),
+      ));
     }
     self.inner.save(key, checkpoint)
   }
@@ -83,7 +85,9 @@ impl<S: crate::agent_rt::checkpoint::CheckpointStore> crate::agent_rt::checkpoin
       if *mode == FaultMode::CorruptData {
         return Ok(Some(serde_json::json!({"corrupted": true})));
       }
-      return Err(AgentRtError::Checkpoint("chaos: injected load failure".into()));
+      return Err(AgentRtError::Checkpoint(
+        "chaos: injected load failure".into(),
+      ));
     }
     self.inner.load(key)
   }
@@ -91,7 +95,9 @@ impl<S: crate::agent_rt::checkpoint::CheckpointStore> crate::agent_rt::checkpoin
   fn delete(&self, key: &str) -> Result<(), AgentRtError> {
     let attempt = self.attempt.fetch_add(1, Ordering::Relaxed);
     if self.config.should_fail(attempt) {
-      return Err(AgentRtError::Checkpoint("chaos: injected delete failure".into()));
+      return Err(AgentRtError::Checkpoint(
+        "chaos: injected delete failure".into(),
+      ));
     }
     self.inner.delete(key)
   }

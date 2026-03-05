@@ -625,10 +625,7 @@ impl AgentBehavior for WorkerBehavior {
       .and_then(|v| v.as_str())
       .unwrap_or("task")
       .to_string();
-    let max_turns = args
-      .get("max_turns")
-      .and_then(|v| v.as_u64())
-      .unwrap_or(10) as usize;
+    let max_turns = args.get("max_turns").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     Ok(Box::new(WorkerState {
       parent: parent_pid,
       task_id,
@@ -711,9 +708,7 @@ impl AgentBehavior for WorkerBehavior {
           })),
         }
       }
-      Message::System(SystemMsg::ReceiveTimeout) => {
-        Action::Stop(Reason::Shutdown)
-      }
+      Message::System(SystemMsg::ReceiveTimeout) => Action::Stop(Reason::Shutdown),
       _ => Action::Continue,
     }
   }
@@ -830,15 +825,12 @@ fn build_llm_request_from_task(task: &serde_json::Value) -> IoOp {
     .and_then(|v| v.as_str())
     .map(str::to_string);
 
-  let tools = task
-    .get("tools")
-    .and_then(|v| v.as_array())
-    .map(|arr| {
-      arr
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect::<Vec<String>>()
-    });
+  let tools = task.get("tools").and_then(|v| v.as_array()).map(|arr| {
+    arr
+      .iter()
+      .filter_map(|v| v.as_str().map(str::to_string))
+      .collect::<Vec<String>>()
+  });
 
   let max_iterations = task
     .get("max_iterations")
