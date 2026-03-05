@@ -3263,3 +3263,187 @@ async fn test_agent_chat_creates_agent_on_first_call() {
     _ => panic!("expected Ok"),
   }
 }
+
+// === Task 5: AgentDestroy eviction and idempotency ===
+
+#[tokio::test]
+async fn test_agent_destroy_evicts_registry() {
+  let (_handle, mut worker) = create_bridge();
+  let provider_registry = Arc::new(create_mock_provider_registry());
+  let tool_factory: Arc<dyn crate::agent_rt::tool_factory::ToolFactory> =
+    Arc::new(MockToolFactory);
+  let metrics = Arc::new(BridgeMetrics::new());
+  worker.set_agent_provider_registry(provider_registry);
+  worker.set_agent_tool_factory(tool_factory);
+  worker.set_agent_metrics(metrics);
+
+  let pid = AgentPid::from_raw(0x8000_B001);
+  let op = IoOp::AgentChat {
+    provider: "mock".to_string(),
+    model: None,
+    system_prompt: None,
+    prompt: "Hello".to_string(),
+    tools: None,
+    max_iterations: None,
+    timeout_ms: None,
+  };
+  // Create agent via chat
+  let _ = worker.execute_agent_chat(pid, &op).await;
+
+  // Destroy — should return destroyed: true
+  let result = worker.execute_agent_destroy(&pid);
+  match result {
+    IoResult::Ok(v) => assert_eq!(v["destroyed"], true),
+    _ => panic!("expected Ok"),
+  }
+
+  // Next chat should create a fresh agent (no error)
+  let result2 = worker.execute_agent_chat(pid, &op).await;
+  assert!(matches!(result2, IoResult::Ok(_)));
+}
+
+#[tokio::test]
+async fn test_agent_destroy_idempotent() {
+  let (_handle, worker) = create_bridge();
+  let pid = AgentPid::from_raw(0x8000_B002);
+
+  let result = worker.execute_agent_destroy(&pid);
+  match result {
+    IoResult::Ok(v) => assert_eq!(v["destroyed"], false),
+    _ => panic!("expected Ok with destroyed: false"),
+  }
+}
+
+// === Task 6: Multi-turn history ===
+
+struct CountingMockProvider {
+  call_log: Arc<std::sync::Mutex<Vec<usize>>>,
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for CountingMockProvider {
+  async fn chat(
+    &self,
+    messages: Vec<ZeptoMessage>,
+    _tools: Vec<ToolDefinition>,
+    _model: Option<&str>,
+    _options: ChatOptions,
+  ) -> ZeptoResult<LLMResponse> {
+    self.call_log.lock().unwrap().push(messages.len());
+    Ok(LLMResponse::text("Counted response"))
+  }
+  fn default_model(&self) -> &str {
+    "count-model"
+  }
+  fn name(&self) -> &str {
+    "counting"
+  }
+}
+
+#[tokio::test]
+async fn test_agent_chat_multi_turn_history() {
+  let call_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+  let counting_provider = CountingMockProvider {
+    call_log: call_log.clone(),
+  };
+  let mut registry = std::collections::HashMap::new();
+  registry.insert(
+    "counting".to_string(),
+    Arc::new(counting_provider) as Arc<dyn LLMProvider + Send + Sync>,
+  );
+
+  let (_handle, mut worker) = create_bridge();
+  worker.set_agent_provider_registry(Arc::new(registry));
+  worker.set_agent_tool_factory(
+    Arc::new(MockToolFactory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>,
+  );
+  worker.set_agent_metrics(Arc::new(BridgeMetrics::new()));
+
+  let pid = AgentPid::from_raw(0x8000_C001);
+
+  let op1 = IoOp::AgentChat {
+    provider: "counting".to_string(),
+    model: None,
+    system_prompt: None,
+    prompt: "First message".to_string(),
+    tools: None,
+    max_iterations: None,
+    timeout_ms: None,
+  };
+  let _ = worker.execute_agent_chat(pid, &op1).await;
+
+  let op2 = IoOp::AgentChat {
+    provider: "counting".to_string(),
+    model: None,
+    system_prompt: None,
+    prompt: "Second message".to_string(),
+    tools: None,
+    max_iterations: None,
+    timeout_ms: None,
+  };
+  let _ = worker.execute_agent_chat(pid, &op2).await;
+
+  let log = call_log.lock().unwrap();
+  assert!(
+    log.len() >= 2,
+    "expected at least 2 calls, got {}",
+    log.len()
+  );
+  assert!(
+    log[1] > log[0],
+    "second call ({}) should see more history than first ({})",
+    log[1],
+    log[0]
+  );
+}
+
+// === Task 7: Tool whitelist ===
+
+struct RecordingToolFactory {
+  requested: Arc<std::sync::Mutex<Option<Vec<String>>>>,
+}
+
+impl crate::agent_rt::tool_factory::ToolFactory for RecordingToolFactory {
+  fn build_tools(&self, whitelist: Option<&[String]>) -> Vec<Box<dyn Tool>> {
+    *self.requested.lock().unwrap() = whitelist.map(|w| w.to_vec());
+    vec![]
+  }
+}
+
+#[tokio::test]
+async fn test_agent_chat_tool_whitelist() {
+  let requested = Arc::new(std::sync::Mutex::new(None::<Vec<String>>));
+  let factory = RecordingToolFactory {
+    requested: requested.clone(),
+  };
+
+  let (_handle, mut worker) = create_bridge();
+  worker.set_agent_provider_registry(Arc::new(create_mock_provider_registry()));
+  worker.set_agent_tool_factory(
+    Arc::new(factory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>,
+  );
+  worker.set_agent_metrics(Arc::new(BridgeMetrics::new()));
+
+  let pid = AgentPid::from_raw(0x8000_D001);
+  let op = IoOp::AgentChat {
+    provider: "mock".to_string(),
+    model: None,
+    system_prompt: None,
+    prompt: "Search for something".to_string(),
+    tools: Some(vec![
+      "web_search".to_string(),
+      "shell".to_string(),
+    ]),
+    max_iterations: None,
+    timeout_ms: None,
+  };
+
+  let _ = worker.execute_agent_chat(pid, &op).await;
+
+  let req = requested.lock().unwrap();
+  assert_eq!(
+    req.as_ref().unwrap(),
+    &vec!["web_search".to_string(), "shell".to_string()]
+  );
+}
