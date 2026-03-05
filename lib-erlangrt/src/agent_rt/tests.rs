@@ -2922,3 +2922,84 @@ async fn test_bridge_rate_limiter_throttles_requests() {
   );
   server.join().unwrap();
 }
+
+#[test]
+fn test_scheduler_list_processes_reports_mailbox_depth() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(EchoBehavior), serde_json::Value::Null)
+    .unwrap();
+
+  sched.send(pid, Message::Text("m1".into())).unwrap();
+  sched.send(pid, Message::Text("m2".into())).unwrap();
+
+  let processes = sched.list_processes();
+  let snap = processes.iter().find(|p| p.pid == pid.raw()).unwrap();
+  assert_eq!(snap.mailbox_depth, 2);
+  assert_eq!(snap.link_count, 0);
+  assert_eq!(snap.monitor_count, 0);
+  assert_eq!(snap.monitored_by_count, 0);
+  assert_eq!(snap.status, ProcessStatus::Runnable);
+}
+
+#[test]
+fn test_scheduler_metrics_track_messages_and_termination() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(EchoBehavior), serde_json::Value::Null)
+    .unwrap();
+
+  sched.send(pid, Message::Text("work".into())).unwrap();
+  sched.enqueue(pid);
+  sched.tick();
+  sched.terminate_process(pid, Reason::Shutdown);
+
+  let metrics = sched.metrics_snapshot();
+  assert_eq!(metrics.active_processes, 0);
+  assert_eq!(metrics.messages_sent_total, 1);
+  assert!(
+    metrics.messages_processed_total >= 1,
+    "expected processed messages to be tracked"
+  );
+  assert_eq!(metrics.process_terminations_total, 1);
+}
+
+#[tokio::test]
+async fn test_bridge_records_io_metrics() {
+  let mut sched = AgentScheduler::new();
+  let metrics = sched.metrics();
+  let (bridge_handle, worker) =
+    crate::agent_rt::bridge::create_bridge_with_metrics(metrics);
+  sched.set_bridge(bridge_handle);
+
+  let worker_handle = tokio::spawn(async move { worker.run().await });
+
+  let behavior = Arc::new(IoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched.send(pid, Message::Text("trigger".into())).unwrap();
+  sched.enqueue(pid);
+  sched.tick();
+
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+  loop {
+    sched.tick();
+    let snapshot = sched.metrics_snapshot();
+    if snapshot.io_responses_total > 0 {
+      assert!(snapshot.io_latency_samples > 0);
+      assert!(snapshot.io_latency_total_ms > 0);
+      break;
+    }
+    if std::time::Instant::now() >= deadline {
+      panic!("timed out waiting for io metrics");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+  }
+
+  drop(sched);
+  let _ = worker_handle.await;
+}

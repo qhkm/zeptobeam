@@ -4,6 +4,9 @@ use std::{
   time::{Duration, Instant},
 };
 
+use crate::agent_rt::observability::RuntimeMetrics;
+use tracing::debug;
+
 /// Per-provider rate limiter using a sliding window.
 ///
 /// Each provider has a maximum number of requests allowed
@@ -12,6 +15,7 @@ use std::{
 #[derive(Clone)]
 pub struct RateLimiter {
   inner: Arc<Mutex<RateLimiterInner>>,
+  metrics: Arc<Mutex<Option<Arc<RuntimeMetrics>>>>,
 }
 
 struct RateLimiterInner {
@@ -32,7 +36,12 @@ impl RateLimiter {
         providers: HashMap::new(),
         default_limit: None,
       })),
+      metrics: Arc::new(Mutex::new(None)),
     }
+  }
+
+  pub fn set_metrics(&self, metrics: Arc<RuntimeMetrics>) {
+    *self.metrics.lock().unwrap() = Some(metrics);
   }
 
   /// Set a rate limit for a specific provider.
@@ -94,6 +103,9 @@ impl RateLimiter {
     } else {
       let oldest = *limit.timestamps.front().unwrap();
       let wait = limit.window - now.duration_since(oldest);
+      if let Some(metrics) = self.metrics.lock().unwrap().clone() {
+        metrics.record_rate_limiter_rejection();
+      }
       Err(wait)
     }
   }
@@ -104,7 +116,17 @@ impl RateLimiter {
     loop {
       match self.try_acquire(provider) {
         Ok(()) => return,
-        Err(wait) => std::thread::sleep(wait),
+        Err(wait) => {
+          if let Some(metrics) = self.metrics.lock().unwrap().clone() {
+            metrics.record_rate_limiter_wait(wait);
+          }
+          debug!(
+            provider = provider,
+            wait_ms = wait.as_millis() as u64,
+            "rate limiter wait"
+          );
+          std::thread::sleep(wait)
+        }
       }
     }
   }

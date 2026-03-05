@@ -1,11 +1,13 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::agent_rt::{
   bridge::BridgeHandle,
+  observability::{ProcessSnapshot, RuntimeMetrics, RuntimeMetricsSnapshot},
   process::{Priority, ProcessStatus},
   registry::AgentRegistry,
   types::*,
 };
+use tracing::{debug, info};
 
 const DEFAULT_REDUCTIONS: u32 = 200;
 const NORMAL_ADVANTAGE: usize = 8;
@@ -21,6 +23,7 @@ pub struct AgentScheduler {
   queue_low: VecDeque<AgentPid>,
   advantage_count: usize,
   bridge: Option<BridgeHandle>,
+  metrics: Arc<RuntimeMetrics>,
   exit_handlers: Vec<ExitHandler>,
 }
 
@@ -33,8 +36,38 @@ impl AgentScheduler {
       queue_low: VecDeque::new(),
       advantage_count: 0,
       bridge: None,
+      metrics: Arc::new(RuntimeMetrics::new()),
       exit_handlers: Vec::new(),
     }
+  }
+
+  pub fn metrics(&self) -> Arc<RuntimeMetrics> {
+    self.metrics.clone()
+  }
+
+  pub fn metrics_snapshot(&self) -> RuntimeMetricsSnapshot {
+    self.metrics.snapshot(self.registry.count())
+  }
+
+  pub fn list_processes(&self) -> Vec<ProcessSnapshot> {
+    let mut snapshots: Vec<ProcessSnapshot> = self
+      .registry
+      .pids()
+      .into_iter()
+      .filter_map(|pid| self.registry.lookup(&pid))
+      .map(|proc| ProcessSnapshot {
+        pid: proc.pid.raw(),
+        status: proc.status,
+        priority: proc.priority,
+        mailbox_depth: proc.mailbox.len(),
+        link_count: proc.links.len(),
+        monitor_count: proc.monitors.len(),
+        monitored_by_count: proc.monitored_by.len(),
+        trap_exit: proc.trap_exit,
+      })
+      .collect();
+    snapshots.sort_by_key(|s| s.pid);
+    snapshots
   }
 
   pub fn set_bridge(&mut self, bridge: BridgeHandle) {
@@ -72,11 +105,7 @@ impl AgentScheduler {
     Ok(mon_ref)
   }
 
-  pub fn demonitor(
-    &mut self,
-    watcher: AgentPid,
-    mon_ref: MonitorRef,
-  ) -> bool {
+  pub fn demonitor(&mut self, watcher: AgentPid, mon_ref: MonitorRef) -> bool {
     let target = {
       let watcher_proc = match self.registry.lookup_mut(&watcher) {
         Some(proc) => proc,
@@ -133,6 +162,7 @@ impl AgentScheduler {
       Priority::Normal => self.queue_normal.push_back(pid),
       Priority::Low => self.queue_low.push_back(pid),
     }
+    debug!(pid = pid.raw(), ?priority, "scheduler enqueue");
   }
 
   /// Pick the next runnable process from priority queues.
@@ -160,6 +190,7 @@ impl AgentScheduler {
   /// Deliver a message to a process. If the process was
   /// Waiting, wake it and re-enqueue it.
   pub fn send(&mut self, to: AgentPid, msg: Message) -> Result<(), String> {
+    let msg_kind = message_kind(&msg);
     let was_waiting = {
       let proc = self
         .registry
@@ -169,6 +200,13 @@ impl AgentScheduler {
       proc.deliver_message(msg);
       was
     };
+    self.metrics.record_message_sent();
+    debug!(
+      to = to.raw(),
+      msg_kind = msg_kind,
+      woke_waiting = was_waiting,
+      "scheduler send"
+    );
     if was_waiting {
       self.enqueue(to);
     }
@@ -184,6 +222,12 @@ impl AgentScheduler {
       .as_ref()
       .map(|b| b.drain_responses())
       .unwrap_or_default();
+    if !responses.is_empty() {
+      debug!(
+        count = responses.len(),
+        "scheduler drained bridge responses"
+      );
+    }
     for (resp_pid, msg) in responses {
       let _ = self.send(resp_pid, msg);
     }
@@ -209,6 +253,7 @@ impl AgentScheduler {
       if let Some(proc) = self.registry.lookup_mut(&pid) {
         proc.receive_timeout = None;
       }
+      debug!(pid = pid.raw(), "scheduler receive timeout fired");
       let _ = self.send(pid, Message::System(SystemMsg::ReceiveTimeout));
     }
 
@@ -225,6 +270,7 @@ impl AgentScheduler {
         .map(|p| p.status == ProcessStatus::Runnable)
         .unwrap_or(false);
       if is_runnable {
+        debug!(pid = candidate.raw(), "scheduler selected runnable process");
         break candidate;
       }
     };
@@ -276,6 +322,7 @@ impl AgentScheduler {
           break;
         }
       };
+      self.metrics.record_message_processed();
 
       // Dispatch message: get behavior + state, call
       // the appropriate callback, then put state back.
@@ -293,14 +340,13 @@ impl AgentScheduler {
           Some(s) => s,
           None => break,
         };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-          match msg {
+        let result =
+          std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match msg {
             Message::System(SystemMsg::Exit { from, reason }) => {
               behavior.handle_exit(AgentPid::from_raw(from), reason, state.as_mut())
             }
             other => behavior.handle_message(other, state.as_mut()),
-          }
-        }));
+          }));
         match result {
           Ok(action) => {
             if let Some(proc) = self.registry.lookup_mut(&pid) {
@@ -331,10 +377,16 @@ impl AgentScheduler {
           pending_sends.push((to, msg));
         }
         Action::Stop(reason) => {
+          debug!(pid = pid.raw(), ?reason, "process requested stop");
           should_stop = Some(reason);
           break;
         }
         Action::IoRequest(op) => {
+          debug!(
+            pid = pid.raw(),
+            op_kind = io_op_kind(&op),
+            "process requested i/o"
+          );
           if let Some(proc) = self.registry.lookup_mut(&pid) {
             proc.reductions = proc.reductions.saturating_sub(1);
             proc.status = ProcessStatus::Waiting;
@@ -354,9 +406,7 @@ impl AgentScheduler {
             // No bridge configured — deliver error
             // back to process so it doesn't get stuck
             if let Some(proc) = self.registry.lookup_mut(&pid) {
-              proc.deliver_message(Message::Text(
-                "no I/O bridge configured".to_string(),
-              ));
+              proc.deliver_message(Message::Text("no I/O bridge configured".to_string()));
               proc.status = ProcessStatus::Runnable;
             }
             self.enqueue(pid);
@@ -418,6 +468,14 @@ impl AgentScheduler {
           monitor_ref,
         });
         let _ = self.send(pid, spawn_msg);
+        debug!(
+          parent_pid = pid.raw(),
+          child_pid = child_pid.raw(),
+          link,
+          monitor,
+          monitor_ref = ?monitor_ref,
+          "spawn completed"
+        );
 
         self.enqueue(child_pid);
       }
@@ -438,6 +496,7 @@ impl AgentScheduler {
   /// is not Normal, cascade termination. Normal exits
   /// with trap_exit=false do not propagate.
   pub fn terminate_process(&mut self, pid: AgentPid, reason: Reason) {
+    info!(pid = pid.raw(), ?reason, "terminating process");
     // Collect links and monitor relations before terminating
     let (links, monitored_by, monitors): (
       Vec<AgentPid>,
@@ -446,13 +505,7 @@ impl AgentScheduler {
     ) = self
       .registry
       .lookup(&pid)
-      .map(|p| {
-        (
-          p.links.clone(),
-          p.monitored_by.clone(),
-          p.monitors.clone(),
-        )
-      })
+      .map(|p| (p.links.clone(), p.monitored_by.clone(), p.monitors.clone()))
       .unwrap_or_default();
 
     // Call terminate on the process
@@ -467,20 +520,17 @@ impl AgentScheduler {
     // Remove reverse monitor records for monitors owned by
     // this process.
     for (mon_ref, target_pid) in monitors {
-      if let Some(target_proc) =
-        self.registry.lookup_mut(&target_pid)
-      {
-        target_proc.monitored_by.retain(|(r, w)| {
-          !(*r == mon_ref && *w == pid)
-        });
+      if let Some(target_proc) = self.registry.lookup_mut(&target_pid) {
+        target_proc
+          .monitored_by
+          .retain(|(r, w)| !(*r == mon_ref && *w == pid));
       }
     }
 
     // Notify linked processes
     let mut pids_to_cascade: Vec<AgentPid> = Vec::new();
     let mut pids_to_wake: Vec<AgentPid> = Vec::new();
-    let mut down_to_send: Vec<(AgentPid, Message)> =
-      Vec::new();
+    let mut down_to_send: Vec<(AgentPid, Message)> = Vec::new();
 
     for linked_pid in &links {
       let trap = self
@@ -515,9 +565,7 @@ impl AgentScheduler {
 
     // Notify monitor watchers via DOWN messages
     for (mon_ref, watcher_pid) in monitored_by {
-      if let Some(watcher_proc) =
-        self.registry.lookup_mut(&watcher_pid)
-      {
+      if let Some(watcher_proc) = self.registry.lookup_mut(&watcher_pid) {
         watcher_proc
           .monitors
           .retain(|(r, t)| !(*r == mon_ref && *t == pid));
@@ -556,11 +604,29 @@ impl AgentScheduler {
       }
       self.exit_handlers = handlers;
     }
+    self.metrics.record_process_termination();
   }
 }
 
 impl Default for AgentScheduler {
   fn default() -> Self {
     Self::new()
+  }
+}
+
+fn message_kind(msg: &Message) -> &'static str {
+  match msg {
+    Message::Text(_) => "Text",
+    Message::Json(_) => "Json",
+    Message::System(_) => "System",
+  }
+}
+
+fn io_op_kind(op: &IoOp) -> &'static str {
+  match op {
+    IoOp::HttpRequest { .. } => "HttpRequest",
+    IoOp::LlmRequest { .. } => "LlmRequest",
+    IoOp::Timer { .. } => "Timer",
+    IoOp::Custom { .. } => "Custom",
   }
 }

@@ -1,6 +1,9 @@
-use crate::agent_rt::{rate_limiter::RateLimiter, types::*};
+use crate::agent_rt::{
+  observability::RuntimeMetrics, rate_limiter::RateLimiter, types::*,
+};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use std::error::Error as StdError;
+use std::{error::Error as StdError, sync::Arc};
+use tracing::{debug, warn};
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
 const RESPONSE_QUEUE_SIZE: usize = 4096;
@@ -62,6 +65,7 @@ pub struct BridgeWorker {
   request_rx: Receiver<IoRequest>,
   response_tx: Sender<IoResponse>,
   rate_limiter: Option<RateLimiter>,
+  metrics: Option<Arc<RuntimeMetrics>>,
   llm_config: LlmConfig,
 }
 
@@ -80,9 +84,18 @@ pub fn create_bridge() -> (BridgeHandle, BridgeWorker) {
       request_rx: req_rx,
       response_tx: resp_tx,
       rate_limiter: None,
+      metrics: None,
       llm_config: LlmConfig::from_env(),
     },
   )
+}
+
+pub fn create_bridge_with_metrics(
+  metrics: Arc<RuntimeMetrics>,
+) -> (BridgeHandle, BridgeWorker) {
+  let (handle, mut worker) = create_bridge();
+  worker.set_metrics(metrics);
+  (handle, worker)
 }
 
 impl BridgeHandle {
@@ -129,7 +142,17 @@ impl BridgeHandle {
 impl BridgeWorker {
   /// Attach a rate limiter. Must be called before `run`.
   pub fn set_rate_limiter(&mut self, rl: RateLimiter) {
+    if let Some(metrics) = &self.metrics {
+      rl.set_metrics(metrics.clone());
+    }
     self.rate_limiter = Some(rl);
+  }
+
+  pub fn set_metrics(&mut self, metrics: Arc<RuntimeMetrics>) {
+    if let Some(ref rl) = self.rate_limiter {
+      rl.set_metrics(metrics.clone());
+    }
+    self.metrics = Some(metrics);
   }
 
   /// Run the worker loop. Receives requests from the
@@ -141,6 +164,7 @@ impl BridgeWorker {
     let req_rx = self.request_rx;
     let resp_tx = self.response_tx;
     let rate_limiter = self.rate_limiter;
+    let metrics = self.metrics;
     let llm_config = self.llm_config;
     loop {
       let rx = req_rx.clone();
@@ -152,9 +176,55 @@ impl BridgeWorker {
       };
       let tx = resp_tx.clone();
       let rl = rate_limiter.clone();
+      let metrics = metrics.clone();
       let llm_cfg = llm_config.clone();
       tokio::spawn(async move {
+        let op_kind = io_op_kind(&req.op);
+        if let Some(ref m) = metrics {
+          m.record_io_request();
+        }
+        debug!(
+          pid = req.source_pid.raw(),
+          correlation_id = req.correlation_id,
+          op_kind = op_kind,
+          "bridge io start"
+        );
+        let start = std::time::Instant::now();
         let result = execute_io_op_with_config(&req.op, rl.as_ref(), &llm_cfg).await;
+        let latency = start.elapsed();
+        if let Some(ref m) = metrics {
+          m.record_io_result(&result, latency);
+        }
+        match &result {
+          IoResult::Ok(_) => {
+            debug!(
+              pid = req.source_pid.raw(),
+              correlation_id = req.correlation_id,
+              op_kind = op_kind,
+              latency_ms = latency.as_millis() as u64,
+              "bridge io success"
+            );
+          }
+          IoResult::Timeout => {
+            warn!(
+              pid = req.source_pid.raw(),
+              correlation_id = req.correlation_id,
+              op_kind = op_kind,
+              latency_ms = latency.as_millis() as u64,
+              "bridge io timeout"
+            );
+          }
+          IoResult::Error(err) => {
+            warn!(
+              pid = req.source_pid.raw(),
+              correlation_id = req.correlation_id,
+              op_kind = op_kind,
+              latency_ms = latency.as_millis() as u64,
+              error = err,
+              "bridge io error"
+            );
+          }
+        }
         let resp = IoResponse {
           correlation_id: req.correlation_id,
           source_pid: req.source_pid,
@@ -163,6 +233,15 @@ impl BridgeWorker {
         let _ = tx.send(resp);
       });
     }
+  }
+}
+
+fn io_op_kind(op: &IoOp) -> &'static str {
+  match op {
+    IoOp::HttpRequest { .. } => "HttpRequest",
+    IoOp::LlmRequest { .. } => "LlmRequest",
+    IoOp::Timer { .. } => "Timer",
+    IoOp::Custom { .. } => "Custom",
   }
 }
 
