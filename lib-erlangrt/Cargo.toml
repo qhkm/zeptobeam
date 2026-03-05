@@ -41,7 +41,6 @@ colored = "2.0.0" # console colors (TTY systems)
 compress = "0.2.1" # depends on `num`; TODO: use libflate
 crossbeam-channel = "0.5"
 lazy_static = "1.4.0"
-ramp = "0.7.0" # Rust multiprecision arithmetics
 byteorder = "1.4.3"
 failure = "0.1.8"
 serde = { version = "1", features = ["derive"] }

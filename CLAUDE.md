@@ -8,7 +8,7 @@ ErlangRT is an alternative Erlang BEAM runtime (emulator) written in Rust. It lo
 
 ## Build Commands
 
-Requires Rust **nightly** toolchain (uses `#![feature(ptr_metadata)]`).
+Requires Rust **nightly** toolchain (uses `#![feature(ptr_metadata)]`, pinned in `rust-toolchain.toml`).
 
 ```bash
 # First-time setup: initialize OTP submodule and build OTP stdlib/preloaded BEAM files
