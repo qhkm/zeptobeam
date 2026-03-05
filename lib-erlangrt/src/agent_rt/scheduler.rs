@@ -736,7 +736,6 @@ fn message_kind(msg: &Message) -> &'static str {
 fn io_op_kind(op: &IoOp) -> &'static str {
   match op {
     IoOp::HttpRequest { .. } => "HttpRequest",
-    IoOp::LlmRequest { .. } => "LlmRequest",
     IoOp::Timer { .. } => "Timer",
     IoOp::Custom { .. } => "Custom",
     IoOp::AgentChat { .. } => "AgentChat",

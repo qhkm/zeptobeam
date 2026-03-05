@@ -22,32 +22,6 @@ use zeptoclaw::providers::LLMProvider;
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
 const RESPONSE_QUEUE_SIZE: usize = 4096;
-const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
-const ANTHROPIC_VERSION_HEADER: &str = "2023-06-01";
-const LLM_REQUEST_KIND: &str = "llm_request";
-
-#[derive(Clone, Debug)]
-pub(crate) struct LlmConfig {
-  pub openai_api_key: Option<String>,
-  pub anthropic_api_key: Option<String>,
-  pub openai_base_url: String,
-  pub anthropic_base_url: String,
-}
-
-impl LlmConfig {
-  pub fn from_env() -> Self {
-    Self {
-      openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
-      anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-      openai_base_url: std::env::var("OPENAI_API_URL")
-        .unwrap_or_else(|_| OPENAI_DEFAULT_BASE_URL.to_string()),
-      anthropic_base_url: std::env::var("ANTHROPIC_API_URL")
-        .unwrap_or_else(|_| ANTHROPIC_DEFAULT_BASE_URL.to_string()),
-    }
-  }
-}
-
 /// Request sent from scheduler thread to Tokio thread
 /// pool.
 #[derive(Debug)]
@@ -98,7 +72,6 @@ pub struct BridgeWorker {
   response_tx: Sender<IoResponse>,
   rate_limiter: Option<RateLimiter>,
   metrics: Option<Arc<RuntimeMetrics>>,
-  llm_config: LlmConfig,
   // Agent-related fields
   agent_registry: Arc<std::sync::Mutex<HashMap<AgentPid, Arc<TokioMutex<ZeptoAgent>>>>>,
   agent_provider_registry: Arc<HashMap<String, Arc<dyn LLMProvider + Send + Sync>>>,
@@ -144,7 +117,6 @@ pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorke
       response_tx: resp_tx.clone(),
       rate_limiter: None,
       metrics: None,
-      llm_config: LlmConfig::from_env(),
       agent_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
       agent_provider_registry: Arc::new(HashMap::new()),
       agent_tool_factory: Arc::new(NoopToolFactory),
@@ -292,7 +264,6 @@ impl BridgeWorker {
     let resp_tx = self.response_tx;
     let rate_limiter = self.rate_limiter;
     let metrics = self.metrics;
-    let llm_config = self.llm_config;
     let agent_registry = self.agent_registry;
     let agent_provider_registry = self.agent_provider_registry;
     let agent_tool_factory = self.agent_tool_factory;
@@ -312,7 +283,6 @@ impl BridgeWorker {
           let tx = resp_tx.clone();
           let rl = rate_limiter.clone();
           let metrics = metrics.clone();
-          let llm_cfg = llm_config.clone();
           let agent_reg = agent_registry.clone();
           let agent_prov = agent_provider_registry.clone();
           let agent_tf = agent_tool_factory.clone();
@@ -347,8 +317,7 @@ impl BridgeWorker {
                 IoResult::Ok(serde_json::json!({ "destroyed": removed }))
               }
               _ => {
-                execute_io_op_with_config(&req.op, rl.as_ref(), &llm_cfg)
-                  .await
+                execute_io_op(&req.op, rl.as_ref()).await
               }
             };
             let latency = start.elapsed();
@@ -416,7 +385,6 @@ impl BridgeWorker {
 fn io_op_kind(op: &IoOp) -> &'static str {
   match op {
     IoOp::HttpRequest { .. } => "HttpRequest",
-    IoOp::LlmRequest { .. } => "LlmRequest",
     IoOp::Timer { .. } => "Timer",
     IoOp::Custom { .. } => "Custom",
     IoOp::AgentChat { .. } => "AgentChat",
@@ -524,15 +492,6 @@ pub(crate) async fn execute_io_op(
   op: &IoOp,
   rate_limiter: Option<&RateLimiter>,
 ) -> IoResult {
-  let cfg = LlmConfig::from_env();
-  execute_io_op_with_config(op, rate_limiter, &cfg).await
-}
-
-pub(crate) async fn execute_io_op_with_config(
-  op: &IoOp,
-  rate_limiter: Option<&RateLimiter>,
-  llm_config: &LlmConfig,
-) -> IoResult {
   match op {
     IoOp::Timer { duration } => {
       tokio::time::sleep(*duration).await;
@@ -558,61 +517,7 @@ pub(crate) async fn execute_io_op_with_config(
       )
       .await
     }
-    IoOp::LlmRequest {
-      provider,
-      model,
-      prompt,
-      system_prompt,
-      max_tokens,
-      temperature,
-      timeout_ms,
-    } => {
-      execute_llm_request(
-        provider,
-        model,
-        prompt,
-        system_prompt.as_deref(),
-        *max_tokens,
-        *temperature,
-        *timeout_ms,
-        rate_limiter,
-        llm_config,
-      )
-      .await
-    }
     IoOp::Custom { kind, payload } => {
-      if kind == LLM_REQUEST_KIND {
-        match llm_request_from_custom_payload(payload) {
-          Ok(IoOp::LlmRequest {
-            provider,
-            model,
-            prompt,
-            system_prompt,
-            max_tokens,
-            temperature,
-            timeout_ms,
-          }) => {
-            return execute_llm_request(
-              &provider,
-              &model,
-              &prompt,
-              system_prompt.as_deref(),
-              max_tokens,
-              temperature,
-              timeout_ms,
-              rate_limiter,
-              llm_config,
-            )
-            .await;
-          }
-          Ok(_) => {
-            return IoResult::Error("invalid llm request payload mapping".to_string());
-          }
-          Err(err) => {
-            return IoResult::Error(err);
-          }
-        }
-      }
       // Custom ops return the payload as-is for now.
       // Real implementations will be pluggable.
       IoResult::Ok(serde_json::json!({
@@ -648,225 +553,6 @@ async fn execute_http_op(
     Ok(result) => result,
     Err(e) => IoResult::Error(format!("http task panicked: {}", e)),
   }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn execute_llm_request(
-  provider: &str,
-  model: &str,
-  prompt: &str,
-  system_prompt: Option<&str>,
-  max_tokens: Option<u32>,
-  temperature: Option<f32>,
-  timeout_ms: Option<u64>,
-  rate_limiter: Option<&RateLimiter>,
-  llm_config: &LlmConfig,
-) -> IoResult {
-  match build_llm_http_request(
-    provider,
-    model,
-    prompt,
-    system_prompt,
-    max_tokens,
-    temperature,
-    timeout_ms,
-    llm_config,
-  ) {
-    Ok((method, url, headers, body, timeout_ms)) => {
-      execute_http_op(method, url, headers, Some(body), timeout_ms, rate_limiter).await
-    }
-    Err(err) => IoResult::Error(err),
-  }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_llm_http_request(
-  provider: &str,
-  model: &str,
-  prompt: &str,
-  system_prompt: Option<&str>,
-  max_tokens: Option<u32>,
-  temperature: Option<f32>,
-  timeout_ms: Option<u64>,
-  llm_config: &LlmConfig,
-) -> Result<
-  (
-    String,
-    String,
-    std::collections::HashMap<String, String>,
-    Vec<u8>,
-    Option<u64>,
-  ),
-  String,
-> {
-  let provider_key = provider.to_ascii_lowercase();
-  let mut headers = std::collections::HashMap::new();
-  headers.insert("Content-Type".to_string(), "application/json".to_string());
-
-  if provider_key == "openai" || provider_key.contains("openai") {
-    let api_key = llm_config
-      .openai_api_key
-      .as_ref()
-      .ok_or_else(|| "missing OPENAI_API_KEY for openai provider".to_string())?;
-    headers.insert("Authorization".to_string(), format!("Bearer {}", api_key));
-
-    let mut messages = Vec::new();
-    if let Some(system) = system_prompt {
-      messages.push(serde_json::json!({
-        "role": "system",
-        "content": system,
-      }));
-    }
-    messages.push(serde_json::json!({
-      "role": "user",
-      "content": prompt,
-    }));
-
-    let mut body = serde_json::json!({
-      "model": model,
-      "messages": messages,
-    });
-    if let Some(max) = max_tokens {
-      body["max_tokens"] = serde_json::json!(max);
-    }
-    if let Some(temp) = temperature {
-      body["temperature"] = serde_json::json!(temp);
-    }
-
-    return Ok((
-      "POST".to_string(),
-      join_endpoint(&llm_config.openai_base_url, "/chat/completions"),
-      headers,
-      serde_json::to_vec(&body)
-        .map_err(|e| format!("openai body encode failed: {}", e))?,
-      timeout_ms,
-    ));
-  }
-
-  if provider_key == "anthropic" || provider_key.contains("anthropic") {
-    let api_key = llm_config
-      .anthropic_api_key
-      .as_ref()
-      .ok_or_else(|| "missing ANTHROPIC_API_KEY for anthropic provider".to_string())?;
-    headers.insert("x-api-key".to_string(), api_key.clone());
-    headers.insert(
-      "anthropic-version".to_string(),
-      ANTHROPIC_VERSION_HEADER.to_string(),
-    );
-
-    let mut body = serde_json::json!({
-      "model": model,
-      "messages": [
-        {
-          "role": "user",
-          "content": prompt,
-        }
-      ],
-      "max_tokens": max_tokens.unwrap_or(1024),
-    });
-    if let Some(system) = system_prompt {
-      body["system"] = serde_json::json!(system);
-    }
-    if let Some(temp) = temperature {
-      body["temperature"] = serde_json::json!(temp);
-    }
-
-    return Ok((
-      "POST".to_string(),
-      join_endpoint(&llm_config.anthropic_base_url, "/messages"),
-      headers,
-      serde_json::to_vec(&body)
-        .map_err(|e| format!("anthropic body encode failed: {}", e))?,
-      timeout_ms,
-    ));
-  }
-
-  Err(format!(
-    "unsupported llm provider '{}'; expected openai or anthropic",
-    provider
-  ))
-}
-
-fn llm_request_from_custom_payload(payload: &serde_json::Value) -> Result<IoOp, String> {
-  let task = payload.get("task").unwrap_or(payload);
-  let provider = task
-    .get("provider")
-    .or_else(|| payload.get("provider"))
-    .and_then(|v| v.as_str())
-    .unwrap_or("openai")
-    .to_string();
-
-  let provider_key = provider.to_ascii_lowercase();
-  let default_model = if provider_key == "anthropic" || provider_key.contains("anthropic")
-  {
-    "claude-3-5-sonnet-latest"
-  } else {
-    "gpt-4o-mini"
-  };
-  let model = task
-    .get("model")
-    .or_else(|| payload.get("model"))
-    .and_then(|v| v.as_str())
-    .unwrap_or(default_model)
-    .to_string();
-
-  let prompt = task
-    .get("prompt")
-    .or_else(|| payload.get("prompt"))
-    .and_then(|v| v.as_str())
-    .or_else(|| task.get("goal").and_then(|v| v.as_str()))
-    .map(str::to_string)
-    .unwrap_or_else(|| task.to_string());
-
-  let system_prompt = task
-    .get("system")
-    .or_else(|| payload.get("system"))
-    .and_then(|v| v.as_str())
-    .map(str::to_string);
-
-  let max_tokens = task
-    .get("max_tokens")
-    .or_else(|| payload.get("max_tokens"))
-    .and_then(|v| v.as_u64())
-    .and_then(|v| {
-      if v <= u32::MAX as u64 {
-        Some(v as u32)
-      } else {
-        None
-      }
-    });
-
-  let temperature = task
-    .get("temperature")
-    .or_else(|| payload.get("temperature"))
-    .and_then(|v| v.as_f64())
-    .map(|v| v as f32);
-
-  let timeout_ms = task
-    .get("timeout_ms")
-    .or_else(|| payload.get("timeout_ms"))
-    .and_then(|v| v.as_u64());
-
-  Ok(IoOp::LlmRequest {
-    provider,
-    model,
-    prompt,
-    system_prompt,
-    max_tokens,
-    temperature,
-    timeout_ms,
-  })
-}
-
-fn join_endpoint(base: &str, path: &str) -> String {
-  if base.ends_with(path) {
-    return base.to_string();
-  }
-  format!(
-    "{}/{}",
-    base.trim_end_matches('/'),
-    path.trim_start_matches('/')
-  )
 }
 
 fn execute_http_blocking(
