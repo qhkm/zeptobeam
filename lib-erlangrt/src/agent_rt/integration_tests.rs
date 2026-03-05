@@ -271,6 +271,7 @@ mod tests {
     let orch_behavior = OrchestratorBehavior {
       max_concurrency: 1,
       checkpoint_store: None,
+      ..Default::default()
     };
     let orch_pid = sched
       .registry
@@ -386,5 +387,297 @@ mod tests {
       sched.registry.lookup(&new_b).unwrap().status,
       ProcessStatus::Runnable
     );
+  }
+
+  // ===========================================================================
+  // Phase 6: Advanced Orchestration Integration Tests
+  // ===========================================================================
+
+  use crate::agent_rt::{
+    task_graph::{TaskGraph, TaskStatus},
+    retry_policy::{RetryStrategy, RetryTracker},
+    resource_budget::{ResourceBudget, TokenPricing, ModelPrice},
+    result_aggregator::{ResultAggregator, ConcatAggregator, VoteAggregator, MergeAggregator},
+    approval_gate::{ApprovalRegistry, ApprovalDecision, task_requires_approval, approval_message},
+  };
+
+  #[test]
+  fn test_dag_orchestration_end_to_end() {
+    // Test that TaskGraph correctly handles dependencies
+    let mut graph = TaskGraph::new();
+    
+    // Create a diamond dependency pattern
+    graph.add_tasks(vec![
+      serde_json::json!({"task_id": "start", "prompt": "start task"}),
+      serde_json::json!({"task_id": "left", "prompt": "left branch", "depends_on": ["start"]}),
+      serde_json::json!({"task_id": "right", "prompt": "right branch", "depends_on": ["start"]}),
+      serde_json::json!({"task_id": "merge", "prompt": "merge results", "depends_on": ["left", "right"]}),
+    ]).unwrap();
+
+    // Initially only "start" is ready
+    let ready = graph.ready_tasks();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0]["task_id"], "start");
+
+    // Complete "start", now "left" and "right" should be ready
+    graph.mark_running("start");
+    graph.mark_completed("start");
+    
+    let ready = graph.ready_tasks();
+    assert_eq!(ready.len(), 2);
+    let ids: Vec<_> = ready.iter().map(|t| t["task_id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"left"));
+    assert!(ids.contains(&"right"));
+
+    // Complete "left", "merge" should still wait for "right"
+    graph.mark_running("left");
+    graph.mark_completed("left");
+    assert_eq!(graph.ready_tasks().len(), 0);
+
+    // Complete "right", now "merge" should be ready
+    graph.mark_running("right");
+    graph.mark_completed("right");
+    
+    let ready = graph.ready_tasks();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0]["task_id"], "merge");
+
+    // Complete "merge", graph should be complete
+    graph.mark_running("merge");
+    graph.mark_completed("merge");
+    assert!(graph.is_complete());
+  }
+
+  #[test]
+  fn test_retry_policy_end_to_end() {
+    let mut tracker = RetryTracker::new(RetryStrategy::Immediate { max_attempts: 2 });
+    
+    // First two retries should succeed
+    assert_eq!(tracker.should_retry("task-1"), Some(0));
+    assert_eq!(tracker.attempt_count("task-1"), 1);
+    
+    assert_eq!(tracker.should_retry("task-1"), Some(0));
+    assert_eq!(tracker.attempt_count("task-1"), 2);
+    
+    // Third retry should fail (exhausted) - count still increments on exhaustion check
+    assert_eq!(tracker.should_retry("task-1"), None);
+    assert_eq!(tracker.attempt_count("task-1"), 3);
+  }
+
+  #[test]
+  fn test_backoff_retry_policy() {
+    let mut tracker = RetryTracker::new(RetryStrategy::Backoff {
+      max_attempts: 4,
+      base_ms: 100,
+      max_ms: 500,
+    });
+    
+    // Exponential backoff: 100, 200, 400, capped at 500
+    assert_eq!(tracker.should_retry("task-1"), Some(100));
+    assert_eq!(tracker.should_retry("task-1"), Some(200));
+    assert_eq!(tracker.should_retry("task-1"), Some(400));
+    assert_eq!(tracker.should_retry("task-1"), Some(500)); // capped
+    assert_eq!(tracker.should_retry("task-1"), None); // exhausted
+  }
+
+  #[test]
+  fn test_budget_stops_orchestration() {
+    // Create budget with max 1000 tokens
+    let mut budget = ResourceBudget::new(Some(1000), None, TokenPricing::default());
+    
+    // First usage within budget
+    let exhausted = budget.record_usage(&crate::agent_rt::resource_budget::UsageReport {
+      input_tokens: 300,
+      output_tokens: 200,
+      model: None,
+    });
+    assert!(!exhausted);
+    assert!(!budget.is_exhausted());
+    assert_eq!(budget.tokens_used(), 500);
+    
+    // Second usage exceeds budget
+    let exhausted = budget.record_usage(&crate::agent_rt::resource_budget::UsageReport {
+      input_tokens: 400,
+      output_tokens: 300,
+      model: None,
+    });
+    assert!(exhausted);
+    assert!(budget.is_exhausted());
+    assert_eq!(budget.tokens_used(), 1200);
+  }
+
+  #[test]
+  fn test_budget_cost_tracking_with_model_pricing() {
+    let mut pricing = TokenPricing::default();
+    pricing.model_prices.insert("gpt-4".into(), ModelPrice {
+      input_per_1k: 0.03,
+      output_per_1k: 0.06,
+    });
+    
+    // Budget of $1.00
+    let mut budget = ResourceBudget::new(None, Some(1.0), pricing);
+    
+    // Use 10k input ($0.30) + 5k output ($0.30) = $0.60
+    budget.record_usage(&crate::agent_rt::resource_budget::UsageReport {
+      input_tokens: 10_000,
+      output_tokens: 5_000,
+      model: Some("gpt-4".into()),
+    });
+    
+    assert!(!budget.is_exhausted());
+    let cost = budget.cost_usd();
+    assert!(cost >= 0.59 && cost <= 0.61, "Cost should be ~$0.60, got ${}", cost);
+    
+    // Use another 10k input ($0.30) + 5k output ($0.30) = $1.20 total > $1.00
+    let exhausted = budget.record_usage(&crate::agent_rt::resource_budget::UsageReport {
+      input_tokens: 10_000,
+      output_tokens: 5_000,
+      model: Some("gpt-4".into()),
+    });
+    
+    assert!(exhausted);
+    assert!(budget.is_exhausted());
+  }
+
+  #[test]
+  fn test_result_aggregator_concat() {
+    let agg = ConcatAggregator;
+    let results = vec![
+      serde_json::json!({"result": "a"}),
+      serde_json::json!({"result": "b"}),
+      serde_json::json!({"result": "c"}),
+    ];
+    
+    let output = agg.aggregate(&results);
+    assert_eq!(output, serde_json::json!([{"result": "a"}, {"result": "b"}, {"result": "c"}]));
+  }
+
+  #[test]
+  fn test_result_aggregator_vote() {
+    let agg = VoteAggregator { field: "decision".into() };
+    let results = vec![
+      serde_json::json!({"decision": "approve"}),
+      serde_json::json!({"decision": "reject"}),
+      serde_json::json!({"decision": "approve"}),
+      serde_json::json!({"decision": "approve"}),
+    ];
+    
+    let output = agg.aggregate(&results);
+    assert_eq!(output["winner"], "approve");
+    assert_eq!(output["votes"]["approve"], 3);
+    assert_eq!(output["votes"]["reject"], 1);
+  }
+
+  #[test]
+  fn test_result_aggregator_merge() {
+    let agg = MergeAggregator;
+    let results = vec![
+      serde_json::json!({"name": "alice", "tags": ["rust"], "score": 95}),
+      serde_json::json!({"name": "bob", "tags": ["python"], "score": 87}),
+    ];
+    
+    let output = agg.aggregate(&results);
+    // Last value wins for non-array fields
+    assert_eq!(output["name"], "bob");
+    assert_eq!(output["score"], 87);
+    // Arrays are concatenated
+    assert_eq!(output["tags"], serde_json::json!(["rust", "python"]));
+  }
+
+  #[test]
+  fn test_approval_gate_registry() {
+    let mut registry = ApprovalRegistry::new();
+    
+    // Request approval for a task
+    registry.request_approval(
+      "orch-1",
+      "task-deploy",
+      "Approve deployment to production?",
+      serde_json::json!({"type": "deploy", "target": "prod"}),
+    );
+    
+    assert!(registry.has_pending("orch-1", "task-deploy"));
+    assert_eq!(registry.pending_requests().len(), 1);
+    
+    // Submit approval
+    let ok = registry.submit_decision("orch-1", "task-deploy", ApprovalDecision::Approved);
+    assert!(ok);
+    assert!(!registry.has_pending("orch-1", "task-deploy"));
+    
+    // Take the decision
+    let decision = registry.take_decision("orch-1", "task-deploy");
+    assert_eq!(decision, Some(ApprovalDecision::Approved));
+    
+    // Decision is consumed
+    assert!(registry.take_decision("orch-1", "task-deploy").is_none());
+  }
+
+  #[test]
+  fn test_approval_gate_rejection() {
+    let mut registry = ApprovalRegistry::new();
+    
+    registry.request_approval("orch-2", "task-delete", "Delete database?", serde_json::json!({}));
+    
+    // Reject with reason
+    registry.submit_decision(
+      "orch-2",
+      "task-delete",
+      ApprovalDecision::Rejected { reason: "too risky".into() },
+    );
+    
+    let decision = registry.take_decision("orch-2", "task-delete").unwrap();
+    assert_eq!(decision, ApprovalDecision::Rejected { reason: "too risky".into() });
+  }
+
+  #[test]
+  fn test_task_requires_approval_helper() {
+    assert!(task_requires_approval(&serde_json::json!({"requires_approval": true})));
+    assert!(!task_requires_approval(&serde_json::json!({"requires_approval": false})));
+    assert!(!task_requires_approval(&serde_json::json!({"task_id": "t1"})));
+  }
+
+  #[test]
+  fn test_approval_message_helper() {
+    assert_eq!(
+      approval_message(&serde_json::json!({"approval_message": "Ship to prod?"})),
+      "Ship to prod?"
+    );
+    assert_eq!(approval_message(&serde_json::json!({})), "Approval required");
+  }
+
+  #[test]
+  fn test_cycle_detection_in_task_graph() {
+    let mut graph = TaskGraph::new();
+    
+    // Try to add tasks with a cycle: a -> b -> c -> a
+    let result = graph.add_tasks(vec![
+      serde_json::json!({"task_id": "a", "depends_on": ["c"]}),
+      serde_json::json!({"task_id": "b", "depends_on": ["a"]}),
+      serde_json::json!({"task_id": "c", "depends_on": ["b"]}),
+    ]);
+    
+    assert!(result.is_err(), "Should detect cycle");
+  }
+
+  #[test]
+  fn test_fail_dependents_cascade_in_graph() {
+    let mut graph = TaskGraph::new();
+    
+    graph.add_tasks(vec![
+      serde_json::json!({"task_id": "root"}),
+      serde_json::json!({"task_id": "child1", "depends_on": ["root"]}),
+      serde_json::json!({"task_id": "child2", "depends_on": ["root"]}),
+      serde_json::json!({"task_id": "grandchild", "depends_on": ["child1"]}),
+    ]).unwrap();
+    
+    // Fail root
+    graph.mark_running("root");
+    graph.mark_failed("root");
+    graph.fail_dependents("root");
+    
+    // All dependents should be skipped
+    assert_eq!(graph.task_status("child1"), Some(&TaskStatus::Skipped));
+    assert_eq!(graph.task_status("child2"), Some(&TaskStatus::Skipped));
+    assert_eq!(graph.task_status("grandchild"), Some(&TaskStatus::Skipped));
   }
 }

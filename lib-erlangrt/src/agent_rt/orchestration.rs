@@ -3,7 +3,15 @@ use std::{
   sync::Arc,
 };
 
-use crate::agent_rt::{checkpoint::CheckpointStore, types::*};
+use crate::agent_rt::{
+  approval_gate::{approval_message, task_requires_approval, ApprovalDecision, SharedApprovalRegistry},
+  checkpoint::CheckpointStore,
+  resource_budget::ResourceBudget,
+  retry_policy::{RetryStrategy, RetryTracker},
+  result_aggregator::ResultAggregator,
+  task_graph::{TaskGraph, TaskStatus},
+  types::*,
+};
 
 const DECOMPOSE_KIND: &str = "decompose_goal";
 const DEFAULT_LLM_PROVIDER: &str = "openai";
@@ -17,6 +25,14 @@ const DEFAULT_CHECKPOINT_KEY: &str = "orchestrator-default";
 pub struct OrchestratorBehavior {
   pub max_concurrency: usize,
   pub checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+  // NEW FIELDS:
+  pub retry_strategy: RetryStrategy,
+  pub budget: Option<ResourceBudget>,
+  pub aggregator: Option<Arc<dyn ResultAggregator>>,
+  pub approval_registry: Option<SharedApprovalRegistry>,
+  pub max_depth: usize,
+  pub orch_id: String,
+  pub current_depth: usize,
 }
 
 impl Default for OrchestratorBehavior {
@@ -24,18 +40,27 @@ impl Default for OrchestratorBehavior {
     Self {
       max_concurrency: 1,
       checkpoint_store: None,
+      // NEW FIELDS with defaults:
+      retry_strategy: RetryStrategy::None,
+      budget: None,
+      aggregator: None,
+      approval_registry: None,
+      max_depth: 5,
+      orch_id: "orch-0".to_string(),
+      current_depth: 0,
     }
   }
 }
 
 /// Mutable state for the orchestrator process.
 pub struct OrchestratorState {
-  pending_tasks: VecDeque<serde_json::Value>,
-  pending_spawn_tasks: VecDeque<serde_json::Value>,
-  active_workers: HashMap<u64, String>,
-  worker_monitors: HashMap<u64, u64>,
-  inflight_tasks: HashMap<String, serde_json::Value>,
-  results: Vec<serde_json::Value>,
+  task_graph: TaskGraph,                              // REPLACE VecDeque<Value>
+  pending_spawn_tasks: VecDeque<serde_json::Value>,   // keep
+  active_workers: HashMap<u64, String>,               // keep
+  worker_monitors: HashMap<u64, u64>,                 // keep
+  inflight_tasks: HashMap<String, serde_json::Value>,  // keep
+  results: Vec<serde_json::Value>,                    // keep
+  partial_results: HashMap<String, Vec<serde_json::Value>>, // NEW
   requester: Option<AgentPid>,
   goal: serde_json::Value,
   self_pid: Option<AgentPid>,
@@ -43,6 +68,8 @@ pub struct OrchestratorState {
   resumed_from_checkpoint: bool,
   awaiting_decomposition: bool,
   decomposition_done: bool,
+  retry_tracker: RetryTracker,                        // NEW
+  budget: ResourceBudget,                             // NEW
 }
 
 impl OrchestratorState {
@@ -50,7 +77,9 @@ impl OrchestratorState {
     if !self.decomposition_done || self.awaiting_decomposition {
       return false;
     }
-    if self.pending_tasks.is_empty() {
+    // Use task_graph instead of pending_tasks
+    let ready_count = self.task_graph.ready_tasks().len();
+    if ready_count == 0 {
       return false;
     }
     let active = self.active_workers.len();
@@ -62,7 +91,7 @@ impl OrchestratorState {
   fn is_complete(&self) -> bool {
     self.decomposition_done
       && !self.awaiting_decomposition
-      && self.pending_tasks.is_empty()
+      && self.task_graph.is_complete()
       && self.pending_spawn_tasks.is_empty()
       && self.active_workers.is_empty()
   }
@@ -87,16 +116,26 @@ impl AgentBehavior for OrchestratorBehavior {
       .unwrap_or(DEFAULT_CHECKPOINT_KEY)
       .to_string();
 
+    // Initialize budget from behavior config or unlimited
+    let budget = self.budget.clone().unwrap_or_else(ResourceBudget::unlimited);
+    let retry_tracker = RetryTracker::new(self.retry_strategy.clone());
+
     if let Some((goal, completed_results, pending_tasks)) =
       self.load_checkpoint(&checkpoint_key)
     {
+      let mut task_graph = TaskGraph::new();
+      let pending_task_values: Vec<serde_json::Value> = pending_tasks.into_iter().collect();
+      // Note: We ignore cycle errors on restore - they were already validated
+      let _ = task_graph.add_tasks(pending_task_values);
+      
       return Ok(Box::new(OrchestratorState {
-        pending_tasks,
+        task_graph,
         pending_spawn_tasks: VecDeque::new(),
         active_workers: HashMap::new(),
         worker_monitors: HashMap::new(),
         inflight_tasks: HashMap::new(),
         results: completed_results,
+        partial_results: HashMap::new(),
         requester,
         goal,
         self_pid,
@@ -104,17 +143,20 @@ impl AgentBehavior for OrchestratorBehavior {
         resumed_from_checkpoint: true,
         awaiting_decomposition: false,
         decomposition_done: true,
+        retry_tracker,
+        budget,
       }));
     }
 
     let goal = args.get("goal").cloned().unwrap_or(serde_json::Value::Null);
     Ok(Box::new(OrchestratorState {
-      pending_tasks: VecDeque::new(),
+      task_graph: TaskGraph::new(),
       pending_spawn_tasks: VecDeque::new(),
       active_workers: HashMap::new(),
       worker_monitors: HashMap::new(),
       inflight_tasks: HashMap::new(),
       results: Vec::new(),
+      partial_results: HashMap::new(),
       requester,
       goal,
       self_pid,
@@ -122,6 +164,8 @@ impl AgentBehavior for OrchestratorBehavior {
       resumed_from_checkpoint: false,
       awaiting_decomposition: false,
       decomposition_done: false,
+      retry_tracker,
+      budget,
     }))
   }
 
@@ -130,9 +174,42 @@ impl AgentBehavior for OrchestratorBehavior {
       .as_any_mut()
       .downcast_mut::<OrchestratorState>()
       .expect("orchestrator state type");
+    
+    // Poll approval registry for decisions on awaiting tasks
+    self.poll_approval_registry(s);
+    
     match msg {
       Message::Json(payload) => {
+        // Handle worker_progress messages
+        if payload.get("type").and_then(|v| v.as_str()) == Some("worker_progress") {
+          if let Some(task_id) = payload.get("task_id").and_then(|v| v.as_str()) {
+            s.partial_results
+              .entry(task_id.to_string())
+              .or_default()
+              .push(payload.clone());
+          }
+          // Forward to requester if present
+          if let Some(requester) = s.requester {
+            return Action::Send {
+              to: requester,
+              msg: Message::Json(payload),
+            };
+          }
+          return Action::Continue;
+        }
+        
         if let Some(result) = parse_worker_result(&payload) {
+          // Record usage if present
+          if let Some(usage) = ResourceBudget::parse_usage(&payload) {
+            let _exhausted = s.budget.record_usage(&usage);
+            // Budget exhaustion could be handled here in future
+          }
+          
+          // Mark task completed in graph
+          if let Some(ref task_id) = result.task_id {
+            s.task_graph.mark_completed(task_id);
+          }
+          
           s.results.push(result.as_json);
           if let Some(task_id) = result.task_id {
             s.inflight_tasks.remove(&task_id);
@@ -164,12 +241,13 @@ impl AgentBehavior for OrchestratorBehavior {
           s.requester = parse_pid(payload.get("requester_pid")).or(s.requester);
           s.self_pid = parse_pid(payload.get("self_pid")).or(s.self_pid);
           s.goal = incoming_goal;
-          s.pending_tasks.clear();
+          s.task_graph = TaskGraph::new(); // Reset task graph
           s.pending_spawn_tasks.clear();
           s.active_workers.clear();
           s.worker_monitors.clear();
           s.inflight_tasks.clear();
           s.results.clear();
+          s.partial_results.clear();
           s.resumed_from_checkpoint = false;
           s.awaiting_decomposition = true;
           s.decomposition_done = false;
@@ -188,8 +266,12 @@ impl AgentBehavior for OrchestratorBehavior {
       }) => {
         s.awaiting_decomposition = false;
         s.decomposition_done = true;
-        for task in extract_tasks(&s.goal, &result) {
-          s.pending_tasks.push_back(task);
+        let tasks = extract_tasks(&s.goal, &result);
+        // Add tasks to TaskGraph instead of VecDeque
+        if let Err(e) = s.task_graph.add_tasks(tasks) {
+          // Handle cycle error
+          s.results.push(serde_json::json!({"error": format!("cycle detected: {}", e)}));
+          return Action::Continue;
         }
         self.persist_checkpoint(s);
         self.next_or_finalize(s)
@@ -230,12 +312,21 @@ impl AgentBehavior for OrchestratorBehavior {
         if let Some(task_id) = removed {
           s.inflight_tasks.remove(&task_id);
           if !matches!(reason, Reason::Normal) {
-            s.results.push(serde_json::json!({
-              "type": "worker_error",
-              "worker_pid": pid,
-              "task_id": task_id,
-              "reason": reason_to_value(reason),
-            }));
+            // Check retry
+            if let Some(_delay_ms) = s.retry_tracker.should_retry(&task_id) {
+              // Re-queue the task for retry
+              s.task_graph.set_status(&task_id, TaskStatus::Ready);
+            } else {
+              // No more retries - mark failed and cascade
+              s.task_graph.mark_failed(&task_id);
+              s.task_graph.fail_dependents(&task_id);
+              s.results.push(serde_json::json!({
+                "type": "worker_error",
+                "worker_pid": pid,
+                "task_id": task_id,
+                "reason": reason_to_value(reason),
+              }));
+            }
           }
         }
         self.persist_checkpoint(s);
@@ -258,12 +349,21 @@ impl AgentBehavior for OrchestratorBehavior {
     if let Some(task_id) = s.active_workers.remove(&from.raw()) {
       s.inflight_tasks.remove(&task_id);
       if !matches!(reason, Reason::Normal) {
-        s.results.push(serde_json::json!({
-          "type": "worker_error",
-          "worker_pid": from.raw(),
-          "task_id": task_id,
-          "reason": reason_to_value(reason),
-        }));
+        // Check retry
+        if let Some(_delay_ms) = s.retry_tracker.should_retry(&task_id) {
+          // Re-queue the task for retry
+          s.task_graph.set_status(&task_id, TaskStatus::Ready);
+        } else {
+          // No more retries - mark failed and cascade
+          s.task_graph.mark_failed(&task_id);
+          s.task_graph.fail_dependents(&task_id);
+          s.results.push(serde_json::json!({
+            "type": "worker_error",
+            "worker_pid": from.raw(),
+            "task_id": task_id,
+            "reason": reason_to_value(reason),
+          }));
+        }
       }
     }
     self.persist_checkpoint(s);
@@ -306,8 +406,13 @@ impl OrchestratorBehavior {
       None => return,
     };
 
-    let mut pending_tasks: Vec<serde_json::Value> =
-      state.pending_tasks.iter().cloned().collect();
+    // Collect pending tasks from task_graph (Ready status)
+    let mut pending_tasks: Vec<serde_json::Value> = state
+      .task_graph
+      .ready_tasks()
+      .into_iter()
+      .cloned()
+      .collect();
     pending_tasks.extend(state.pending_spawn_tasks.iter().cloned());
     pending_tasks.extend(state.inflight_tasks.values().cloned());
 
@@ -325,17 +430,131 @@ impl OrchestratorBehavior {
     }
   }
 
+  fn poll_approval_registry(&self, state: &mut OrchestratorState) {
+    if let Some(registry) = &self.approval_registry {
+      let mut reg = registry.lock().unwrap();
+      // Collect task_ids and decisions first to avoid borrow issues
+      let ready = state.task_graph.ready_tasks();
+      let mut actions: Vec<(String, ApprovalDecision)> = Vec::new();
+      
+      for task in ready {
+        if let Some(task_id) = task.get("task_id").and_then(|v| v.as_str()) {
+          if task_requires_approval(task) {
+            // Check if there's a decision available
+            if let Some(decision) = reg.take_decision(&self.orch_id, task_id) {
+              actions.push((task_id.to_string(), decision));
+            }
+          }
+        }
+      }
+      
+      // Apply the collected actions
+      for (task_id, decision) in actions {
+        match decision {
+          ApprovalDecision::Approved => {
+            state.task_graph.set_status(&task_id, TaskStatus::Ready);
+          }
+          ApprovalDecision::Rejected { .. } => {
+            state.task_graph.mark_failed(&task_id);
+            state.task_graph.fail_dependents(&task_id);
+          }
+        }
+      }
+    }
+  }
+
   fn next_or_finalize(&self, state: &mut OrchestratorState) -> Action {
+    // Poll approval registry before processing
+    self.poll_approval_registry(state);
+    
     if state.can_spawn_more(self.max_concurrency) {
-      let task = match state.pending_tasks.pop_front() {
-        Some(t) => t,
-        None => return Action::Continue,
-      };
-      let fallback = format!(
-        "task-{}",
-        state.active_workers.len() + state.pending_spawn_tasks.len()
-      );
-      let task_id = extract_task_id(&task, &fallback);
+      // Get ready tasks from TaskGraph instead of popping from VecDeque
+      let ready = state.task_graph.ready_tasks();
+      if ready.is_empty() {
+        return Action::Continue;
+      }
+      
+      let task = ready[0].clone();
+      let task_id = task.get("task_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      
+      if task_id.is_empty() {
+        let fallback = format!(
+          "task-{}",
+          state.active_workers.len() + state.pending_spawn_tasks.len()
+        );
+        let task_id = extract_task_id(&task, &fallback);
+        state.pending_spawn_tasks.push_back(task);
+        self.persist_checkpoint(state);
+        let parent_pid = state.self_pid.unwrap_or_default().raw();
+        return Action::Spawn {
+          behavior: Arc::new(WorkerBehavior),
+          args: serde_json::json!({
+            "parent_pid": parent_pid,
+            "task_id": task_id,
+          }),
+          link: false,
+          monitor: true,
+        };
+      }
+      
+      // Check approval
+      if task_requires_approval(&task) {
+        if let Some(registry) = &self.approval_registry {
+          state.task_graph.set_status(&task_id, TaskStatus::AwaitingApproval);
+          registry.lock().unwrap().request_approval(
+            &self.orch_id,
+            &task_id,
+            &approval_message(&task),
+            task.clone(),
+          );
+          return Action::Continue;
+        }
+      }
+      
+      // Check for sub-orchestration
+      if task.get("type").and_then(|v| v.as_str()) == Some("sub_orchestration") {
+        if self.current_depth >= self.max_depth {
+          // Depth limit reached
+          state.task_graph.mark_failed(&task_id);
+          state.results.push(serde_json::json!({
+            "type": "sub_orchestration_depth_exceeded",
+            "task_id": task_id,
+          }));
+          return self.next_or_finalize(state);
+        }
+        
+        let sub_goal = task.get("goal").cloned().unwrap_or(serde_json::json!(null));
+        let sub_concurrency = task.get("max_concurrency")
+          .and_then(|v| v.as_u64())
+          .unwrap_or(self.max_concurrency as u64) as usize;
+        
+        let sub_orch = OrchestratorBehavior {
+          max_concurrency: sub_concurrency,
+          checkpoint_store: self.checkpoint_store.clone(),
+          retry_strategy: self.retry_strategy.clone(),
+          budget: None, // Could inherit from parent
+          aggregator: self.aggregator.clone(),
+          approval_registry: self.approval_registry.clone(),
+          max_depth: self.max_depth,
+          orch_id: format!("{}-{}", self.orch_id, task_id),
+          current_depth: self.current_depth + 1,
+        };
+        
+        return Action::Spawn {
+          behavior: Arc::new(sub_orch),
+          args: serde_json::json!({
+            "goal": sub_goal,
+            "parent_pid": state.self_pid.map(|p| p.raw()),
+          }),
+          link: false,
+          monitor: true,
+        };
+      }
+      
+      state.task_graph.mark_running(&task_id);
       state.pending_spawn_tasks.push_back(task);
       self.persist_checkpoint(state);
       let parent_pid = state.self_pid.unwrap_or_default().raw();
@@ -352,10 +571,16 @@ impl OrchestratorBehavior {
 
     if state.is_complete() {
       self.clear_checkpoint(&state.checkpoint_key);
+      // Use aggregator if configured
+      let final_result = if let Some(ref aggregator) = self.aggregator {
+        aggregator.aggregate(&state.results)
+      } else {
+        serde_json::json!(state.results)
+      };
       let summary = serde_json::json!({
         "type": "orchestration_complete",
         "goal": state.goal,
-        "results": state.results,
+        "results": final_result,
       });
       if let Some(requester) = state.requester {
         return Action::Send {
@@ -643,6 +868,7 @@ mod tests {
     let behavior = OrchestratorBehavior {
       max_concurrency: 2,
       checkpoint_store: None,
+      ..Default::default()
     };
     let mut state = behavior
       .init(serde_json::json!({
@@ -670,6 +896,7 @@ mod tests {
     let behavior = OrchestratorBehavior {
       max_concurrency: 2,
       checkpoint_store: None,
+      ..Default::default()
     };
     let mut state = behavior
       .init(serde_json::json!({
@@ -715,6 +942,7 @@ mod tests {
     let behavior = OrchestratorBehavior {
       max_concurrency: 1,
       checkpoint_store: None,
+      ..Default::default()
     };
     let mut state = behavior
       .init(serde_json::json!({
@@ -821,6 +1049,7 @@ mod tests {
     let behavior = OrchestratorBehavior {
       max_concurrency: 1,
       checkpoint_store: None,
+      ..Default::default()
     };
     let mut state = behavior
       .init(serde_json::json!({
@@ -874,6 +1103,7 @@ mod tests {
     let behavior = OrchestratorBehavior {
       max_concurrency: 1,
       checkpoint_store: Some(Arc::new(store.clone())),
+      ..Default::default()
     };
 
     let mut state = behavior
@@ -943,6 +1173,7 @@ mod tests {
     let behavior = OrchestratorBehavior {
       max_concurrency: 1,
       checkpoint_store: Some(Arc::new(store)),
+      ..Default::default()
     };
     let mut state = behavior
       .init(serde_json::json!({

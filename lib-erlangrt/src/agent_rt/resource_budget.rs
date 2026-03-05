@@ -11,7 +11,7 @@ pub struct TokenPricing {
     pub model_prices: HashMap<String, ModelPrice>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResourceBudget {
     max_tokens: Option<u64>,
     max_cost_usd: Option<f64>,

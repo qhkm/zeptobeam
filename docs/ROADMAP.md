@@ -87,19 +87,19 @@ Make the runtime deployable as a standalone service.
 
 ---
 
-## Phase 6: Advanced Orchestration [PLANNED]
+## Phase 6: Advanced Orchestration [DONE]
 
 Sophisticated multi-agent coordination patterns.
 
-- **Hierarchical orchestrators**: Orchestrator spawns sub-orchestrators for complex goal trees
-- **DAG task dependencies**: Tasks with prerequisites — only spawn when dependencies complete
-- **Streaming results**: Workers stream partial results back to orchestrator (not just final)
-- **Human-in-the-loop**: Approval gates where orchestrator pauses and waits for external confirmation
-- **Retry policies**: Per-task retry with configurable strategy (immediate, backoff, skip)
-- **Resource budgets**: Token/cost budgets per orchestration — stop when budget exhausted
-- **Result aggregation strategies**: Pluggable aggregators (concat, vote, merge, custom)
+- **DAG task dependencies**: TaskGraph with cycle detection, dependency resolution, cascade failure
+- **Retry policies**: RetryStrategy enum (None/Immediate/Backoff/Skip), per-task overrides via task JSON
+- **Resource budgets**: Token count + cost tracking per orchestration, configurable per-model pricing
+- **Approval gates**: ApprovalRegistry with HTTP endpoints (GET /approvals, POST /approve/:orch_id/:task_id), AwaitingApproval status
+- **Streaming results**: worker_progress messages, partial_results storage, forwarding to parent orchestrators
+- **Hierarchical orchestrators**: sub_orchestration task type, recursive OrchestratorBehavior spawning, depth limiting
+- **Result aggregation**: ResultAggregator trait with ConcatAggregator, VoteAggregator, MergeAggregator
 
-**Prerequisite:** Phase 5 (config for budgets/retry policies), Phase 4 (timeouts/backoff already done).
+**12 tasks, 48 tests:** `3e91307` through `TBD`
 
 ---
 
@@ -143,6 +143,6 @@ Distribute agents across multiple runtime nodes.
 | 3 | ZeptoAgent Integration | Done | ~120 |
 | 4 | Reliability Hardening | Done | 146 |
 | 5 | Production Readiness | Done | ~20 |
-| 6 | Advanced Orchestration | Planned | — |
+| 6 | Advanced Orchestration | Done | 48 |
 | 7 | MCP Integration | Planned | — |
 | 8 | Multi-Node Clustering | Planned | — |
