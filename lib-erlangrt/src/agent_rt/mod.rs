@@ -31,6 +31,7 @@ pub mod result_aggregator;
 pub mod retry_policy;
 pub mod scheduler;
 pub mod server;
+pub mod startup;
 pub mod supervision;
 pub mod task_graph;
 pub mod tool_factory;
