@@ -70,18 +70,20 @@ BEAM-level reliability patterns across 7 areas.
 
 ---
 
-## Phase 5: Production Readiness [PLANNED]
+## Phase 5: Production Readiness [DONE]
 
 Make the runtime deployable as a standalone service.
 
-- **Configuration**: TOML/YAML config file loading (providers, tools whitelist, mailbox capacity, backoff strategy, checkpoint path, rate limits)
-- **CLI entry point**: Binary with clap arg parsing, config file path, log level, worker count
-- **Signal handling**: Graceful shutdown on SIGTERM/SIGINT, drain in-flight ops, checkpoint before exit
-- **Health check**: HTTP endpoint (tiny axum/warp server) exposing runtime metrics, process count, bridge status
-- **Logging setup**: tracing-subscriber with JSON output, configurable log levels, optional file output
-- **Error reporting**: Structured error types replacing String errors throughout (thiserror crate)
-- **FileCheckpointStore tests**: Existing untested file store needs test coverage
-- **Stale checkpoint pruning**: Auto-prune checkpoints older than configurable TTL
+- **Configuration**: TOML config file loading with AppConfig, RuntimeConfig, CheckpointConfig, ServerConfig, LogConfig
+- **CLI entry point**: `zeptoclaw-rtd` binary with clap arg parsing, config file override, log level, worker count, bind address
+- **Structured errors**: AgentRtError enum with thiserror, replacing String errors in CheckpointStore and related modules
+- **Health server**: Axum HTTP server with /health and /metrics endpoints, graceful shutdown
+- **Logging setup**: tracing-subscriber with JSON/pretty/compact formats, env-filter, configurable levels
+- **FileCheckpointStore tests**: 6 tests covering roundtrip, overwrite, delete, missing key, sanitization, atomic write
+- **Checkpoint pruning**: list_keys and prune_before on CheckpointStore trait, background pruner task with configurable interval and TTL
+- **Signal handling**: SIGTERM/SIGINT graceful shutdown, drain in-flight ops, stop server
+
+**Commits:** `e9256a2` through `TBD`
 
 ---
 
@@ -140,7 +142,7 @@ Expose the runtime as an MCP server and consume MCP tools natively.
 | 2 | Orchestration Layer | Done | ~100 |
 | 3 | ZeptoAgent Integration | Done | ~120 |
 | 4 | Reliability Hardening | Done | 146 |
-| 5 | Production Readiness | Planned | — |
+| 5 | Production Readiness | Done | ~20 |
 | 6 | Multi-Node Clustering | Planned | — |
 | 7 | Advanced Orchestration | Planned | — |
 | 8 | MCP Integration | Planned | — |
