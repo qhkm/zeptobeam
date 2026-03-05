@@ -10,6 +10,8 @@ use zeptoclaw::tools::{
 /// Builds tool sets for ZeptoAgent instances.
 /// Implementations know about available tools and filter
 /// by an optional whitelist.
+///
+/// Safety contract: `whitelist == None` must return no tools.
 pub trait ToolFactory: Send + Sync {
   fn build_tools(&self, whitelist: Option<&[String]>) -> Vec<Box<dyn Tool>>;
 }
@@ -22,25 +24,13 @@ pub trait ToolFactory: Send + Sync {
 /// - Git: `git` (if available on PATH)
 /// - Web: `web_search` (Brave/SearXNG/DDG fallback), `web_fetch`
 /// - Optional: `http_request` (when allowlist env is configured)
+///
+/// Tools are only enabled when explicitly requested via whitelist.
 pub struct DefaultToolFactory;
 
 impl DefaultToolFactory {
   pub fn from_env() -> Self {
     Self
-  }
-
-  fn supported_tool_names() -> &'static [&'static str] {
-    &[
-      "read_file",
-      "write_file",
-      "list_dir",
-      "edit_file",
-      "shell",
-      "git",
-      "web_search",
-      "web_fetch",
-      "http_request",
-    ]
   }
 
   fn build_tool_by_name(&self, name: &str) -> Option<Box<dyn Tool>> {
@@ -152,15 +142,7 @@ impl ToolFactory for DefaultToolFactory {
         }
         out
       }
-      None => {
-        let mut out = Vec::new();
-        for name in Self::supported_tool_names() {
-          if let Some(tool) = self.build_tool_by_name(name) {
-            out.push(tool);
-          }
-        }
-        out
-      }
+      None => Vec::new(),
     }
   }
 }
@@ -199,18 +181,10 @@ mod tests {
   use super::{DefaultToolFactory, ToolFactory};
 
   #[test]
-  fn test_default_tool_factory_builds_core_tools() {
+  fn test_default_tool_factory_returns_empty_when_no_whitelist() {
     let factory = DefaultToolFactory::from_env();
     let tools = factory.build_tools(None);
-    let names: Vec<String> = tools.into_iter().map(|t| t.name().to_string()).collect();
-
-    assert!(names.contains(&"read_file".to_string()));
-    assert!(names.contains(&"write_file".to_string()));
-    assert!(names.contains(&"list_dir".to_string()));
-    assert!(names.contains(&"edit_file".to_string()));
-    assert!(names.contains(&"shell".to_string()));
-    assert!(names.contains(&"web_search".to_string()));
-    assert!(names.contains(&"web_fetch".to_string()));
+    assert!(tools.is_empty());
   }
 
   #[test]
