@@ -8,6 +8,9 @@ use crate::agent_rt::types::*;
 const DEFAULT_REDUCTIONS: u32 = 200;
 const NORMAL_ADVANTAGE: usize = 8;
 
+/// Reduction-counting preemptive scheduler with
+/// three priority queues (High > Normal > Low) and
+/// optional Tokio bridge for async I/O.
 pub struct AgentScheduler {
   pub registry: AgentRegistry,
   queue_high: VecDeque<AgentPid>,
@@ -367,5 +370,11 @@ impl AgentScheduler {
         reason.clone(),
       );
     }
+  }
+}
+
+impl Default for AgentScheduler {
+  fn default() -> Self {
+    Self::new()
   }
 }

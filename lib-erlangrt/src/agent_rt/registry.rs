@@ -4,6 +4,8 @@ use std::sync::Arc;
 use crate::agent_rt::process::AgentProcess;
 use crate::agent_rt::types::*;
 
+/// Maps PIDs to processes and manages named
+/// process registration.
 pub struct AgentRegistry {
   processes: HashMap<AgentPid, AgentProcess>,
   names: HashMap<String, AgentPid>,
@@ -50,12 +52,23 @@ impl AgentRegistry {
     proc
   }
 
+  /// Register a name for a process. Returns an error
+  /// if the name is already taken by a different process.
   pub fn register_name(
     &mut self,
     name: &str,
     pid: AgentPid,
-  ) {
+  ) -> Result<(), String> {
+    if let Some(&existing) = self.names.get(name) {
+      if existing != pid {
+        return Err(format!(
+          "Name '{}' already registered",
+          name
+        ));
+      }
+    }
     self.names.insert(name.to_string(), pid);
+    Ok(())
   }
 
   pub fn unregister_name(&mut self, name: &str) {
@@ -72,5 +85,11 @@ impl AgentRegistry {
 
   pub fn pids(&self) -> Vec<AgentPid> {
     self.processes.keys().copied().collect()
+  }
+}
+
+impl Default for AgentRegistry {
+  fn default() -> Self {
+    Self::new()
   }
 }

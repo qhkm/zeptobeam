@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 static NEXT_AGENT_PID: AtomicU64 = AtomicU64::new(0x8000_0000);
 
+/// Unique process identifier in the agent runtime.
+/// PIDs start at 0x8000_0000 to avoid collision with
+/// BEAM PIDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AgentPid(u64);
 
@@ -19,6 +22,13 @@ impl AgentPid {
   }
 }
 
+impl Default for AgentPid {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+/// Messages passed between agent processes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
   Text(String),
@@ -26,12 +36,14 @@ pub enum Message {
   System(SystemMsg),
 }
 
+/// System-level messages (exit signals, I/O responses).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemMsg {
   Exit { from: u64, reason: Reason },
   IoResponse { correlation_id: u64, result: IoResult },
 }
 
+/// Reason for process termination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Reason {
   Normal,
@@ -39,6 +51,7 @@ pub enum Reason {
   Custom(String),
 }
 
+/// Result of an asynchronous I/O operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IoResult {
   Ok(serde_json::Value),
@@ -46,6 +59,8 @@ pub enum IoResult {
   Timeout,
 }
 
+/// Action returned by a behavior's message handler
+/// to direct the scheduler.
 pub enum Action {
   Continue,
   Send { to: AgentPid, msg: Message },
@@ -57,6 +72,7 @@ pub enum Action {
   Stop(Reason),
 }
 
+/// Asynchronous I/O operation submitted to the bridge.
 #[derive(Debug)]
 pub enum IoOp {
   HttpRequest {
@@ -69,6 +85,9 @@ pub enum IoOp {
   },
 }
 
+/// Defines the callbacks for an agent process.
+/// Implementations must be Send + Sync for
+/// cross-thread sharing via Arc.
 pub trait AgentBehavior: Send + Sync {
   fn init(
     &self,
@@ -92,6 +111,7 @@ pub trait AgentBehavior: Send + Sync {
   );
 }
 
+/// Mutable state owned by an agent process.
 pub trait AgentState: Send {
   fn as_any(&self) -> &dyn std::any::Any;
   fn as_any_mut(&mut self) -> &mut dyn std::any::Any;

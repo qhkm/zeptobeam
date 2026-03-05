@@ -24,14 +24,16 @@ pub struct IoResponse {
   pub result: IoResult,
 }
 
-/// Scheduler-side handle.
+/// Scheduler-side handle for submitting I/O operations
+/// and draining responses.
 pub struct BridgeHandle {
   request_tx: Sender<IoRequest>,
   response_rx: Receiver<IoResponse>,
   pub next_correlation_id: u64,
 }
 
-/// Tokio-side worker.
+/// Tokio-side worker that receives I/O requests
+/// and executes them asynchronously.
 pub struct BridgeWorker {
   request_rx: Receiver<IoRequest>,
   response_tx: Sender<IoResponse>,

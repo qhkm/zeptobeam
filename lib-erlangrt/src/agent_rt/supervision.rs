@@ -5,6 +5,7 @@ use crate::agent_rt::process::Priority;
 use crate::agent_rt::scheduler::AgentScheduler;
 use crate::agent_rt::types::*;
 
+/// Strategy for restarting children when one dies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartStrategy {
   OneForOne,
@@ -12,6 +13,7 @@ pub enum RestartStrategy {
   RestForOne,
 }
 
+/// When a child should be restarted after exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildRestart {
   Permanent,
@@ -19,19 +21,12 @@ pub enum ChildRestart {
   Temporary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShutdownPolicy {
-  Timeout(u64),
-  Brutal,
-  Infinity,
-}
-
+/// Specification for a supervised child process.
 pub struct ChildSpec {
   pub id: String,
   pub behavior: Arc<dyn AgentBehavior>,
   pub args: serde_json::Value,
   pub restart: ChildRestart,
-  pub shutdown: ShutdownPolicy,
   pub priority: Priority,
 }
 
@@ -42,12 +37,13 @@ impl ChildSpec {
       behavior: self.behavior.clone(),
       args: self.args.clone(),
       restart: self.restart,
-      shutdown: self.shutdown,
       priority: self.priority,
     }
   }
 }
 
+/// Configuration for starting a supervisor with its
+/// children and restart intensity limits.
 pub struct SupervisorSpec {
   pub strategy: RestartStrategy,
   pub max_restarts: u32,
@@ -55,12 +51,16 @@ pub struct SupervisorSpec {
   pub children: Vec<ChildSpec>,
 }
 
+/// A currently running supervised child.
 pub struct RunningChild {
   pub id: String,
   pub pid: AgentPid,
   pub spec: ChildSpec,
 }
 
+/// Manages a set of child processes with automatic
+/// restart according to the chosen strategy and
+/// restart intensity limits.
 pub struct Supervisor {
   pub strategy: RestartStrategy,
   pub max_restarts: u32,

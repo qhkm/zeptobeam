@@ -205,9 +205,12 @@ fn test_registry_register_name() {
   let pid =
     reg.spawn(behavior, serde_json::Value::Null).unwrap();
 
-  reg.register_name("echo_server", pid);
+  reg.register_name("echo_server", pid).unwrap();
   let found = reg.lookup_name("echo_server");
   assert_eq!(found, Some(pid));
+
+  // Re-registering same pid is OK
+  reg.register_name("echo_server", pid).unwrap();
 
   // Unregister and verify gone
   reg.unregister_name("echo_server");
@@ -557,7 +560,7 @@ fn test_supervisor_starts_children() {
         behavior: behavior.clone(),
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-        shutdown: ShutdownPolicy::Timeout(5000),
+      
         priority: Priority::Normal,
       },
       ChildSpec {
@@ -565,7 +568,7 @@ fn test_supervisor_starts_children() {
         behavior,
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-        shutdown: ShutdownPolicy::Timeout(5000),
+      
         priority: Priority::Normal,
       },
     ],
@@ -589,7 +592,7 @@ fn test_one_for_one_restart() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Permanent,
-      shutdown: ShutdownPolicy::Timeout(5000),
+    
       priority: Priority::Normal,
     }],
   };
@@ -622,7 +625,7 @@ fn test_transient_not_restarted_on_normal_exit() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Transient,
-      shutdown: ShutdownPolicy::Timeout(5000),
+    
       priority: Priority::Normal,
     }],
   };
@@ -651,7 +654,7 @@ fn test_temporary_never_restarted() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Temporary,
-      shutdown: ShutdownPolicy::Timeout(5000),
+    
       priority: Priority::Normal,
     }],
   };
@@ -680,7 +683,7 @@ fn test_max_restarts_exceeded() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Permanent,
-      shutdown: ShutdownPolicy::Timeout(5000),
+    
       priority: Priority::Normal,
     }],
   };
@@ -715,7 +718,7 @@ fn test_one_for_all_restarts_all() {
         behavior: behavior.clone(),
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-        shutdown: ShutdownPolicy::Timeout(5000),
+      
         priority: Priority::Normal,
       },
       ChildSpec {
@@ -723,7 +726,7 @@ fn test_one_for_all_restarts_all() {
         behavior,
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-        shutdown: ShutdownPolicy::Timeout(5000),
+      
         priority: Priority::Normal,
       },
     ],
@@ -1019,7 +1022,7 @@ fn test_transient_not_restarted_on_shutdown() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Transient,
-      shutdown: ShutdownPolicy::Timeout(5000),
+    
       priority: Priority::Normal,
     }],
   };
@@ -1052,7 +1055,7 @@ fn test_rest_for_one_restarts_only_subsequent() {
         behavior: behavior.clone(),
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-        shutdown: ShutdownPolicy::Timeout(5000),
+      
         priority: Priority::Normal,
       },
       ChildSpec {
@@ -1060,7 +1063,7 @@ fn test_rest_for_one_restarts_only_subsequent() {
         behavior: behavior.clone(),
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-        shutdown: ShutdownPolicy::Timeout(5000),
+      
         priority: Priority::Normal,
       },
       ChildSpec {
@@ -1068,7 +1071,7 @@ fn test_rest_for_one_restarts_only_subsequent() {
         behavior,
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-        shutdown: ShutdownPolicy::Timeout(5000),
+      
         priority: Priority::Normal,
       },
     ],
@@ -1259,4 +1262,168 @@ async fn test_scheduler_bridge_roundtrip() {
   // Clean up
   drop(sched);
   let _ = worker_handle.await;
+}
+
+// --- S2: Action::Stop through scheduler ---
+
+/// A behavior that returns Action::Stop on any message.
+struct StopBehavior;
+
+struct StopState;
+
+impl AgentState for StopState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for StopBehavior {
+  fn init(
+    &self,
+    _args: serde_json::Value,
+  ) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(StopState))
+  }
+  fn handle_message(
+    &self,
+    _msg: Message,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Stop(Reason::Normal)
+  }
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+  fn terminate(
+    &self,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) {
+  }
+}
+
+#[test]
+fn test_scheduler_stop_terminates_process() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(StopBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched
+    .send(pid, Message::Text("die".into()))
+    .unwrap();
+  sched.enqueue(pid);
+  sched.tick();
+
+  assert!(
+    sched.registry.lookup(&pid).is_none(),
+    "Process should be removed after Action::Stop"
+  );
+}
+
+// --- S3: Action::Spawn through scheduler ---
+
+/// A behavior that spawns an EchoBehavior child
+/// on first message.
+struct SpawnBehavior;
+
+struct SpawnState;
+
+impl AgentState for SpawnState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for SpawnBehavior {
+  fn init(
+    &self,
+    _args: serde_json::Value,
+  ) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(SpawnState))
+  }
+  fn handle_message(
+    &self,
+    _msg: Message,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Spawn {
+      behavior: Arc::new(EchoBehavior),
+      args: serde_json::Value::Null,
+    }
+  }
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+  fn terminate(
+    &self,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) {
+  }
+}
+
+#[test]
+fn test_scheduler_spawn_creates_child() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(SpawnBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  assert_eq!(sched.registry.count(), 1);
+
+  sched
+    .send(pid, Message::Text("spawn".into()))
+    .unwrap();
+  sched.enqueue(pid);
+  sched.tick();
+
+  assert_eq!(
+    sched.registry.count(),
+    2,
+    "Spawn action should create a new child process"
+  );
+}
+
+// --- S4: register_name rejects duplicates ---
+
+#[test]
+fn test_register_name_rejects_duplicate() {
+  let mut reg = AgentRegistry::new();
+  let b1 = Arc::new(EchoBehavior);
+  let b2 = Arc::new(EchoBehavior);
+  let pid1 =
+    reg.spawn(b1, serde_json::Value::Null).unwrap();
+  let pid2 =
+    reg.spawn(b2, serde_json::Value::Null).unwrap();
+
+  reg.register_name("server", pid1).unwrap();
+
+  // Different pid with same name should fail
+  let result = reg.register_name("server", pid2);
+  assert!(
+    result.is_err(),
+    "Should reject duplicate name registration"
+  );
+
+  // Original registration should be unchanged
+  assert_eq!(reg.lookup_name("server"), Some(pid1));
 }

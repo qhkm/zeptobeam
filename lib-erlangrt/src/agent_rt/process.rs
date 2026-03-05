@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use crate::agent_rt::types::*;
 
+/// A running agent process with its own mailbox,
+/// state, and scheduling metadata.
 pub struct AgentProcess {
   pub pid: AgentPid,
   pub behavior: Arc<dyn AgentBehavior>,
@@ -12,11 +14,11 @@ pub struct AgentProcess {
   pub status: ProcessStatus,
   pub priority: Priority,
   pub links: Vec<AgentPid>,
-  pub monitors: Vec<MonitorRef>,
   pub supervisor: Option<AgentPid>,
   pub trap_exit: bool,
 }
 
+/// Scheduling status of an agent process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessStatus {
   Runnable,
@@ -25,6 +27,7 @@ pub enum ProcessStatus {
   Exiting,
 }
 
+/// Scheduling priority level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
   High,
@@ -32,16 +35,9 @@ pub enum Priority {
   Low,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MonitorRef(u64);
-
-impl MonitorRef {
-  pub fn new(id: u64) -> Self {
-    Self(id)
-  }
-
-  pub fn raw(&self) -> u64 {
-    self.0
+impl Default for Priority {
+  fn default() -> Self {
+    Self::Normal
   }
 }
 
@@ -61,7 +57,6 @@ impl AgentProcess {
       status: ProcessStatus::Runnable,
       priority: Priority::Normal,
       links: Vec::new(),
-      monitors: Vec::new(),
       supervisor: None,
       trap_exit: false,
     })
