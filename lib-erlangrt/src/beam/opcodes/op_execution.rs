@@ -345,3 +345,78 @@ impl OpcodeJump {
     Ok(DispatchResult::Normal)
   }
 }
+
+// Raises a {case_clause, Value} error when no case clause matched.
+// Structure: case_end(val:term)
+define_opcode!(_vm, _ctx, curr_p,
+  name: OpcodeCaseEnd, arity: 1,
+  run: { Self::case_end(curr_p, val) },
+  args: load(val),
+);
+
+impl OpcodeCaseEnd {
+  #[inline]
+  pub fn case_end(curr_p: &mut Process, val: Term) -> RtResult<DispatchResult> {
+    fail::create::generic_tuple2_fail(gen_atoms::CASE_CLAUSE, val, curr_p.get_heap_mut())
+  }
+}
+
+// Raises an if_clause error when no branch in an if expression matched.
+// Structure: if_end()
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeIfEnd, arity: 0,
+  run: { Self::if_end() },
+  args:
+);
+
+impl OpcodeIfEnd {
+  #[inline]
+  pub fn if_end() -> RtResult<DispatchResult> {
+    Err(RtErr::Exception(ExceptionType::Error, gen_atoms::IF_CLAUSE))
+  }
+}
+
+// Like select_val but compares against tuple arity instead of value.
+// If val is a tuple, its arity is compared against each entry in the jump table.
+// Jumps to the matching label, or to fail label if no match found.
+// Structure: select_tuple_arity(val:src, on_fail:label, tuple_pairs:src)
+define_opcode!(_vm, ctx, _curr_p,
+  name: OpcodeSelectTupleArity, arity: 3,
+  run: { Self::select_tuple_arity(ctx, val, fail, pairs) },
+  args: load(val), cp_or_nil(fail), literal_jumptable(pairs),
+);
+
+impl OpcodeSelectTupleArity {
+  #[inline]
+  pub fn select_tuple_arity(
+    ctx: &mut RuntimeContext,
+    val: Term,
+    fail: Term,
+    jtab: *const boxed::JumpTable,
+  ) -> RtResult<DispatchResult> {
+    if !val.is_tuple() && val != Term::empty_tuple() {
+      ctx.jump(fail);
+      return Ok(DispatchResult::Normal);
+    }
+
+    let arity = if val == Term::empty_tuple() {
+      0usize
+    } else {
+      let tp = val.get_tuple_ptr();
+      unsafe { (*tp).get_arity() }
+    };
+
+    let pairs_count = unsafe { (*jtab).get_count() };
+    for i in 0..pairs_count {
+      let (sel_val, sel_label) = unsafe { (*jtab).get_pair(i) };
+      if sel_val.get_small_unsigned() == arity {
+        ctx.jump(sel_label);
+        return Ok(DispatchResult::Normal);
+      }
+    }
+
+    // None matched, jump to fail label
+    ctx.jump(fail);
+    Ok(DispatchResult::Normal)
+  }
+}

@@ -59,6 +59,10 @@ system_limit
 throw
 trap_exit
 true
+try_clause
+
+#--- Uppercase atoms
+EXIT UPPER_EXIT
 
 #--- U
 undef

@@ -128,3 +128,15 @@ fsub
 fmul
 fdiv
 fnegate
+
+#=== === Additional Control Flow === ===
+try_case_end
+raw_raise
+build_stacktrace
+case_end
+if_end
+catch
+catch_end
+timeout
+wait_timeout
+select_tuple_arity

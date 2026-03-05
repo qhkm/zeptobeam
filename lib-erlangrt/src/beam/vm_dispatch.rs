@@ -107,6 +107,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeRemoveMessage::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_TIMEOUT => {
+      assert_arity(OPCODE_TIMEOUT, OpcodeTimeout::ARITY);
+      return OpcodeTimeout::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_LOOP_REC => {
       assert_arity(OPCODE_LOOP_REC, OpcodeLoopRec::ARITY);
       return OpcodeLoopRec::__run(vm, ctx, curr_p);
@@ -120,6 +125,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_WAIT => {
       assert_arity(OPCODE_WAIT, OpcodeWait::ARITY);
       return OpcodeWait::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_WAIT_TIMEOUT => {
+      assert_arity(OPCODE_WAIT_TIMEOUT, OpcodeWaitTimeout::ARITY);
+      return OpcodeWaitTimeout::__run(vm, ctx, curr_p);
     },
 
     OPCODE_IS_LT => {
@@ -217,9 +227,24 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeSelectVal::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_SELECT_TUPLE_ARITY => {
+      assert_arity(OPCODE_SELECT_TUPLE_ARITY, OpcodeSelectTupleArity::ARITY);
+      return OpcodeSelectTupleArity::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_JUMP => {
       assert_arity(OPCODE_JUMP, OpcodeJump::ARITY);
       return OpcodeJump::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_CATCH => {
+      assert_arity(OPCODE_CATCH, OpcodeCatch::ARITY);
+      return OpcodeCatch::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_CATCH_END => {
+      assert_arity(OPCODE_CATCH_END, OpcodeCatchEnd::ARITY);
+      return OpcodeCatchEnd::__run(vm, ctx, curr_p);
     },
 
     OPCODE_MOVE => {
@@ -255,6 +280,16 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_BADMATCH => {
       assert_arity(OPCODE_BADMATCH, OpcodeBadmatch::ARITY);
       return OpcodeBadmatch::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_IF_END => {
+      assert_arity(OPCODE_IF_END, OpcodeIfEnd::ARITY);
+      return OpcodeIfEnd::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_CASE_END => {
+      assert_arity(OPCODE_CASE_END, OpcodeCaseEnd::ARITY);
+      return OpcodeCaseEnd::__run(vm, ctx, curr_p);
     },
 
     OPCODE_CALL_FUN => {
@@ -345,6 +380,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_TRY_CASE => {
       assert_arity(OPCODE_TRY_CASE, OpcodeTryCase::ARITY);
       return OpcodeTryCase::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_TRY_CASE_END => {
+      assert_arity(OPCODE_TRY_CASE_END, OpcodeTryCaseEnd::ARITY);
+      return OpcodeTryCaseEnd::__run(vm, ctx, curr_p);
     },
 
     OPCODE_RAISE => {
@@ -440,6 +480,16 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_IS_TAGGED_TUPLE => {
       assert_arity(OPCODE_IS_TAGGED_TUPLE, OpcodeIsTaggedTuple::ARITY);
       return OpcodeIsTaggedTuple::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BUILD_STACKTRACE => {
+      assert_arity(OPCODE_BUILD_STACKTRACE, OpcodeBuildStacktrace::ARITY);
+      return OpcodeBuildStacktrace::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RAW_RAISE => {
+      assert_arity(OPCODE_RAW_RAISE, OpcodeRawRaise::ARITY);
+      return OpcodeRawRaise::__run(vm, ctx, curr_p);
     },
 
     OPCODE_GET_HD => {
