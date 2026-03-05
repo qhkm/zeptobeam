@@ -3,12 +3,13 @@ use std::{
   sync::Arc,
 };
 
-use crate::agent_rt::types::*;
+use crate::agent_rt::{checkpoint::CheckpointStore, types::*};
 
 const DECOMPOSE_KIND: &str = "decompose_goal";
 const DEFAULT_LLM_PROVIDER: &str = "openai";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-sonnet-latest";
+const DEFAULT_CHECKPOINT_KEY: &str = "orchestrator-default";
 
 /// Orchestrator process behavior.
 ///
@@ -17,11 +18,15 @@ const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-sonnet-latest";
 /// emits one scheduler action per handled message.
 pub struct OrchestratorBehavior {
   pub max_concurrency: usize,
+  pub checkpoint_store: Option<Arc<dyn CheckpointStore>>,
 }
 
 impl Default for OrchestratorBehavior {
   fn default() -> Self {
-    Self { max_concurrency: 1 }
+    Self {
+      max_concurrency: 1,
+      checkpoint_store: None,
+    }
   }
 }
 
@@ -31,10 +36,13 @@ pub struct OrchestratorState {
   pending_spawn_tasks: VecDeque<serde_json::Value>,
   active_workers: HashMap<u64, String>,
   worker_monitors: HashMap<u64, u64>,
+  inflight_tasks: HashMap<String, serde_json::Value>,
   results: Vec<serde_json::Value>,
   requester: Option<AgentPid>,
   goal: serde_json::Value,
   self_pid: Option<AgentPid>,
+  checkpoint_key: String,
+  resumed_from_checkpoint: bool,
   awaiting_decomposition: bool,
   decomposition_done: bool,
 }
@@ -75,16 +83,45 @@ impl AgentBehavior for OrchestratorBehavior {
   fn init(&self, args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
     let requester = parse_pid(args.get("requester_pid"));
     let self_pid = parse_pid(args.get("self_pid"));
+    let checkpoint_key = args
+      .get("checkpoint_key")
+      .and_then(|v| v.as_str())
+      .unwrap_or(DEFAULT_CHECKPOINT_KEY)
+      .to_string();
+
+    if let Some((goal, completed_results, pending_tasks)) =
+      self.load_checkpoint(&checkpoint_key)
+    {
+      return Ok(Box::new(OrchestratorState {
+        pending_tasks,
+        pending_spawn_tasks: VecDeque::new(),
+        active_workers: HashMap::new(),
+        worker_monitors: HashMap::new(),
+        inflight_tasks: HashMap::new(),
+        results: completed_results,
+        requester,
+        goal,
+        self_pid,
+        checkpoint_key,
+        resumed_from_checkpoint: true,
+        awaiting_decomposition: false,
+        decomposition_done: true,
+      }));
+    }
+
     let goal = args.get("goal").cloned().unwrap_or(serde_json::Value::Null);
     Ok(Box::new(OrchestratorState {
       pending_tasks: VecDeque::new(),
       pending_spawn_tasks: VecDeque::new(),
       active_workers: HashMap::new(),
       worker_monitors: HashMap::new(),
+      inflight_tasks: HashMap::new(),
       results: Vec::new(),
       requester,
       goal,
       self_pid,
+      checkpoint_key,
+      resumed_from_checkpoint: false,
       awaiting_decomposition: false,
       decomposition_done: false,
     }))
@@ -99,6 +136,10 @@ impl AgentBehavior for OrchestratorBehavior {
       Message::Json(payload) => {
         if let Some(result) = parse_worker_result(&payload) {
           s.results.push(result.as_json);
+          if let Some(task_id) = result.task_id {
+            s.inflight_tasks.remove(&task_id);
+          }
+          self.persist_checkpoint(s);
           if let Some(worker_pid) = result.worker_pid {
             Action::Send {
               to: AgentPid::from_raw(worker_pid),
@@ -110,17 +151,31 @@ impl AgentBehavior for OrchestratorBehavior {
             self.next_or_finalize(s)
           }
         } else {
+          let incoming_goal = payload.get("goal").cloned().unwrap_or(payload.clone());
+          if s.resumed_from_checkpoint
+            && incoming_goal == s.goal
+            && payload.get("restart").and_then(|v| v.as_bool()) != Some(true)
+          {
+            s.requester = parse_pid(payload.get("requester_pid")).or(s.requester);
+            s.self_pid = parse_pid(payload.get("self_pid")).or(s.self_pid);
+            s.resumed_from_checkpoint = false;
+            self.persist_checkpoint(s);
+            return self.next_or_finalize(s);
+          }
           // Treat JSON payload as a new orchestration goal.
           s.requester = parse_pid(payload.get("requester_pid")).or(s.requester);
           s.self_pid = parse_pid(payload.get("self_pid")).or(s.self_pid);
-          s.goal = payload.get("goal").cloned().unwrap_or(payload.clone());
+          s.goal = incoming_goal;
           s.pending_tasks.clear();
           s.pending_spawn_tasks.clear();
           s.active_workers.clear();
           s.worker_monitors.clear();
+          s.inflight_tasks.clear();
           s.results.clear();
+          s.resumed_from_checkpoint = false;
           s.awaiting_decomposition = true;
           s.decomposition_done = false;
+          self.persist_checkpoint(s);
           Action::IoRequest(IoOp::Custom {
             kind: DECOMPOSE_KIND.to_string(),
             payload: serde_json::json!({
@@ -138,6 +193,7 @@ impl AgentBehavior for OrchestratorBehavior {
         for task in extract_tasks(&s.goal, &result) {
           s.pending_tasks.push_back(task);
         }
+        self.persist_checkpoint(s);
         self.next_or_finalize(s)
       }
       Message::System(SystemMsg::SpawnResult {
@@ -150,9 +206,11 @@ impl AgentBehavior for OrchestratorBehavior {
         };
         let task_id = extract_task_id(&task, &format!("task-{}", child_pid));
         s.active_workers.insert(child_pid, task_id.clone());
+        s.inflight_tasks.insert(task_id.clone(), task.clone());
         if let Some(mon_ref) = monitor_ref {
           s.worker_monitors.insert(child_pid, mon_ref);
         }
+        self.persist_checkpoint(s);
         Action::Send {
           to: AgentPid::from_raw(child_pid),
           msg: Message::Json(serde_json::json!({
@@ -172,6 +230,7 @@ impl AgentBehavior for OrchestratorBehavior {
         let removed = s.active_workers.remove(&pid);
         s.worker_monitors.remove(&pid);
         if let Some(task_id) = removed {
+          s.inflight_tasks.remove(&task_id);
           if !matches!(reason, Reason::Normal) {
             s.results.push(serde_json::json!({
               "type": "worker_error",
@@ -181,6 +240,7 @@ impl AgentBehavior for OrchestratorBehavior {
             }));
           }
         }
+        self.persist_checkpoint(s);
         self.next_or_finalize(s)
       }
       _ => Action::Continue,
@@ -198,6 +258,7 @@ impl AgentBehavior for OrchestratorBehavior {
       .downcast_mut::<OrchestratorState>()
       .expect("orchestrator state type");
     if let Some(task_id) = s.active_workers.remove(&from.raw()) {
+      s.inflight_tasks.remove(&task_id);
       if !matches!(reason, Reason::Normal) {
         s.results.push(serde_json::json!({
           "type": "worker_error",
@@ -207,6 +268,7 @@ impl AgentBehavior for OrchestratorBehavior {
         }));
       }
     }
+    self.persist_checkpoint(s);
     self.next_or_finalize(s)
   }
 
@@ -214,6 +276,57 @@ impl AgentBehavior for OrchestratorBehavior {
 }
 
 impl OrchestratorBehavior {
+  fn load_checkpoint(
+    &self,
+    checkpoint_key: &str,
+  ) -> Option<(
+    serde_json::Value,
+    Vec<serde_json::Value>,
+    VecDeque<serde_json::Value>,
+  )> {
+    let store = self.checkpoint_store.as_ref()?;
+    let value = store.load(checkpoint_key).ok().flatten()?;
+    let goal = value.get("goal")?.clone();
+    let completed_results = value
+      .get("completed_results")
+      .and_then(|v| v.as_array())
+      .cloned()
+      .unwrap_or_default();
+    let pending_tasks = value
+      .get("pending_tasks")
+      .and_then(|v| v.as_array())
+      .cloned()
+      .unwrap_or_default()
+      .into_iter()
+      .collect::<VecDeque<_>>();
+    Some((goal, completed_results, pending_tasks))
+  }
+
+  fn persist_checkpoint(&self, state: &OrchestratorState) {
+    let store = match self.checkpoint_store.as_ref() {
+      Some(s) => s,
+      None => return,
+    };
+
+    let mut pending_tasks: Vec<serde_json::Value> =
+      state.pending_tasks.iter().cloned().collect();
+    pending_tasks.extend(state.pending_spawn_tasks.iter().cloned());
+    pending_tasks.extend(state.inflight_tasks.values().cloned());
+
+    let checkpoint = serde_json::json!({
+      "goal": state.goal,
+      "completed_results": state.results,
+      "pending_tasks": pending_tasks,
+    });
+    let _ = store.save(&state.checkpoint_key, &checkpoint);
+  }
+
+  fn clear_checkpoint(&self, key: &str) {
+    if let Some(store) = self.checkpoint_store.as_ref() {
+      let _ = store.delete(key);
+    }
+  }
+
   fn next_or_finalize(&self, state: &mut OrchestratorState) -> Action {
     if state.can_spawn_more(self.max_concurrency) {
       let task = match state.pending_tasks.pop_front() {
@@ -226,6 +339,7 @@ impl OrchestratorBehavior {
       );
       let task_id = extract_task_id(&task, &fallback);
       state.pending_spawn_tasks.push_back(task);
+      self.persist_checkpoint(state);
       let parent_pid = state.self_pid.unwrap_or_default().raw();
       return Action::Spawn {
         behavior: Arc::new(WorkerBehavior),
@@ -239,6 +353,7 @@ impl OrchestratorBehavior {
     }
 
     if state.is_complete() {
+      self.clear_checkpoint(&state.checkpoint_key);
       let summary = serde_json::json!({
         "type": "orchestration_complete",
         "goal": state.goal,
@@ -409,6 +524,7 @@ fn reason_to_value(reason: Reason) -> serde_json::Value {
 
 struct WorkerResult {
   worker_pid: Option<u64>,
+  task_id: Option<String>,
   as_json: serde_json::Value,
 }
 
@@ -418,6 +534,10 @@ fn parse_worker_result(payload: &serde_json::Value) -> Option<WorkerResult> {
   }
   Some(WorkerResult {
     worker_pid: payload.get("worker_pid").and_then(|v| v.as_u64()),
+    task_id: payload
+      .get("task_id")
+      .and_then(|v| v.as_str())
+      .map(str::to_string),
     as_json: payload.clone(),
   })
 }
@@ -487,10 +607,14 @@ fn build_llm_request_from_task(task: &serde_json::Value) -> IoOp {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::agent_rt::checkpoint::{CheckpointStore, InMemoryCheckpointStore};
 
   #[test]
   fn test_orchestrator_goal_triggers_decompose_request() {
-    let behavior = OrchestratorBehavior { max_concurrency: 2 };
+    let behavior = OrchestratorBehavior {
+      max_concurrency: 2,
+      checkpoint_store: None,
+    };
     let mut state = behavior
       .init(serde_json::json!({
         "self_pid": 0x8000_0001u64,
@@ -514,7 +638,10 @@ mod tests {
 
   #[test]
   fn test_orchestrator_decompose_response_spawns_worker() {
-    let behavior = OrchestratorBehavior { max_concurrency: 2 };
+    let behavior = OrchestratorBehavior {
+      max_concurrency: 2,
+      checkpoint_store: None,
+    };
     let mut state = behavior
       .init(serde_json::json!({
         "self_pid": 0x8000_0010u64,
@@ -556,7 +683,10 @@ mod tests {
 
   #[test]
   fn test_orchestrator_spawn_result_sends_task_to_child() {
-    let behavior = OrchestratorBehavior { max_concurrency: 1 };
+    let behavior = OrchestratorBehavior {
+      max_concurrency: 1,
+      checkpoint_store: None,
+    };
     let mut state = behavior
       .init(serde_json::json!({
         "self_pid": 0x8000_0100u64,
@@ -659,7 +789,10 @@ mod tests {
 
   #[test]
   fn test_orchestrator_survives_worker_crash_via_down() {
-    let behavior = OrchestratorBehavior { max_concurrency: 1 };
+    let behavior = OrchestratorBehavior {
+      max_concurrency: 1,
+      checkpoint_store: None,
+    };
     let mut state = behavior
       .init(serde_json::json!({
         "self_pid": 0x8000_0555u64,
@@ -704,5 +837,103 @@ mod tests {
     let s = state.as_any().downcast_ref::<OrchestratorState>().unwrap();
     assert_eq!(s.results.len(), 1);
     assert_eq!(s.results[0]["type"], "worker_error");
+  }
+
+  #[test]
+  fn test_orchestrator_persists_checkpoint_after_worker_result() {
+    let store = InMemoryCheckpointStore::new();
+    let behavior = OrchestratorBehavior {
+      max_concurrency: 1,
+      checkpoint_store: Some(Arc::new(store.clone())),
+    };
+
+    let mut state = behavior
+      .init(serde_json::json!({
+        "self_pid": 0x8000_0777u64,
+        "checkpoint_key": "orch-checkpoint-a",
+      }))
+      .unwrap();
+
+    let _ = behavior.handle_message(
+      Message::Json(serde_json::json!({
+        "goal": "checkpoint this",
+      })),
+      state.as_mut(),
+    );
+    let _ = behavior.handle_message(
+      Message::System(SystemMsg::IoResponse {
+        correlation_id: 0,
+        result: IoResult::Ok(serde_json::json!({
+          "tasks": [{"task_id": "cp-1", "prompt": "do work"}]
+        })),
+      }),
+      state.as_mut(),
+    );
+    let _ = behavior.handle_message(
+      Message::System(SystemMsg::SpawnResult {
+        child_pid: 0x8000_0888u64,
+        monitor_ref: Some(1),
+      }),
+      state.as_mut(),
+    );
+
+    let action = behavior.handle_message(
+      Message::Json(serde_json::json!({
+        "type": "worker_result",
+        "worker_pid": 0x8000_0888u64,
+        "task_id": "cp-1",
+        "result": {"ok": true, "value": {"status": 200}},
+      })),
+      state.as_mut(),
+    );
+    assert!(matches!(action, Action::Send { .. }));
+
+    let checkpoint = store.load("orch-checkpoint-a").unwrap().unwrap();
+    assert_eq!(checkpoint["goal"], serde_json::json!("checkpoint this"));
+    assert_eq!(
+      checkpoint["completed_results"].as_array().unwrap().len(),
+      1,
+      "worker result should be persisted"
+    );
+  }
+
+  #[test]
+  fn test_orchestrator_resumes_from_checkpoint_and_skips_decompose() {
+    let store = InMemoryCheckpointStore::new();
+    store
+      .save(
+        "orch-checkpoint-b",
+        &serde_json::json!({
+          "goal": "resume-goal",
+          "completed_results": [{"type":"worker_result","task_id":"done-1"}],
+          "pending_tasks": [{"task_id":"todo-1","prompt":"resume me"}],
+        }),
+      )
+      .unwrap();
+
+    let behavior = OrchestratorBehavior {
+      max_concurrency: 1,
+      checkpoint_store: Some(Arc::new(store)),
+    };
+    let mut state = behavior
+      .init(serde_json::json!({
+        "self_pid": 0x8000_0999u64,
+        "checkpoint_key": "orch-checkpoint-b",
+      }))
+      .unwrap();
+
+    let action = behavior.handle_message(
+      Message::Json(serde_json::json!({
+        "goal": "resume-goal",
+      })),
+      state.as_mut(),
+    );
+
+    match action {
+      Action::Spawn { args, .. } => {
+        assert_eq!(args["task_id"], "todo-1");
+      }
+      _ => panic!("expected Spawn from resumed checkpoint, got non-spawn action"),
+    }
   }
 }

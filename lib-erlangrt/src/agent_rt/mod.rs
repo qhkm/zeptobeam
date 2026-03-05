@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod checkpoint;
 pub mod orchestration;
 pub mod process;
 pub mod rate_limiter;
