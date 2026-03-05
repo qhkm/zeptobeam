@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
   use crate::agent_rt::{
-    process::*, scheduler::AgentScheduler, supervision::*, types::*,
+    config::load_config_from_str,
+    process::*, scheduler::AgentScheduler, startup::spawn_configured_agents,
+    supervision::*, types::*,
   };
   use std::{any::Any, sync::Arc};
 
@@ -677,5 +679,48 @@ mod tests {
     assert_eq!(graph.task_status("child1"), Some(&TaskStatus::Skipped));
     assert_eq!(graph.task_status("child2"), Some(&TaskStatus::Skipped));
     assert_eq!(graph.task_status("grandchild"), Some(&TaskStatus::Skipped));
+  }
+
+  #[test]
+  fn test_config_driven_agent_spawn_and_message() {
+    let toml_str = r#"
+[[agents]]
+name = "helper"
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4"
+system_prompt = "You are helpful."
+tools = ["web_fetch"]
+auto_start = true
+
+[[agents]]
+name = "disabled"
+provider = "openai"
+auto_start = false
+"#;
+    let config = load_config_from_str(toml_str).unwrap();
+    let mut scheduler = AgentScheduler::new();
+
+    let spawned = spawn_configured_agents(&mut scheduler, &config.agents).unwrap();
+    assert_eq!(spawned.len(), 1);
+    assert_eq!(spawned[0].1, "helper");
+
+    // Verify process exists and is registered
+    let pid = scheduler.registry.lookup_name("helper").unwrap();
+    assert!(scheduler.registry.lookup(&pid).is_some());
+
+    // Disabled agent should not be spawned
+    assert!(scheduler.registry.lookup_name("disabled").is_none());
+
+    // Send a message to the agent
+    scheduler.enqueue(pid);
+    let send_result = scheduler.send(pid, Message::Text("hello".into()));
+    assert!(send_result.is_ok());
+
+    // Tick the scheduler — agent should process message and emit IoRequest
+    let did_work = scheduler.tick();
+    assert!(did_work);
+
+    // Agent should still be alive
+    assert!(scheduler.registry.lookup(&pid).is_some());
   }
 }
