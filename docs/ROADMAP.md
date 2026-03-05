@@ -154,58 +154,209 @@ The following features are designated as **Enterprise** — they extend the core
 
 ## Enterprise Phase E1: Multi-Node Clustering
 
-Distribute agents across multiple runtime nodes.
+*Scale the runtime across machines — foundation for all enterprise features.*
 
-- Network transport: gRPC (tonic) inter-node communication for message passing
-- Node discovery: Static config node registry
-- Remote spawn: Spawn processes on remote nodes, transparent PID routing
-- Partition rebalancing: Migrate agent processes between nodes on load imbalance
-- Distributed supervision: Supervisors that span nodes, restart on remote node failure
-- Cross-node dead-letter routing: Forward undeliverable messages to origin node's DLQ
-- Split-brain resolution: Leader-based consistency for shared state (agent registry, checkpoints)
+**Networking & Discovery**
+- gRPC (tonic) inter-node transport for message passing and control plane
+- Node discovery: static config, DNS-based, and gossip protocol options
+- Health-checked connection pools with automatic reconnection
 
-## Enterprise Phase E2: Cloud Native
+**Distributed Process Model**
+- Remote spawn: start processes on any node, transparent PID routing
+- Location-transparent messaging: `send(pid, msg)` works across nodes
+- Distributed supervision: supervisors that span nodes, restart on remote failure
+- Cross-node dead-letter routing: forward undeliverable messages to origin node's DLQ
 
-- Kubernetes Operator with CRDs for AgentRuntime, AgentPool
-- Horizontal Pod Autoscaler (HPA) integration
-- GitOps workflows (ArgoCD/Flux)
-- Helm charts and Terraform modules
-- Multi-tenancy with namespace isolation
-- Resource quotas and per-tenant rate limiting
-- Cost optimization: token budgeting, model tier routing, spot instance support
+**Consistency & Reliability**
+- Partition rebalancing: migrate agent processes between nodes on load imbalance
+- Split-brain resolution: leader-based consistency for shared state (registry, checkpoints)
+- Distributed ETS: replicated tables across nodes with eventual/strong consistency options
+- Active-active geo-redundancy with configurable replication factor
 
-## Enterprise Phase E3: Security & Compliance
+**Prerequisite:** Core Phases 1–9 (complete).
 
-- Zero-trust architecture with mTLS between nodes
-- OIDC/OAuth2 authentication and RBAC
-- Audit logging and tamper-proof log shipping
-- PII detection and automatic redaction
-- Data residency controls and GDPR deletion APIs
-- Wasm-based agent sandboxing
-- FIPS 140-2 compliance mode
+---
 
-## Enterprise Phase E4: Advanced AI Patterns
+## Enterprise Phase E2: Cloud Native Deployment
 
-- Agent swarm intelligence (emergent coordination, pheromone trails)
-- Federated learning across agent nodes
-- Agent marketplace/registry (publish, discover, compose)
-- Advanced human-in-the-loop workflows
-- Multi-modal agents (vision, audio, code)
-- Agent-to-agent negotiation protocols
+*Deploy and operate at scale on modern infrastructure.*
 
-## Enterprise Phase E5: Enterprise Observability
+**Kubernetes Integration**
+- Custom Operator with CRDs: AgentRuntime, AgentPool, AgentRelease
+- Horizontal Pod Autoscaler (HPA) driven by agent queue depth and reduction load
+- Rolling upgrades with hot-code reload coordination
+- Helm charts and Terraform modules for one-command deployment
 
-- OpenTelemetry distributed tracing
-- Real-time WebSocket event streaming
-- Live debugging: attach to running agents, inspect mailboxes
-- Performance profiler with reduction analysis
-- Cost attribution dashboards
-- SLA/SLO monitoring with alerting
+**Multi-Tenancy**
+- Namespace isolation: separate agent pools, budgets, and config per tenant
+- Resource quotas: CPU, memory, token budget, and agent count limits per tenant
+- Per-tenant rate limiting with configurable burst allowances
+- Tenant-aware routing: agent processes pinned to tenant-dedicated node pools
+
+**Release & Deployment**
+- Canary deployments: route % of traffic to new agent behavior versions
+- Blue/green agent pool switching with instant rollback
+- Shadow mode: run new behaviors alongside old, compare outputs without serving
+- GitOps workflows (ArgoCD/Flux) for declarative agent configuration
+
+**Prerequisite:** E1 (clustering for multi-node deployment).
+
+---
+
+## Enterprise Phase E3: Security, Compliance & Governance
+
+*Enterprise trust: lock down, audit, and govern the runtime.*
+
+**Authentication & Authorization**
+- OIDC/OAuth2 authentication for API and MCP endpoints
+- Role-based access control (RBAC): admin, operator, developer, read-only
+- Per-agent permission scoping: restrict which tools, models, and data agents can access
+- API key management with rotation and expiration
+
+**Network Security**
+- Zero-trust architecture with mTLS between all nodes
+- Wasm-based agent sandboxing: isolate untrusted behaviors in WebAssembly
+- Network policy enforcement: agents can only reach whitelisted endpoints
+- Secret management integration (Vault, AWS Secrets Manager, SOPS)
+
+**Compliance**
+- Audit logging: tamper-proof log shipping for every agent action, tool call, and LLM request
+- PII detection and automatic redaction in agent inputs/outputs
+- Data residency controls: pin data and processing to specific regions
+- GDPR deletion APIs: right-to-forget across checkpoints, ETS/DETS, and WAL
+- FIPS 140-2 compliance mode for cryptographic operations
+- SOC 2 Type II evidence collection automation
+
+**Governance**
+- Model governance: approved model whitelist, per-agent model assignment policies
+- Prompt/config versioning: Git-backed version control for agent configurations
+- Deployment approval workflows: require human sign-off for production behavior changes
+- Agent decision audit trail: full lineage from input → LLM calls → tool use → output
+- Cost governance: hard budget ceilings with automatic agent suspension
+
+**Prerequisite:** E2 (multi-tenancy for tenant-scoped governance).
+
+---
+
+## Enterprise Phase E4: Observability & FinOps
+
+*See everything, control costs, meet SLAs.*
+
+**Distributed Tracing & Metrics**
+- OpenTelemetry integration: traces span agent → LLM → tool → response
+- Prometheus/Grafana metrics export: per-agent, per-tenant, per-model dashboards
+- Structured log correlation: link logs to traces and agent PIDs
+- Custom metric emission from agent behaviors
+
+**Live Debugging**
+- Attach to running agents: inspect mailbox contents, current state, behavior version
+- Message flow visualization: trace a message through the supervision tree
+- Performance profiler with reduction analysis and hot-path detection
+- Replay mode: re-execute agent conversations from WAL for debugging
+
+**Real-Time Streaming**
+- WebSocket event streaming: subscribe to agent lifecycle events, messages, errors
+- Event bus integration: publish agent events to Kafka, NATS, or Redis Streams
+- Webhook notifications: configurable alerts on agent failures, budget exceeded, SLA breach
+
+**FinOps & Cost Management**
+- Token usage tracking per agent, per tenant, per model with real-time counters
+- Cost attribution dashboards: who spent what, on which model, for which task
+- Budget alerts: configurable thresholds with Slack/email/PagerDuty notifications
+- Chargeback reports: per-team/per-project billing export (CSV, API)
+- Model tier routing: auto-downgrade to cheaper models when budget is low
+- Spot/preemptible instance awareness: graceful agent migration on eviction
+
+**SLA Management**
+- SLA/SLO definitions per agent pool: latency, throughput, error rate targets
+- Automatic alerting when SLOs are breached
+- Error budget tracking with burn-rate alerts
+- Incident timeline generation from agent traces
+
+**Prerequisite:** E1 (clustering for distributed traces), E3 (governance for cost controls).
+
+---
+
+## Enterprise Phase E5: Developer Experience & Integration
+
+*Make it easy to build, test, and connect agents.*
+
+**SDKs & Client Libraries**
+- Python SDK: spawn agents, send messages, subscribe to events
+- TypeScript/Node.js SDK: full API coverage with async/await
+- REST and gRPC API with OpenAPI/protobuf specs
+- CLI tool: manage agents, inspect state, deploy behaviors from terminal
+
+**Agent Development**
+- Interactive playground: web UI for testing agent behaviors with live state inspection
+- Agent templates: starter behaviors for common patterns (chat, RAG, pipeline, router)
+- Local development mode: single-binary with hot-reload for rapid iteration
+- Integration test harness: mock LLM providers, assert on agent message sequences
+
+**Testing & Quality**
+- Replay testing: capture production conversations, replay against new behavior versions
+- Simulation mode: run agents against synthetic workloads with configurable failure injection
+- Behavior diff tool: compare outputs of two behavior versions side-by-side
+- CI/CD integration: GitHub Actions / GitLab CI templates for agent test + deploy
+
+**Enterprise Connectors**
+- Database connectors: PostgreSQL, MySQL, MongoDB, Redis (as agent tools)
+- Message bus: Kafka consumer/producer, NATS, RabbitMQ as IoOp backends
+- Webhook management: inbound/outbound webhook registry with retry and dead-letter
+- Enterprise APIs: Salesforce, Jira, Slack, GitHub integration as pluggable MCP tools
+- Vector store integration: Pinecone, Weaviate, pgvector for RAG patterns
+
+**Prerequisite:** Core Phase 7 (MCP for tool integration), E3 (auth for API security).
+
+---
+
+## Enterprise Phase E6: Advanced AI Patterns
+
+*Differentiated capabilities for sophisticated AI deployments.*
+
+**Swarm Intelligence**
+- Emergent coordination: agents discover collaborators through shared ETS state
+- Pheromone trail pattern: agents leave signals that influence routing of future tasks
+- Collective decision-making: voting, consensus, and debate protocols between agents
+- Dynamic team formation: agents self-organize into task-specific groups
+
+**Agent Marketplace**
+- Behavior registry: publish, version, discover, and compose agent behaviors
+- Marketplace API: search by capability, rating, cost profile
+- Composition engine: chain behaviors into pipelines with automatic type checking
+- Dependency resolution: behaviors declare required tools, models, and permissions
+
+**Advanced Orchestration**
+- Long-running workflows: durable execution with saga pattern and compensation
+- Human-in-the-loop: configurable approval points, escalation chains, feedback loops
+- Multi-modal agents: vision, audio, and code generation with unified message types
+- Agent-to-agent negotiation: bid/ask protocols for resource allocation and task delegation
+
+**Learning & Adaptation**
+- Federated learning across agent nodes: share model improvements without raw data
+- Behavior A/B testing: statistical significance testing for behavior improvements
+- Automatic prompt optimization: track which prompts produce best outcomes per task type
+- Knowledge distillation: successful agent strategies condensed into reusable behaviors
+
+**Prerequisite:** E1 (clustering for distributed agents), E4 (observability for A/B metrics).
+
+---
+
+## Enterprise Summary
+
+| Phase | Focus | Dependency |
+|-------|-------|------------|
+| E1 | Multi-Node Clustering | Core complete |
+| E2 | Cloud Native Deployment | E1 |
+| E3 | Security, Compliance & Governance | E2 |
+| E4 | Observability & FinOps | E1, E3 |
+| E5 | Developer Experience & Integration | Core P7, E3 |
+| E6 | Advanced AI Patterns | E1, E4 |
 
 ---
 
 ## Philosophy
 
-**Core (Phases 1–9)**: Open source, BEAM-inspired, essential for any serious agent runtime. All core phases are complete. These features make zeptobeam unique and powerful on its own.
+**Core (Phases 1–9)**: Open source, BEAM-inspired, essential for any serious agent runtime. All core phases are complete (343 tests). These features make zeptobeam unique and powerful on its own.
 
-**Enterprise (E1–E5)**: Production-hardening for organizations running at scale. Includes multi-node clustering, cloud-native deployment, security, advanced AI patterns, and observability.
+**Enterprise (E1–E6)**: Production-hardening for organizations running at scale. Ordered by dependency — clustering enables cloud-native, which enables governance, which enables everything else. Each phase delivers standalone value while building toward the full platform.
