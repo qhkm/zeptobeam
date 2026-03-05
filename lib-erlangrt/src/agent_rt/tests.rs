@@ -2253,3 +2253,218 @@ fn test_set_receive_timeout_errors_on_overflow() {
   let result = sched.set_receive_timeout(pid, std::time::Duration::MAX);
   assert!(result.is_err(), "Should error on duration overflow");
 }
+
+// === Step 6: Real HTTP in bridge ===
+
+/// A behavior that issues an HTTP GET via IoOp::HttpRequest
+/// and stores the response.
+struct HttpGetBehavior {
+  url: String,
+}
+
+struct HttpGetState {
+  response: Option<serde_json::Value>,
+}
+
+impl AgentState for HttpGetState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for HttpGetBehavior {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(HttpGetState { response: None }))
+  }
+
+  fn handle_message(&self, msg: Message, state: &mut dyn AgentState) -> Action {
+    let s = state.as_any_mut().downcast_mut::<HttpGetState>().unwrap();
+    match msg {
+      Message::Text(_) => Action::IoRequest(IoOp::HttpRequest {
+        method: "GET".into(),
+        url: self.url.clone(),
+        headers: std::collections::HashMap::new(),
+        body: None,
+        timeout_ms: Some(10_000),
+      }),
+      Message::System(SystemMsg::IoResponse { result, .. }) => {
+        if let IoResult::Ok(val) = result {
+          s.response = Some(val);
+        }
+        Action::Continue
+      }
+      _ => Action::Continue,
+    }
+  }
+
+  fn handle_exit(&self, _from: AgentPid, _reason: Reason, _state: &mut dyn AgentState) -> Action {
+    Action::Continue
+  }
+
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+}
+
+#[tokio::test]
+async fn test_bridge_http_get_success() {
+  use crate::agent_rt::bridge::execute_io_op;
+  use std::collections::HashMap;
+
+  let op = IoOp::HttpRequest {
+    method: "GET".into(),
+    url: "https://httpbin.org/get".into(),
+    headers: HashMap::new(),
+    body: None,
+    timeout_ms: Some(10_000),
+  };
+  let result = execute_io_op(&op).await;
+  match &result {
+    IoResult::Ok(val) => {
+      assert_eq!(val["status"], 200);
+      assert!(val["body"].is_string(), "body should be a string");
+    }
+    other => panic!("Expected IoResult::Ok, got {:?}", other),
+  }
+}
+
+#[tokio::test]
+async fn test_bridge_http_timeout() {
+  use crate::agent_rt::bridge::execute_io_op;
+  use std::collections::HashMap;
+
+  let op = IoOp::HttpRequest {
+    method: "GET".into(),
+    url: "https://httpbin.org/delay/10".into(),
+    headers: HashMap::new(),
+    body: None,
+    timeout_ms: Some(500),
+  };
+  let result = execute_io_op(&op).await;
+  assert!(
+    matches!(result, IoResult::Timeout),
+    "Expected IoResult::Timeout for slow endpoint, got {:?}",
+    result
+  );
+}
+
+#[tokio::test]
+async fn test_bridge_http_non_2xx() {
+  use crate::agent_rt::bridge::execute_io_op;
+  use std::collections::HashMap;
+
+  let op = IoOp::HttpRequest {
+    method: "GET".into(),
+    url: "https://httpbin.org/status/404".into(),
+    headers: HashMap::new(),
+    body: None,
+    timeout_ms: Some(10_000),
+  };
+  let result = execute_io_op(&op).await;
+  match &result {
+    IoResult::Ok(val) => {
+      assert_eq!(val["status"], 404);
+    }
+    other => panic!("Expected IoResult::Ok with status 404, got {:?}", other),
+  }
+}
+
+#[tokio::test]
+async fn test_bridge_http_post_with_body() {
+  use crate::agent_rt::bridge::execute_io_op;
+  use std::collections::HashMap;
+
+  let mut headers = HashMap::new();
+  headers.insert("Content-Type".into(), "application/json".into());
+
+  let op = IoOp::HttpRequest {
+    method: "POST".into(),
+    url: "https://httpbin.org/post".into(),
+    headers,
+    body: Some(b"{\"key\":\"value\"}".to_vec()),
+    timeout_ms: Some(10_000),
+  };
+  let result = execute_io_op(&op).await;
+  match &result {
+    IoResult::Ok(val) => {
+      assert_eq!(val["status"], 200);
+      assert!(val["body"].is_string(), "body should be present");
+    }
+    other => panic!("Expected IoResult::Ok, got {:?}", other),
+  }
+}
+
+#[tokio::test]
+async fn test_bridge_http_connection_error() {
+  use crate::agent_rt::bridge::execute_io_op;
+  use std::collections::HashMap;
+
+  let op = IoOp::HttpRequest {
+    method: "GET".into(),
+    url: "http://192.0.2.1:1".into(), // RFC 5737 TEST-NET, should fail to connect
+    headers: HashMap::new(),
+    body: None,
+    timeout_ms: Some(2_000),
+  };
+  let result = execute_io_op(&op).await;
+  assert!(
+    matches!(result, IoResult::Error(_) | IoResult::Timeout),
+    "Connection to unreachable host should error or timeout, got {:?}",
+    result
+  );
+}
+
+#[tokio::test]
+async fn test_scheduler_bridge_http_roundtrip() {
+  let (bridge_handle, worker) = crate::agent_rt::bridge::create_bridge();
+  let mut sched = AgentScheduler::new();
+  sched.set_bridge(bridge_handle);
+
+  let worker_handle = tokio::spawn(async move { worker.run().await });
+
+  let behavior = Arc::new(HttpGetBehavior {
+    url: "https://httpbin.org/get".into(),
+  });
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched.send(pid, Message::Text("go".into())).unwrap();
+  sched.enqueue(pid);
+
+  // First tick: dispatches "go", behavior returns IoRequest(HttpRequest),
+  // submitted to bridge, process goes Waiting.
+  sched.tick();
+  assert_eq!(
+    sched.registry.lookup(&pid).unwrap().status,
+    ProcessStatus::Waiting,
+  );
+
+  // Wait for ureq HTTP call to complete
+  tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+  // Second tick: drains IoResponse, delivers to process,
+  // behavior stores response in state.
+  let ran = sched.tick();
+  assert!(ran, "Second tick should have run work");
+
+  let proc = sched.registry.lookup(&pid).unwrap();
+  let state = proc
+    .state
+    .as_ref()
+    .unwrap()
+    .as_any()
+    .downcast_ref::<HttpGetState>()
+    .unwrap();
+  assert!(
+    state.response.is_some(),
+    "Process should have received HTTP response"
+  );
+  let resp = state.response.as_ref().unwrap();
+  assert_eq!(resp["status"], 200);
+  assert!(resp["body"].is_string());
+
+  drop(sched);
+  let _ = worker_handle.await;
+}

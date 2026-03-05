@@ -1,5 +1,6 @@
 use crate::agent_rt::types::*;
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use std::error::Error as StdError;
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
 const RESPONSE_QUEUE_SIZE: usize = 4096;
@@ -128,7 +129,7 @@ impl BridgeWorker {
 }
 
 /// Execute an I/O operation asynchronously.
-async fn execute_io_op(op: &IoOp) -> IoResult {
+pub(crate) async fn execute_io_op(op: &IoOp) -> IoResult {
   match op {
     IoOp::Timer { duration } => {
       tokio::time::sleep(*duration).await;
@@ -140,15 +141,23 @@ async fn execute_io_op(op: &IoOp) -> IoResult {
     IoOp::HttpRequest {
       method,
       url,
-      body: _,
+      headers,
+      body,
+      timeout_ms,
     } => {
-      // Placeholder: real HTTP comes later.
-      IoResult::Ok(serde_json::json!({
-        "kind": "http",
-        "method": method,
-        "url": url,
-        "status": "placeholder"
-      }))
+      let method = method.clone();
+      let url = url.clone();
+      let headers = headers.clone();
+      let body = body.clone();
+      let timeout_ms = *timeout_ms;
+      match tokio::task::spawn_blocking(move || {
+        execute_http_blocking(&method, &url, &headers, body.as_deref(), timeout_ms)
+      })
+      .await
+      {
+        Ok(result) => result,
+        Err(e) => IoResult::Error(format!("http task panicked: {}", e)),
+      }
     }
     IoOp::Custom { kind, payload } => {
       // Custom ops return the payload as-is for now.
@@ -160,4 +169,79 @@ async fn execute_io_op(op: &IoOp) -> IoResult {
       }))
     }
   }
+}
+
+fn execute_http_blocking(
+  method: &str,
+  url: &str,
+  headers: &std::collections::HashMap<String, String>,
+  body: Option<&[u8]>,
+  timeout_ms: Option<u64>,
+) -> IoResult {
+  let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
+  let agent = ureq::AgentBuilder::new()
+    .timeout_connect(timeout)
+    .timeout_read(timeout)
+    .build();
+
+  let mut req = match method.to_uppercase().as_str() {
+    "GET" => agent.get(url),
+    "POST" => agent.post(url),
+    "PUT" => agent.put(url),
+    "DELETE" => agent.delete(url),
+    "PATCH" => agent.request("PATCH", url),
+    "HEAD" => agent.head(url),
+    other => agent.request(other, url),
+  };
+
+  for (k, v) in headers {
+    req = req.set(k, v);
+  }
+
+  let response = match body {
+    Some(b) => req.send_bytes(b),
+    None => req.call(),
+  };
+
+  match response {
+    Ok(resp) => {
+      let status = resp.status();
+      let resp_body = resp.into_string().unwrap_or_default();
+      IoResult::Ok(serde_json::json!({
+        "status": status,
+        "body": resp_body
+      }))
+    }
+    Err(ureq::Error::Status(code, resp)) => {
+      let resp_body = resp.into_string().unwrap_or_default();
+      IoResult::Ok(serde_json::json!({
+        "status": code,
+        "body": resp_body
+      }))
+    }
+    Err(ureq::Error::Transport(t)) => {
+      if is_timeout_error(&t) {
+        return IoResult::Timeout;
+      }
+      match t.kind() {
+        ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Dns => {
+          IoResult::Error(format!("connection error: {}", t))
+        }
+        _ => IoResult::Error(format!("http error: {}", t)),
+      }
+    }
+  }
+}
+
+fn is_timeout_error(t: &ureq::Transport) -> bool {
+  let msg = t.to_string();
+  if msg.contains("timed out") || msg.contains("Timeout") {
+    return true;
+  }
+  if let Some(source) = t.source() {
+    if let Some(io_err) = source.downcast_ref::<std::io::Error>() {
+      return io_err.kind() == std::io::ErrorKind::TimedOut;
+    }
+  }
+  false
 }

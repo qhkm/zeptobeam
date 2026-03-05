@@ -1,4 +1,5 @@
 use std::{
+  collections::HashMap,
   sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -127,7 +128,9 @@ pub enum IoOp {
   HttpRequest {
     method: String,
     url: String,
+    headers: HashMap<String, String>,
     body: Option<Vec<u8>>,
+    timeout_ms: Option<u64>,
   },
   Timer {
     duration: Duration,
