@@ -242,6 +242,7 @@ pub struct OrchestrationConfig {
   pub default_retry: String,
   pub budget: BudgetConfig,
   pub aggregator: AggregatorConfig,
+  pub decomposition: DecompositionConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -257,6 +258,22 @@ pub struct AggregatorConfig {
   pub strategy: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DecompositionConfig {
+  pub provider: Option<String>,
+  pub model: Option<String>,
+}
+
+impl Default for DecompositionConfig {
+  fn default() -> Self {
+    Self {
+      provider: None,
+      model: None,
+    }
+  }
+}
+
 impl Default for OrchestrationConfig {
   fn default() -> Self {
     Self {
@@ -265,6 +282,7 @@ impl Default for OrchestrationConfig {
       default_retry: "none".into(),
       budget: BudgetConfig::default(),
       aggregator: AggregatorConfig::default(),
+      decomposition: DecompositionConfig::default(),
     }
   }
 }
@@ -639,5 +657,30 @@ auto_start = false
   fn test_empty_agents_defaults_to_empty_vec() {
     let config = load_config_from_str("").unwrap();
     assert!(config.agents.is_empty());
+  }
+
+  #[test]
+  fn test_decomposition_config_defaults() {
+    let config = AppConfig::default();
+    assert!(config.orchestration.decomposition.provider.is_none());
+    assert!(config.orchestration.decomposition.model.is_none());
+  }
+
+  #[test]
+  fn test_parse_decomposition_config() {
+    let toml_str = r#"
+[orchestration.decomposition]
+provider = "openai"
+model = "gpt-4o"
+"#;
+    let config = load_config_from_str(toml_str).unwrap();
+    assert_eq!(
+      config.orchestration.decomposition.provider,
+      Some("openai".into())
+    );
+    assert_eq!(
+      config.orchestration.decomposition.model,
+      Some("gpt-4o".into())
+    );
   }
 }
