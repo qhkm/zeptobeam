@@ -182,6 +182,12 @@ impl AgentScheduler {
       match action {
         Action::Continue => {}
         Action::Send { to, msg } => {
+          if let Some(proc) =
+            self.registry.lookup_mut(&pid)
+          {
+            proc.reductions =
+              proc.reductions.saturating_sub(2);
+          }
           pending_sends.push((to, msg));
         }
         Action::Stop(reason) => {
@@ -194,11 +200,19 @@ impl AgentScheduler {
           if let Some(proc) =
             self.registry.lookup_mut(&pid)
           {
+            proc.reductions =
+              proc.reductions.saturating_sub(1);
             proc.status = ProcessStatus::Waiting;
           }
           break;
         }
         Action::Spawn { behavior, args } => {
+          if let Some(proc) =
+            self.registry.lookup_mut(&pid)
+          {
+            proc.reductions =
+              proc.reductions.saturating_sub(10);
+          }
           pending_spawns.push((behavior, args));
         }
       }
@@ -243,8 +257,11 @@ impl AgentScheduler {
   }
 
   /// Terminate a process: call its terminate callback,
-  /// notify linked processes with Exit messages, then
-  /// remove from registry.
+  /// remove from registry, then notify linked processes.
+  /// If a linked process has trap_exit=true, deliver Exit
+  /// as a mailbox message. If trap_exit=false and reason
+  /// is not Normal, cascade termination. Normal exits
+  /// with trap_exit=false do not propagate.
   pub fn terminate_process(
     &mut self,
     pid: AgentPid,
@@ -264,17 +281,63 @@ impl AgentScheduler {
       proc.terminate(reason.clone());
     }
 
-    // Remove from registry
+    // Remove from registry BEFORE notifying links
+    // to prevent infinite recursion on mutual links
     self.registry.remove(&pid);
 
     // Notify linked processes
-    for linked in links {
-      let exit_msg =
-        Message::System(SystemMsg::Exit {
-          from: pid.raw(),
-          reason: reason.clone(),
-        });
-      let _ = self.send(linked, exit_msg);
+    let mut pids_to_cascade: Vec<AgentPid> =
+      Vec::new();
+    let mut pids_to_wake: Vec<AgentPid> =
+      Vec::new();
+
+    for linked_pid in &links {
+      let trap = self
+        .registry
+        .lookup(linked_pid)
+        .map(|p| p.trap_exit)
+        .unwrap_or(false);
+      let exists =
+        self.registry.lookup(linked_pid).is_some();
+      if !exists {
+        continue;
+      }
+
+      if trap {
+        // Deliver Exit as mailbox message
+        let exit_msg =
+          Message::System(SystemMsg::Exit {
+            from: pid.raw(),
+            reason: reason.clone(),
+          });
+        if let Some(lp) =
+          self.registry.lookup_mut(linked_pid)
+        {
+          let was_waiting =
+            lp.status == ProcessStatus::Waiting;
+          lp.deliver_message(exit_msg);
+          if was_waiting {
+            pids_to_wake.push(*linked_pid);
+          }
+        }
+      } else if !matches!(reason, Reason::Normal) {
+        // Cascade death for non-normal exits
+        pids_to_cascade.push(*linked_pid);
+      }
+      // Normal + no trap_exit = do nothing
+    }
+
+    // Wake processes that were Waiting
+    for wake_pid in pids_to_wake {
+      self.enqueue(wake_pid);
+    }
+
+    // Cascade termination after the loop
+    for cascade_pid in pids_to_cascade {
+      self.terminate_process(
+        cascade_pid,
+        reason.clone(),
+      );
     }
   }
 }

@@ -400,11 +400,17 @@ fn test_scheduler_terminate_notifies_links() {
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
 
-  // Link a -> b
+  // Link a -> b, set trap_exit so b receives
+  // the Exit as a message instead of cascading
   if let Some(proc_a) =
     sched.registry.lookup_mut(&pid_a)
   {
     proc_a.links.push(pid_b);
+  }
+  if let Some(proc_b) =
+    sched.registry.lookup_mut(&pid_b)
+  {
+    proc_b.trap_exit = true;
   }
 
   // Terminate a, b should get Exit message
@@ -741,5 +747,260 @@ fn test_one_for_all_restarts_all() {
     sup.children.iter().map(|c| c.pid).collect();
   assert!(
     new_pids.iter().all(|p| !old_pids.contains(p))
+  );
+}
+
+// --- Bug C1: trap_exit cascading death tests ---
+
+#[test]
+fn test_link_cascades_death_without_trap_exit() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+
+  let pid_a = sched
+    .registry
+    .spawn(
+      behavior.clone(),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  let pid_b = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  // Link a -> b, both have trap_exit=false
+  if let Some(proc_a) =
+    sched.registry.lookup_mut(&pid_a)
+  {
+    proc_a.links.push(pid_b);
+  }
+
+  // Kill a with a non-normal reason
+  sched.terminate_process(
+    pid_a,
+    Reason::Custom("crash".into()),
+  );
+
+  // Both should be gone from registry
+  assert!(
+    sched.registry.lookup(&pid_a).is_none(),
+    "pid_a should be removed"
+  );
+  assert!(
+    sched.registry.lookup(&pid_b).is_none(),
+    "pid_b should be cascade-terminated"
+  );
+}
+
+#[test]
+fn test_link_does_not_cascade_on_normal_exit() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+
+  let pid_a = sched
+    .registry
+    .spawn(
+      behavior.clone(),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  let pid_b = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  // Link a -> b, both have trap_exit=false
+  if let Some(proc_a) =
+    sched.registry.lookup_mut(&pid_a)
+  {
+    proc_a.links.push(pid_b);
+  }
+
+  // Kill a with Normal reason
+  sched.terminate_process(pid_a, Reason::Normal);
+
+  // a is gone but b should still be alive
+  assert!(
+    sched.registry.lookup(&pid_a).is_none(),
+    "pid_a should be removed"
+  );
+  assert!(
+    sched.registry.lookup(&pid_b).is_some(),
+    "pid_b should still be alive on normal exit"
+  );
+  // b should have no messages (normal + no trap)
+  let proc_b =
+    sched.registry.lookup(&pid_b).unwrap();
+  assert!(
+    !proc_b.has_messages(),
+    "No message delivered for normal exit \
+     without trap_exit"
+  );
+}
+
+#[test]
+fn test_trap_exit_delivers_message_instead_of_cascade()
+{
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(EchoBehavior);
+
+  let pid_a = sched
+    .registry
+    .spawn(
+      behavior.clone(),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  let pid_b = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  // Link a -> b, set trap_exit on b
+  if let Some(proc_a) =
+    sched.registry.lookup_mut(&pid_a)
+  {
+    proc_a.links.push(pid_b);
+  }
+  if let Some(proc_b) =
+    sched.registry.lookup_mut(&pid_b)
+  {
+    proc_b.trap_exit = true;
+  }
+
+  // Kill a with crash reason
+  sched.terminate_process(
+    pid_a,
+    Reason::Custom("crash".into()),
+  );
+
+  // a is gone
+  assert!(sched.registry.lookup(&pid_a).is_none());
+
+  // b should still be alive with an Exit message
+  let proc_b =
+    sched.registry.lookup(&pid_b).unwrap();
+  assert!(
+    proc_b.has_messages(),
+    "trap_exit process should receive Exit msg"
+  );
+  // Verify it's an Exit system message
+  let proc_b =
+    sched.registry.lookup_mut(&pid_b).unwrap();
+  let msg = proc_b.next_message().unwrap();
+  match msg {
+    Message::System(SystemMsg::Exit {
+      from,
+      reason,
+    }) => {
+      assert_eq!(from, pid_a.raw());
+      match reason {
+        Reason::Custom(s) => {
+          assert_eq!(s, "crash")
+        }
+        _ => panic!("Expected Custom reason"),
+      }
+    }
+    _ => panic!("Expected System Exit message"),
+  }
+}
+
+// --- Bug C2: reduction cost tests ---
+
+/// A behavior that returns Action::Send on
+/// every message, sending to a fixed target.
+struct SendBehavior {
+  target: AgentPid,
+}
+
+struct SendState;
+
+impl AgentState for SendState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for SendBehavior {
+  fn init(
+    &self,
+    _args: serde_json::Value,
+  ) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(SendState))
+  }
+
+  fn handle_message(
+    &self,
+    _msg: Message,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Send {
+      to: self.target,
+      msg: Message::Text("reply".into()),
+    }
+  }
+
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+
+  fn terminate(
+    &self,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) {
+  }
+}
+
+#[test]
+fn test_send_action_costs_reductions() {
+  // Create a target process to receive sends
+  let mut sched = AgentScheduler::new();
+  let echo = Arc::new(EchoBehavior);
+  let target = sched
+    .registry
+    .spawn(echo, serde_json::Value::Null)
+    .unwrap();
+
+  // Create a sender that returns Send on every msg
+  let sender_behavior =
+    Arc::new(SendBehavior { target });
+  let sender = sched
+    .registry
+    .spawn(sender_behavior, serde_json::Value::Null)
+    .unwrap();
+
+  // Give sender 10 messages
+  for i in 0..10 {
+    sched
+      .send(
+        sender,
+        Message::Text(format!("m{}", i)),
+      )
+      .unwrap();
+  }
+  sched.enqueue(sender);
+  sched.tick();
+
+  // Each message costs 1 (dispatch) + 2 (send) = 3
+  // reductions. With 200 budget, can process
+  // floor(200/3) = 66 messages. All 10 should be
+  // consumed. Check that reductions were actually
+  // deducted: 200 - 10*3 = 170.
+  let proc =
+    sched.registry.lookup(&sender).unwrap();
+  assert_eq!(
+    proc.reductions, 170,
+    "Each Send should cost 3 reductions total \
+     (1 dispatch + 2 send)"
   );
 }
