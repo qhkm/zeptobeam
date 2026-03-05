@@ -1,0 +1,100 @@
+#=== === Calls and Execution Control === ===
+apply
+apply_last
+badmatch
+bif0
+bif1
+bif2
+call
+call_ext
+call_ext_last
+call_ext_only
+call_fun
+call_last
+call_only
+func_info
+gc_bif1
+gc_bif2
+gc_bif3
+jump
+make_fun2
+return
+select_val
+
+#=== === Memory and Stack === ===
+allocate
+allocate_heap
+allocate_heap_zero
+allocate_zero
+deallocate
+init
+move
+test_heap
+trim
+
+#=== === List Operations === ===
+# is_list
+get_list
+is_nil
+is_nonempty_list
+put_list
+get_tl
+get_hd
+
+#=== === Comparisons and Predicates === ===
+is_eq
+is_eq_exact
+is_ne_exact
+is_ge
+is_lt
+
+#=== === Type Tests === ===
+is_atom
+is_binary
+is_float
+is_function
+is_function2
+is_integer
+is_list
+is_number
+is_pid
+is_port
+is_reference
+is_tuple
+
+#=== === Mailbox === ===
+loop_rec
+loop_rec_end
+remove_message
+send
+wait
+
+#=== === Tuple Operations === ===
+get_tuple_element
+is_tagged_tuple
+put_tuple
+put_tuple2
+set_tuple_element
+test_arity
+
+#=== === Try/Catch/Raise === ===
+raise
+# raw_raise # otp21
+try
+try_case
+try_end
+
+#=== === Binary Pattern Matching === ===
+# bs_get_float2 # /7
+# bs_get_integer2 # /7
+# bs_restore2 # /2
+# bs_save2 # /2
+# bs_skip_bits2 # /5
+# bs_start_match2
+bs_add
+bs_get_binary2
+bs_init2
+bs_put_binary
+bs_put_integer
+bs_start_match3
+bs_test_tail2

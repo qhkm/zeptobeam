@@ -1,0 +1,52 @@
+[package]
+name = "erlangrt"
+version = "0.1.0"
+authors = ["Dmytro Lytovchenko"]
+edition = "2018"
+
+# Add "trace_opcode_execution" to print every opcode
+# Add "trace_register_changes" to print every register change as we go
+# Add "fancy_string_quotes" to use unicode ‹quotes› for strings and disable
+#    backslash \quoting of "quotation" characters. This breaks compatibility of printed
+#    Erlang terms and the compiler won't accept them back but is beneficial for
+#    reading strings with quotes such as JSON.
+# Add "trace_comparisons" to log failed comparisons with args involved
+# Add "trace_calls" to see native and BEAM function calls logged
+# Add "trace_beam_loader" to print code loading debugging info
+[features]
+default = [
+    "r22",
+    "fancy_string_quotes",
+    "trace_opcode_execution",
+    "trace_register_changes",
+    "trace_stack_changes",
+    "trace_beam_loader",
+#    "trace_comparisons",
+#   "trace_calls",
+]
+r22 = []
+trace_opcode_execution = []
+trace_register_changes = []
+trace_stack_changes = []
+trace_comparisons = []
+trace_calls = []
+fancy_string_quotes = []
+trace_beam_loader = []
+
+[dependencies]
+bitflags = "2.2.1"
+bytes = "1.11.1"
+clippy = {version = "0.0.302", optional = true}
+colored = "2.0.0" # console colors (TTY systems)
+compress = "0.2.1" # depends on `num`; TODO: use libflate
+lazy_static = "1.4.0"
+ramp = "0.7.0" # Rust multiprecision arithmetics
+byteorder = "1.4.3"
+failure = "0.1.8"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+lto = true
+panic = 'abort'
