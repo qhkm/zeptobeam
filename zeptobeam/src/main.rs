@@ -13,12 +13,13 @@ use tracing::{info, warn};
 use erlangrt::agent_rt::{
   checkpoint::{CheckpointStore, FileCheckpointStore, InMemoryCheckpointStore},
   checkpoint_sqlite::SqliteCheckpointStore,
-  config::{load_config, AppConfig},
+  config::{load_config, AgentConfig, AppConfig},
   mcp_types::ProcessInfo,
   observability::RuntimeMetrics,
   pruner::spawn_pruner,
   scheduler::AgentScheduler,
   server::{HealthServer, McpRuntimeOps, McpServerStateExt, ServerState},
+  startup::spawn_configured_agents,
   types::{AgentPid, Message, Reason},
 };
 
@@ -81,6 +82,7 @@ impl McpRuntimeOps for DaemonMcpRuntimeOps {
 
 fn spawn_mcp_runtime_worker(
   process_count: Arc<AtomicUsize>,
+  agents: Vec<AgentConfig>,
 ) -> (
   Arc<dyn McpRuntimeOps>,
   mpsc::Sender<McpRuntimeCommand>,
@@ -90,6 +92,23 @@ fn spawn_mcp_runtime_worker(
   let shutdown_tx = tx.clone();
   let handle = std::thread::spawn(move || {
     let mut scheduler = AgentScheduler::new();
+    process_count.store(scheduler.registry.count(), Ordering::Relaxed);
+
+    // Spawn configured agents
+    match spawn_configured_agents(&mut scheduler, &agents) {
+      Ok(spawned) => {
+        for (pid, name) in &spawned {
+          info!(name = %name, pid = pid.raw(), "agent started from config");
+          scheduler.enqueue(*pid);
+        }
+        if !spawned.is_empty() {
+          info!(count = spawned.len(), "configured agents spawned");
+        }
+      }
+      Err(e) => {
+        warn!(error = %e, "failed to spawn configured agents");
+      }
+    }
     process_count.store(scheduler.registry.count(), Ordering::Relaxed);
 
     while let Ok(cmd) = rx.recv() {
@@ -281,7 +300,7 @@ async fn main() {
         config.mcp.server.session_timeout_secs,
       );
       let (runtime_ops, shutdown_tx, worker_handle) =
-        spawn_mcp_runtime_worker(process_count.clone());
+        spawn_mcp_runtime_worker(process_count.clone(), config.agents.clone());
       let mcp_state = mcp_state.with_runtime_ops(runtime_ops);
 
       match HealthServer::start_with_mcp(&config.server.bind, mcp_state).await {
