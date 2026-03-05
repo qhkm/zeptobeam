@@ -202,6 +202,76 @@ impl EtsRegistry {
             .ok_or_else(|| AgentRtError::Ets("table not found".into()))?;
         Ok(table.data.keys().cloned().collect())
     }
+
+    pub fn scan(
+        &self,
+        tid: &TableId,
+        prefix: &str,
+    ) -> Result<Vec<(String, serde_json::Value)>, AgentRtError> {
+        let table = self.tables.get(tid).ok_or_else(|| {
+            AgentRtError::Ets("table not found".into())
+        })?;
+        Ok(table
+            .data
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    pub fn filter(
+        &self,
+        tid: &TableId,
+        predicate: &dyn Fn(&str, &serde_json::Value) -> bool,
+    ) -> Result<Vec<(String, serde_json::Value)>, AgentRtError> {
+        let table = self.tables.get(tid).ok_or_else(|| {
+            AgentRtError::Ets("table not found".into())
+        })?;
+        Ok(table
+            .data
+            .iter()
+            .filter(|(k, v)| predicate(k.as_str(), v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    pub fn get_checked(
+        &self,
+        tid: &TableId,
+        key: &str,
+        caller: AgentPid,
+    ) -> Result<Option<serde_json::Value>, AgentRtError> {
+        let table = self.tables.get(tid).ok_or_else(|| {
+            AgentRtError::Ets("table not found".into())
+        })?;
+        table.check_read_access(caller)?;
+        Ok(table.data.get(key).cloned())
+    }
+
+    pub fn handle_process_death(&mut self, pid: AgentPid) {
+        let to_remove: Vec<TableId> = self
+            .tables
+            .iter()
+            .filter(|(_, t)| t.owner == pid && t.heir.is_none())
+            .map(|(tid, _)| *tid)
+            .collect();
+        for tid in to_remove {
+            self.tables.remove(&tid);
+        }
+        // Transfer tables with heirs
+        let to_transfer: Vec<(TableId, AgentPid)> = self
+            .tables
+            .iter()
+            .filter(|(_, t)| t.owner == pid && t.heir.is_some())
+            .map(|(tid, t)| (*tid, t.heir.unwrap()))
+            .collect();
+        for (tid, new_owner) in to_transfer {
+            if let Some(table) = self.tables.get_mut(&tid) {
+                table.owner = new_owner;
+                table.heir = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -294,5 +364,80 @@ mod tests {
         assert!(
             reg.put(&tid, "c", &serde_json::json!(3), owner).is_err()
         );
+    }
+
+    #[test]
+    fn test_scan_prefix() {
+        let mut reg = EtsRegistry::new(256, 100_000);
+        let owner = AgentPid::new();
+        let tid = reg.create("t", AccessType::Public, owner, None).unwrap();
+        reg.put(&tid, "user:1", &serde_json::json!({"name": "Alice"}), owner).unwrap();
+        reg.put(&tid, "user:2", &serde_json::json!({"name": "Bob"}), owner).unwrap();
+        reg.put(&tid, "task:1", &serde_json::json!({"title": "Do"}), owner).unwrap();
+        let results = reg.scan(&tid, "user:").unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_filter() {
+        let mut reg = EtsRegistry::new(256, 100_000);
+        let owner = AgentPid::new();
+        let tid = reg.create("t", AccessType::Public, owner, None).unwrap();
+        reg.put(&tid, "a", &serde_json::json!(1), owner).unwrap();
+        reg.put(&tid, "b", &serde_json::json!(2), owner).unwrap();
+        reg.put(&tid, "c", &serde_json::json!(3), owner).unwrap();
+        let results = reg.filter(&tid, &|_k, v| {
+            v.as_i64().map_or(false, |n| n > 1)
+        }).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_protected_access() {
+        let mut reg = EtsRegistry::new(256, 100_000);
+        let owner = AgentPid::new();
+        let other = AgentPid::new();
+        let tid = reg.create("t", AccessType::Protected, owner, None).unwrap();
+        reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
+        // Other can read
+        assert!(reg.get(&tid, "k").is_ok());
+        // Other cannot write
+        assert!(reg.put(&tid, "k2", &serde_json::json!(2), other).is_err());
+    }
+
+    #[test]
+    fn test_private_access() {
+        let mut reg = EtsRegistry::new(256, 100_000);
+        let owner = AgentPid::new();
+        let other = AgentPid::new();
+        let tid = reg.create("t", AccessType::Private, owner, None).unwrap();
+        reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
+        assert!(reg.get_checked(&tid, "k", other).is_err());
+        assert!(reg.get_checked(&tid, "k", owner).is_ok());
+    }
+
+    #[test]
+    fn test_owner_death_destroys_table() {
+        let mut reg = EtsRegistry::new(256, 100_000);
+        let owner = AgentPid::new();
+        let tid = reg.create("t", AccessType::Public, owner, None).unwrap();
+        reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
+        reg.handle_process_death(owner);
+        assert!(reg.get(&tid, "k").is_err()); // table gone
+    }
+
+    #[test]
+    fn test_heir_inherits_on_death() {
+        let mut reg = EtsRegistry::new(256, 100_000);
+        let owner = AgentPid::new();
+        let heir = AgentPid::new();
+        let tid = reg.create("t", AccessType::Public, owner, Some(heir)).unwrap();
+        reg.put(&tid, "k", &serde_json::json!(1), owner).unwrap();
+        reg.handle_process_death(owner);
+        // Table still exists, heir is now owner
+        let val = reg.get(&tid, "k").unwrap();
+        assert_eq!(val, Some(serde_json::json!(1)));
+        // Heir can destroy
+        assert!(reg.destroy(&tid, heir).is_ok());
     }
 }
