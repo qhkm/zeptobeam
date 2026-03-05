@@ -14,6 +14,7 @@ use crate::{
 use core::mem::size_of;
 
 #[allow(dead_code)]
+#[repr(C)]
 pub struct Float {
   header: BoxHeader,
   pub value: f64,

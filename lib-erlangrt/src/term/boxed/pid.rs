@@ -14,6 +14,7 @@ use crate::{
 use core::mem::size_of;
 
 /// Represents Pid box on heap.
+#[repr(C)]
 pub struct ExternalPid {
   pub header: BoxHeader,
   pub node: Term,

@@ -124,3 +124,63 @@ impl OpcodeBsStartMatch3 {
     Ok(DispatchResult::Normal)
   }
 }
+
+// OTP23+ variant where `Fail` can also be atoms such as `no_fail` or `resume`.
+// Structure: bs_start_match4(Fail Bin Live Dst)
+define_opcode!(
+  _vm, rt_ctx, proc, name: OpcodeBsStartMatch4, arity: 4,
+  run: { Self::bs_start_match_4(rt_ctx, proc, fail, match_context, live, dst) },
+  args: term(fail), usize(live), load(match_context), term(dst),
+);
+
+impl OpcodeBsStartMatch4 {
+  #[inline]
+  fn maybe_jump_fail(runtime_ctx: &mut RuntimeContext, fail: Term) {
+    if fail.is_cp() {
+      runtime_ctx.jump(fail);
+    }
+  }
+
+  #[inline]
+  fn bs_start_match_4(
+    runtime_ctx: &mut RuntimeContext,
+    proc: &mut Process,
+    fail: Term,
+    match_context: Term,
+    live: usize,
+    dst: Term,
+  ) -> RtResult<DispatchResult> {
+    println!("bs_start_match4 {fail}, context={match_context}, live={live}, dst={dst}");
+
+    // Must be either a binary or a binary_match_context
+    if !match_context.is_boxed() {
+      Self::maybe_jump_fail(runtime_ctx, fail);
+      return Ok(DispatchResult::Normal);
+    }
+
+    let header = match_context.get_box_ptr_mut::<boxed::BoxHeader>();
+    let trait_ptr = unsafe { (*header).get_trait_ptr() };
+    let box_type = unsafe { (*trait_ptr).get_type() };
+
+    match box_type {
+      boxed::BOXTYPETAG_BINARY_MATCH_STATE => unsafe {
+        OpcodeBsStartMatch3::continue_with_matchstate(
+          runtime_ctx,
+          proc,
+          header as *mut BinaryMatchState,
+          dst,
+        )
+      },
+
+      boxed::BOXTYPETAG_BINARY => {
+        let bin_ptr = unsafe { boxed::Binary::get_trait(header as *const boxed::Binary) };
+        OpcodeBsStartMatch3::start_with_new_binary(runtime_ctx, proc, fail, bin_ptr, dst)
+      }
+
+      _ => {
+        Self::maybe_jump_fail(runtime_ctx, fail);
+        Ok(DispatchResult::Normal)
+      }
+    }
+  }
+}

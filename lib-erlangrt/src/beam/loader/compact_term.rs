@@ -45,6 +45,7 @@ enum CteExtTag {
   FloatReg = 0b0010_0111,
   AllocList = 0b0011_0111,
   Literal = 0b0100_0111,
+  TypedRegister = 0b0101_0111,
 }
 
 /// This defines how the read code will handle `CteExtTag::List`, either a jump
@@ -187,11 +188,10 @@ impl CompactTermReader {
 
       // float does not exist after R19
       // x if x == CTEExtTag::Float as u8 => parse_ext_float(hp, r),
-      x if x == CteExtTag::AllocList as u8 => {
-        panic!("Don't know how to decode an alloclist");
-      }
+      x if x == CteExtTag::AllocList as u8 => self.parse_ext_alloc_list(reader),
       x if x == CteExtTag::FloatReg as u8 => self.parse_ext_fpreg(reader),
       x if x == CteExtTag::Literal as u8 => self.parse_ext_literal(reader),
+      x if x == CteExtTag::TypedRegister as u8 => self.parse_ext_typed_register(reader),
       other => {
         let msg = format!("Ext tag {other} unknown");
         Self::make_err(CompactTermError::ExtendedTag(msg))
@@ -218,6 +218,27 @@ impl CompactTermReader {
     Self::make_err(CompactTermError::ExtendedTag(msg))
   }
 
+  /// Parse an alloc list. Format: count, then count pairs of (type, amount).
+  /// Used by allocation opcodes. We store the total words needed as a small int.
+  fn parse_ext_alloc_list(&mut self, reader: &mut BinaryReader) -> RtResult<Term> {
+    let n_pairs = self.read_int(reader)? as usize;
+    let mut total_words: usize = 0;
+    for _i in 0..n_pairs {
+      let _alloc_type = self.read_int(reader)?;
+      let amount = self.read_int(reader)?;
+      total_words += amount as usize;
+    }
+    Ok(Term::make_small_unsigned(total_words))
+  }
+
+  /// Parse a typed register (OTP 22+). Format: register term, then type index.
+  /// We read both but discard the type info, returning just the register.
+  fn parse_ext_typed_register(&mut self, reader: &mut BinaryReader) -> RtResult<Term> {
+    let reg = self.read(reader)?;
+    let _type_index = self.read(reader)?; // discard type info
+    Ok(reg)
+  }
+
   fn parse_ext_literal(&mut self, reader: &mut BinaryReader) -> RtResult<Term> {
     let b = reader.read_u8();
     let reg = self.read_word(reader, b)?;
@@ -233,6 +254,9 @@ impl CompactTermReader {
     reader: &mut BinaryReader,
   ) -> RtResult<Term> {
     let arity = self.read_int(reader)? as usize;
+    if arity == 0 {
+      return Ok(Term::nil());
+    }
     let tb = unsafe { TupleBuilder::with_arity(arity, &mut (*self.heap))? };
 
     for i in 0..arity {

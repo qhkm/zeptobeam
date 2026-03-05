@@ -72,6 +72,8 @@ pub fn decode_naked(r: &mut BinaryReader, hp: &mut dyn THeap) -> RtResult<Term> 
     x if x == Tag::String as u8 => decode_string(r, hp),
 
     x if x == Tag::AtomDeprecated as u8 => decode_atom_latin1(r, hp),
+    x if x == Tag::AtomUtf8 as u8 => decode_atom_utf8(r, hp),
+    x if x == Tag::SmallAtomUtf8 as u8 => decode_small_atom_utf8(r, hp),
 
     x if x == Tag::SmallInteger as u8 => decode_u8(r, hp),
 
@@ -141,6 +143,9 @@ fn decode_binary(r: &mut BinaryReader, hp: &mut dyn THeap) -> RtResult<Term> {
 
 /// Given arity, allocate a tuple and read its elements sequentially.
 fn decode_tuple(r: &mut BinaryReader, size: usize, hp: &mut dyn THeap) -> RtResult<Term> {
+  if size == 0 {
+    return Ok(Term::empty_tuple());
+  }
   let tb = TupleBuilder::with_arity(size, hp)?;
   for i in 0..size {
     let elem = decode_naked(r, hp)?;
@@ -173,6 +178,22 @@ fn decode_s32(r: &mut BinaryReader, _hp: &mut dyn THeap) -> RtResult<Term> {
 fn decode_atom_latin1(r: &mut BinaryReader, _hp: &mut dyn THeap) -> RtResult<Term> {
   let sz = r.read_u16be();
   let val = r.read_str_latin1(sz as Word).unwrap();
+  Ok(atom::from_str(&val))
+}
+
+fn decode_atom_utf8(r: &mut BinaryReader, _hp: &mut dyn THeap) -> RtResult<Term> {
+  let sz = r.read_u16be();
+  let val = r.read_str_utf8(sz as Word).map_err(|e| {
+    RtErr::ETFParseError(format!("{}AtomUtf8 decode failed: {}", module(), e))
+  })?;
+  Ok(atom::from_str(&val))
+}
+
+fn decode_small_atom_utf8(r: &mut BinaryReader, _hp: &mut dyn THeap) -> RtResult<Term> {
+  let sz = r.read_u8();
+  let val = r.read_str_utf8(sz as Word).map_err(|e| {
+    RtErr::ETFParseError(format!("{}SmallAtomUtf8 decode failed: {}", module(), e))
+  })?;
   Ok(atom::from_str(&val))
 }
 
@@ -214,4 +235,141 @@ fn decode_string(r: &mut BinaryReader, hp: &mut dyn THeap) -> RtResult<Term> {
   }
 
   Ok(lb.make_term())
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::{
+    emulator::{atom, heap::{Designation, Heap}},
+    rt_util::bin_reader::BinaryReader,
+  };
+
+  fn decode_etf(bytes: Vec<u8>) -> crate::fail::RtResult<crate::term::Term> {
+    let mut r = BinaryReader::from_bytes(bytes);
+    let mut hp = Heap::new(Designation::ModuleLiterals);
+    super::decode(&mut r, &mut hp)
+  }
+
+  #[test]
+  fn decode_small_integer() {
+    // ETF: 131, 97, 0
+    let t = decode_etf(vec![131, 97, 0]).unwrap();
+    assert!(t.is_small());
+    assert_eq!(t.get_small_signed(), 0);
+  }
+
+  #[test]
+  fn decode_small_integer_255() {
+    let t = decode_etf(vec![131, 97, 255]).unwrap();
+    assert!(t.is_small());
+    assert_eq!(t.get_small_unsigned(), 255);
+  }
+
+  #[test]
+  fn decode_integer_positive() {
+    // ETF: 131, 98, 0, 0, 1, 0  → 256
+    let t = decode_etf(vec![131, 98, 0, 0, 1, 0]).unwrap();
+    assert!(t.is_small());
+    assert_eq!(t.get_small_signed(), 256);
+  }
+
+  #[test]
+  fn decode_integer_negative() {
+    // ETF: 131, 98, 0xFF, 0xFF, 0xFF, 0xFF → -1
+    let t = decode_etf(vec![131, 98, 0xFF, 0xFF, 0xFF, 0xFF]).unwrap();
+    assert!(t.is_small());
+    assert_eq!(t.get_small_signed(), -1);
+  }
+
+  #[test]
+  fn decode_nil() {
+    // ETF: 131, 106 → nil/empty list
+    let t = decode_etf(vec![131, 106]).unwrap();
+    assert_eq!(t, crate::term::Term::nil());
+  }
+
+  #[test]
+  fn decode_atom_utf8_basic() {
+    // ETF: 131, 118, 0, 2, 'o', 'k' → atom 'ok'
+    let t = decode_etf(vec![131, 118, 0, 2, b'o', b'k']).unwrap();
+    assert!(t.is_atom());
+    assert_eq!(atom::to_str(t).unwrap(), "ok");
+  }
+
+  #[test]
+  fn decode_small_atom_utf8_basic() {
+    // ETF: 131, 119, 3, 'f', 'o', 'o' → atom 'foo'
+    let t = decode_etf(vec![131, 119, 3, b'f', b'o', b'o']).unwrap();
+    assert!(t.is_atom());
+    assert_eq!(atom::to_str(t).unwrap(), "foo");
+  }
+
+  #[test]
+  fn decode_small_atom_utf8_empty() {
+    // ETF: 131, 119, 0 → atom ''
+    let t = decode_etf(vec![131, 119, 0]).unwrap();
+    assert!(t.is_atom());
+    assert_eq!(atom::to_str(t).unwrap(), "");
+  }
+
+  #[test]
+  fn decode_atom_utf8_multibyte() {
+    // "ö" = 0xC3, 0xB6 (2 UTF-8 bytes)
+    // ETF: 131, 118, 0, 2, 0xC3, 0xB6
+    let t = decode_etf(vec![131, 118, 0, 2, 0xC3, 0xB6]).unwrap();
+    assert!(t.is_atom());
+    assert_eq!(atom::to_str(t).unwrap(), "ö");
+  }
+
+  #[test]
+  fn decode_atom_deprecated_latin1() {
+    // ETF: 131, 100, 0, 4, 't', 'e', 's', 't' → atom 'test'
+    let t = decode_etf(vec![131, 100, 0, 4, b't', b'e', b's', b't']).unwrap();
+    assert!(t.is_atom());
+    assert_eq!(atom::to_str(t).unwrap(), "test");
+  }
+
+  #[test]
+  fn decode_small_tuple() {
+    // ETF: 131, 104, 2, 97, 1, 97, 2 → {1, 2}
+    let t = decode_etf(vec![131, 104, 2, 97, 1, 97, 2]).unwrap();
+    assert!(t.is_tuple());
+    let tp = t.get_tuple_ptr();
+    unsafe {
+      assert_eq!((*tp).get_arity(), 2);
+      assert_eq!((*tp).get_element(0).get_small_signed(), 1);
+      assert_eq!((*tp).get_element(1).get_small_signed(), 2);
+    }
+  }
+
+  #[test]
+  fn decode_small_tuple_empty() {
+    // ETF: 131, 104, 0 → {}
+    let t = decode_etf(vec![131, 104, 0]).unwrap();
+    assert_eq!(t, crate::term::Term::empty_tuple());
+  }
+
+  #[test]
+  fn decode_invalid_tag_fails() {
+    // ETF prefix 131 followed by unknown tag 200
+    let err = decode_etf(vec![131, 200]).unwrap_err();
+    match err {
+      crate::fail::RtErr::ETFParseError(msg) => {
+        assert!(msg.contains("200"), "Error should mention tag: {}", msg);
+      }
+      other => panic!("unexpected error: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn decode_missing_prefix_fails() {
+    // No 131 prefix
+    let err = decode_etf(vec![97, 42]).unwrap_err();
+    match err {
+      crate::fail::RtErr::ETFParseError(msg) => {
+        assert!(msg.contains("131"), "Error should mention expected 131: {}", msg);
+      }
+      other => panic!("unexpected error: {:?}", other),
+    }
+  }
 }

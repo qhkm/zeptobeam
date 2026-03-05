@@ -7,6 +7,7 @@ use std::ptr::DynMetadata;
 
 /// Term header in memory, followed by corresponding data. The first header word
 /// is parsed just like any term, tag bits are set to PrimaryTag::HEADER.
+#[repr(C)]
 pub struct BoxHeader {
   /// Format is <arity> <TAG_HEADER:PrimaryTag::TAG_BITS>
   header_word: Word,

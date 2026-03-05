@@ -19,8 +19,9 @@ use core::fmt;
 /// Default heap size for constants (literals) when loading a module.
 const DEFAULT_LIT_HEAP: usize = 8192;
 
-/// Default heap size when spawning a process. (default: 300)
-const DEFAULT_PROC_HEAP: usize = 1024;
+/// Default heap size when spawning a process.
+/// Temporary larger value to avoid entering unfinished copying-GC path.
+const DEFAULT_PROC_HEAP: usize = 262_144;
 const BINARY_HEAP_CAPACITY: usize = 65536; // 64k*8 = 512kb
 
 /// A heap structure which allocates incrementally forward.

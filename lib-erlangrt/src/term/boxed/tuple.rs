@@ -15,6 +15,7 @@ use core::fmt;
 
 /// A fixed-size array which stores everything in its allocated memory on
 /// process heap.
+#[repr(C)]
 pub struct Tuple {
   header: BoxHeader,
   /// First data word is stored here. If a tuple is 0 elements, it cannot be

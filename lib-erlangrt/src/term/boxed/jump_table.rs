@@ -15,6 +15,7 @@ use crate::{
 use core::fmt;
 
 /// An array of sorted pairs, which like a tuple stores the array in its memory
+#[repr(C)]
 pub struct JumpTable {
   header: BoxHeader,
   /// First data word is stored here
@@ -56,7 +57,7 @@ impl JumpTable {
   }
 
   fn new(n_pairs: usize) -> JumpTable {
-    assert_ne!(n_pairs, 0, "Can't create an empty jump table");
+    // OTP 28+ may produce empty jump tables; allow n_pairs=0
     Self {
       header: BoxHeader::new::<Self>(Self::storage_size(n_pairs)),
       val0: Term::non_value(),

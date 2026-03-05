@@ -35,7 +35,9 @@ impl LoaderState {
     for cp in c_iter {
       let curr_opcode = opcode::from_memory_ptr(cp.ptr());
       match curr_opcode {
-        gen_op::OPCODE_MAKE_FUN2 => self.rewrite_lambda_index_arg(cp, 1),
+        gen_op::OPCODE_MAKE_FUN2 | gen_op::OPCODE_MAKE_FUN3 => {
+          self.rewrite_lambda_index_arg(cp, 1)
+        }
         gen_op::OPCODE_BIF0 => self.rewrite_import_index_arg(cp, 1),
         gen_op::OPCODE_BIF1
         | gen_op::OPCODE_BIF2

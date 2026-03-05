@@ -200,6 +200,9 @@ pub fn get_iolist_size(list: Term) -> SizeBytes {
     if elem.is_small() {
       // Any small integer even larger than 256 counts as 1 byte
       result.add(1);
+    } else if elem == Term::empty_binary() {
+      // <<>> contributes zero bytes.
+      result.add(0);
     } else if elem.is_binary() {
       result.add_bytesize(unsafe { elem.binary_byte_size() });
     } else if elem.is_cons() {

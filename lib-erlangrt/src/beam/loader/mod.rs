@@ -20,6 +20,7 @@ use crate::{
   beam::loader::beam_file::BeamFile,
   defs::Word,
   emulator::{
+    atom,
     code::{opcode::RawOpcode, Code, CodeOffset},
     code_srv::CodeServer,
     function::FunEntry,
@@ -182,6 +183,8 @@ impl LoaderState {
 
         // Convert loadtime atom into VM atom using the lookup table
         self.atom_from_loadtime_index(lt_val)
+      } else if lt_tag == SpecialLoadtime::LITERAL {
+        self.beam_file.lit_tab[lt_val]
       } else {
         arg // no change
       }
@@ -190,6 +193,36 @@ impl LoaderState {
       let lst = arg.get_box_ptr_mut::<boxed::JumpTable>();
       unsafe {
         (*lst).inplace_map_t(|_, val| self.resolve_value(val));
+      }
+      arg
+    } else if arg.is_tuple() && arg != Term::empty_tuple() {
+      let t = arg.get_tuple_ptr_mut();
+      unsafe {
+        let arity = (*t).get_arity();
+        for i in 0..arity {
+          let value = (*t).get_element(i);
+          (*t).set_element(i, self.resolve_value(value));
+        }
+      }
+      arg
+    } else if arg.is_cons() {
+      let mut p = arg.get_cons_ptr_mut();
+      unsafe {
+        loop {
+          let hd = (*p).hd();
+          (*p).set_hd(self.resolve_value(hd));
+
+          let tl = (*p).tl();
+          if tl.is_cons() {
+            p = tl.get_cons_ptr_mut();
+            continue;
+          }
+
+          if tl != Term::nil() {
+            (*p).set_tl(self.resolve_value(tl));
+          }
+          break;
+        }
       }
       arg
     } else {
@@ -237,5 +270,13 @@ pub fn load_module(
   // located in impl_setup_imports.rs
   loader.setup_imports()?;
 
-  loader.load_finalize()
+  let mut mod_ptr = loader.load_finalize()?;
+
+  // Some newer BEAM files can carry atom metadata that this runtime still
+  // decodes imperfectly. Keep module identity stable by filename stem.
+  if let Some(stem) = mod_file_path.file_stem().and_then(|s| s.to_str()) {
+    mod_ptr.versioned_name.module = atom::from_str(stem);
+  }
+
+  Ok(mod_ptr)
 }

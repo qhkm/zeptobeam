@@ -13,6 +13,7 @@ use core::ptr;
 
 /// Defines operations with a binary on the binary heap
 /// Pointer to this can be directly casted from pointer to boxed::Binary
+#[repr(C)]
 pub struct BinaryHeapBinary {
   pub bin_header: Binary,
   pub size: BitSize,
@@ -60,7 +61,10 @@ impl TBinary for BinaryHeapBinary {
   }
 
   fn get_bit_reader(&self) -> BitReader {
-    unimplemented!()
+    let data = (&self.data) as *const usize as *const u8;
+    let len = self.size.get_byte_size_rounded_up();
+    let data = unsafe { core::slice::from_raw_parts(data, len.bytes()) };
+    BitReader::new(data, BitSize::zero())
   }
 
   fn store(&mut self, data: &[u8]) -> RtResult<()> {

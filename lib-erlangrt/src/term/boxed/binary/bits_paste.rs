@@ -203,6 +203,10 @@ unsafe fn put_bits_big_endian(
   }
   dst[dst_offset] = b;
 
+  if write_size.bits == rbits {
+    return Ok(());
+  }
+
   // fmt_int() can't fail here. Continue to the next byte
   fmt_int(
     write_val,

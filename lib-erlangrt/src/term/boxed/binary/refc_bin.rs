@@ -12,6 +12,7 @@ use crate::{
 
 /// Defines operations with reference to binary.
 /// Pointer to this can be directly casted from pointer to boxed::Binary
+#[repr(C)]
 pub struct ReferenceToBinary {
   pub bin_header: Binary,
   pub size: BitSize,
@@ -59,7 +60,8 @@ impl TBinary for ReferenceToBinary {
   }
 
   fn get_bit_reader(&self) -> BitReader {
-    unimplemented!()
+    let p = self.pointer as *const dyn TBinary;
+    unsafe { (*p).get_bit_reader() }
   }
 
   fn store(&mut self, _data: &[u8]) -> RtResult<()> {

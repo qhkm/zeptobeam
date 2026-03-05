@@ -1,12 +1,21 @@
 use crate::{
   big,
   emulator::{arith::multiplication, heap::THeapOwner, process::Process, vm::VM},
-  fail::RtResult,
+  fail::{self, RtResult},
   term::*,
 };
 
 fn module() -> &'static str {
   "native funs module for erlang[arith]: "
+}
+
+#[inline]
+fn small_i(a: Term) -> Option<isize> {
+  if a.is_small() {
+    Some(a.get_small_signed())
+  } else {
+    None
+  }
 }
 
 /// Subtraction for 2 mixed terms. Algorithm comes from Erlang/OTP file
@@ -89,6 +98,128 @@ pub fn nativefun_multiply_2(
   let a: Term = args[0];
   let b: Term = args[1];
   return multiplication::multiply(cur_proc.get_heap_mut(), a, b);
+}
+
+pub fn nativefun_band_2(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}band/2 takes 2 args", module());
+  let (Some(a), Some(b)) = (small_i(args[0]), small_i(args[1])) else {
+    return fail::create::badarg();
+  };
+  Ok(Term::make_small_signed(a & b))
+}
+
+pub fn nativefun_bor_2(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}bor/2 takes 2 args", module());
+  let (Some(a), Some(b)) = (small_i(args[0]), small_i(args[1])) else {
+    return fail::create::badarg();
+  };
+  Ok(Term::make_small_signed(a | b))
+}
+
+pub fn nativefun_bxor_2(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}bxor/2 takes 2 args", module());
+  let (Some(a), Some(b)) = (small_i(args[0]), small_i(args[1])) else {
+    return fail::create::badarg();
+  };
+  Ok(Term::make_small_signed(a ^ b))
+}
+
+pub fn nativefun_bnot_1(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 1, "{}bnot/1 takes 1 arg", module());
+  let Some(a) = small_i(args[0]) else {
+    return fail::create::badarg();
+  };
+  Ok(Term::make_small_signed(!a))
+}
+
+pub fn nativefun_bsl_2(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}bsl/2 takes 2 args", module());
+  let (Some(a), Some(shift)) = (small_i(args[0]), small_i(args[1])) else {
+    return fail::create::badarg();
+  };
+  if shift < 0 {
+    return fail::create::badarg();
+  }
+  match a.checked_shl(shift as u32) {
+    Some(v) if Term::small_fits(v) => Ok(Term::make_small_signed(v)),
+    _ => fail::create::badarg(),
+  }
+}
+
+pub fn nativefun_bsr_2(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}bsr/2 takes 2 args", module());
+  let (Some(a), Some(shift)) = (small_i(args[0]), small_i(args[1])) else {
+    return fail::create::badarg();
+  };
+  if shift < 0 {
+    return fail::create::badarg();
+  }
+  let sh = (shift as u32).min(isize::BITS - 1);
+  Ok(Term::make_small_signed(a >> sh))
+}
+
+pub fn nativefun_div_2(
+  _vm: &mut VM,
+  cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}div/2 takes 2 args", module());
+  let (Some(a), Some(b)) = (small_i(args[0]), small_i(args[1])) else {
+    return fail::create::badarg();
+  };
+  if b == 0 {
+    return fail::create::badarg();
+  }
+  let Some(v) = a.checked_div(b) else {
+    return fail::create::badarg();
+  };
+  if Term::small_fits(v) {
+    Ok(Term::make_small_signed(v))
+  } else {
+    create_bigint(cur_proc, v)
+  }
+}
+
+pub fn nativefun_rem_2(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}rem/2 takes 2 args", module());
+  let (Some(a), Some(b)) = (small_i(args[0]), small_i(args[1])) else {
+    return fail::create::badarg();
+  };
+  if b == 0 {
+    return fail::create::badarg();
+  }
+  let Some(v) = a.checked_rem(b) else {
+    return fail::create::badarg();
+  };
+  Ok(Term::make_small_signed(v))
 }
 
 // TODO: shorten, use only heap of the process, inline, move to a lib module in arith

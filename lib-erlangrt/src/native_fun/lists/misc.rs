@@ -36,6 +36,10 @@ define_nativefun!(_vm, proc, args,
 
 #[inline]
 unsafe fn reverse_2(proc: &mut Process, list: Term, tail: Term) -> RtResult<Term> {
+  if list == Term::nil() {
+    return Ok(tail);
+  }
+
   let mut lb = ListBuilder::new()?;
   let hp = proc.get_heap_mut();
 

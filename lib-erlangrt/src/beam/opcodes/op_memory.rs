@@ -6,7 +6,7 @@ use crate::{
     process::Process,
     runtime_ctx::RuntimeContext,
   },
-  fail::RtResult,
+  fail::{self, RtResult},
   term::Term,
 };
 
@@ -143,3 +143,41 @@ define_opcode!(_vm, ctx, curr_p,
   },
   args: yreg(y),
 );
+
+// Set all Y-registers in a list/tuple initializer to NIL.
+// Structure: init_yregs(ListOfYRegs)
+define_opcode!(_vm, _ctx, curr_p,
+  name: OpcodeInitYregs, arity: 1,
+  run: { Self::init_yregs(curr_p, regs) },
+  args: term(regs),
+);
+
+impl OpcodeInitYregs {
+  #[inline]
+  pub fn init_yregs(curr_p: &mut Process, regs: Term) -> RtResult<DispatchResult> {
+    if regs == Term::nil() || regs == Term::empty_tuple() {
+      return Ok(DispatchResult::Normal);
+    }
+
+    let hp = curr_p.get_heap_mut();
+    if regs.is_tuple() {
+      let t = unsafe { &*regs.get_tuple_ptr() };
+      for i in 0..t.get_arity() {
+        let y = unsafe { t.get_element(i) };
+        debug_assert!(y.is_register_y());
+        hp.set_y(y.get_reg_value(), Term::nil())?;
+      }
+      return Ok(DispatchResult::Normal);
+    }
+
+    if regs.is_cons() {
+      crate::term::cons::for_each(regs, |y| {
+        debug_assert!(y.is_register_y());
+        hp.set_y(y.get_reg_value(), Term::nil())
+      })?;
+      return Ok(DispatchResult::Normal);
+    }
+
+    fail::create::badarg()
+  }
+}

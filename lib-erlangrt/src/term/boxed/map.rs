@@ -32,6 +32,7 @@ pub enum MapGetResult {
 /// Representation of Map on heap, either stored as a list of sorted pairs
 /// or as a hash tree (HAMT).
 /// TODO: implement HAMT, for now only using sorted list of pairs
+#[repr(C)]
 pub struct Map {
   header: BoxHeader,
   map_type: MapType,

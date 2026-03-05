@@ -1,7 +1,12 @@
 use crate::{
+  defs::data_reader::TDataReader,
   emulator::{atom, heap::THeapOwner, process::Process},
   fail::{self, RtResult},
-  term::{cons, term_builder::BinaryBuilder, Term},
+  term::{
+    boxed, cons,
+    term_builder::{BinaryBuilder, ListBuilder},
+    Term,
+  },
 };
 
 // Converts an atom to Erlang string.
@@ -65,13 +70,68 @@ unsafe fn list_to_binary_1_recursive(
     if elem.is_small() {
       // Any small integer even larger than 256 counts as 1 byte
       bb.write_byte(elem.get_small_unsigned() as u8);
+    } else if elem == Term::empty_binary() {
+      // <<>> contributes nothing.
     } else if elem.is_binary() {
-      unimplemented!("l2b: appending a binary");
-    // bb.write_binary(elem.get_box_ptr());
+      let bin_ptr = boxed::Binary::get_trait_from_term(elem);
+      let bit_size = (*bin_ptr).get_bit_size();
+      if bit_size.get_last_byte_bits() != 0 {
+        return fail::create::badarg();
+      }
+      let n_bytes = bit_size.get_byte_size_rounded_down().bytes();
+      if let Some(byte_reader) = (*bin_ptr).get_byte_reader() {
+        for i in 0..n_bytes {
+          bb.write_byte(byte_reader.read(i));
+        }
+      } else {
+        let bit_reader = (*bin_ptr).get_bit_reader();
+        for i in 0..n_bytes {
+          bb.write_byte(bit_reader.read(i));
+        }
+      }
     } else if elem.is_cons() {
       list_to_binary_1_recursive(bb, elem)?;
+    } else {
+      return fail::create::badarg();
     }
     Ok(())
   })?;
   Ok(list)
+}
+
+// Converts a byte-aligned binary to a list of integers [0..255].
+define_nativefun!(_vm, proc, args,
+  name: "erlang:binary_to_list/1", struct_name: NfErlangB2l1, arity: 1,
+  invoke: { unsafe { binary_to_list_1(proc, bin) } },
+  args: binary(bin),
+);
+
+#[inline]
+unsafe fn binary_to_list_1(proc: &mut Process, bin: Term) -> RtResult<Term> {
+  if bin == Term::empty_binary() {
+    return Ok(Term::nil());
+  }
+
+  let bin_ptr = boxed::Binary::get_trait_from_term(bin);
+  let bit_size = (*bin_ptr).get_bit_size();
+  if bit_size.get_last_byte_bits() != 0 {
+    return fail::create::badarg();
+  }
+  let n_bytes = bit_size.get_byte_size_rounded_down().bytes();
+  if n_bytes == 0 {
+    return Ok(Term::nil());
+  }
+
+  let mut lb = ListBuilder::new()?;
+  if let Some(reader) = (*bin_ptr).get_byte_reader() {
+    for i in 0..n_bytes {
+      lb.append(Term::make_small_unsigned(reader.read(i) as usize), proc.get_heap_mut())?;
+    }
+  } else {
+    let bit_reader = (*bin_ptr).get_bit_reader();
+    for i in 0..n_bytes {
+      lb.append(Term::make_small_unsigned(bit_reader.read(i) as usize), proc.get_heap_mut())?;
+    }
+  }
+  Ok(lb.make_term())
 }

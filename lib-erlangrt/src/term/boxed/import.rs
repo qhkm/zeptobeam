@@ -20,6 +20,7 @@ use crate::{
 use core::mem::size_of;
 
 #[allow(dead_code)]
+#[repr(C)]
 pub struct Import {
   header: BoxHeader,
   pub mfarity: ModFunArity,

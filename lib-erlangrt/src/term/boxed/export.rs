@@ -18,6 +18,7 @@ use crate::{
 use core::mem::size_of;
 
 #[allow(dead_code)]
+#[repr(C)]
 pub struct Export {
   header: BoxHeader,
   pub exp: export::Export,

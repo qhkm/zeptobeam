@@ -37,6 +37,7 @@ impl MatchBuffer {
 /// Matchstate is stored on heap as a heap object. Followed by 1 or more save
 /// offset `Term`s.
 /// TODO: Merge match_buffer with this struct, because reasons?
+#[repr(C)]
 pub struct BinaryMatchState {
   pub header: boxed::BoxHeader,
   match_buffer: MatchBuffer,
@@ -54,7 +55,7 @@ impl TBoxed for BinaryMatchState {
 
 impl BinaryMatchState {
   pub fn reset(&mut self) {
-    println!("TODO: reset binary match state");
+    self.match_buffer.read_position = BitSize::zero();
   }
 
   fn storage_size() -> SizeWords {
@@ -108,6 +109,11 @@ impl BinaryMatchState {
   #[inline]
   pub fn get_offset(&self) -> BitSize {
     self.match_buffer.read_position
+  }
+
+  #[inline]
+  pub fn set_offset(&mut self, offs: BitSize) {
+    self.match_buffer.read_position = offs;
   }
 
   pub fn increase_offset(&mut self, offs: BitSize) {

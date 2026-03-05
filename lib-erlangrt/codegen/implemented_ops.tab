@@ -10,6 +10,7 @@ call_ext
 call_ext_last
 call_ext_only
 call_fun
+call_fun2
 call_last
 call_only
 func_info
@@ -18,6 +19,7 @@ gc_bif2
 gc_bif3
 jump
 make_fun2
+make_fun3
 return
 select_val
 
@@ -28,7 +30,9 @@ allocate_heap_zero
 allocate_zero
 deallocate
 init
+init_yregs
 move
+swap
 test_heap
 trim
 
@@ -89,12 +93,15 @@ try_end
 # bs_get_integer2 # /7
 # bs_restore2 # /2
 # bs_save2 # /2
-# bs_skip_bits2 # /5
+bs_skip_bits2
 # bs_start_match2
 bs_add
+bs_create_bin
 bs_get_binary2
 bs_init2
 bs_put_binary
 bs_put_integer
+bs_match
 bs_start_match3
+bs_start_match4
 bs_test_tail2

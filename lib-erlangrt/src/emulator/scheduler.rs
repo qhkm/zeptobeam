@@ -183,15 +183,9 @@ impl Scheduler {
     // Do necessities before taking another process
     self.next_process_duties();
 
-    // Now try and find another process to run
-    loop {
-      // See if any are waiting in realtime (high) priority queue
-      if let Some(next_pid) = self.next_process_pick_from_the_queues() {
-        self.current = Some(next_pid);
-        break;
-      }
-    }
-
+    // Now try and find another process to run.
+    // If no runnable process exists, return None to allow the VM loop to stop.
+    self.current = self.next_process_pick_from_the_queues();
     Self::log_next_process(self.current);
     self.current
   }

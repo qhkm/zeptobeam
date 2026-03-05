@@ -19,3 +19,18 @@ define_opcode!(_vm, ctx, curr_p,
   },
   args: load(src), term(dst),
 );
+
+// Swap values between two registers (X or Y).
+// Structure: swap(reg1, reg2)
+define_opcode!(_vm, ctx, curr_p,
+  name: OpcodeSwap, arity: 2,
+  run: {
+    let hp = curr_p.get_heap_mut();
+    let v1 = ctx.load(reg1, hp);
+    let v2 = ctx.load(reg2, hp);
+    ctx.store_value(v1, reg2, hp)?;
+    ctx.store_value(v2, reg1, hp)?;
+    Ok(DispatchResult::Normal)
+  },
+  args: term(reg1), term(reg2),
+);

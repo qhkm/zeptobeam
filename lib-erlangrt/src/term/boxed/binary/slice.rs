@@ -13,6 +13,7 @@ use crate::{
 use core::ptr;
 
 /// Another type of binary. Refers to a slice in another binary.
+#[repr(C)]
 pub struct BinarySlice {
   pub bin_header: Binary,
   pub offset: BitSize,

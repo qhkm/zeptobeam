@@ -42,6 +42,71 @@ impl OpcodeMakeFun2 {
   }
 }
 
+// Structure: make_fun3(fun_entry:cp, dst:reg, env_terms:list_or_tuple)
+// OTP24+ variant where frozen values are provided explicitly as terms.
+define_opcode!(_vm, ctx, curr_p,
+  name: OpcodeMakeFun3, arity: 3,
+  run: { Self::make_fun3(ctx, curr_p, fun_entry, dst, env_terms) },
+  args: term(fun_entry), term(dst), term(env_terms),
+);
+
+impl OpcodeMakeFun3 {
+  #[inline]
+  pub fn make_fun3(
+    ctx: &mut RuntimeContext,
+    curr_p: &mut Process,
+    fun_entry: Term,
+    dst: Term,
+    env_terms: Term,
+  ) -> RtResult<DispatchResult> {
+    let fun_entry = fun_entry.get_cp_ptr::<FunEntry>();
+    let expected_nfrozen = unsafe { (*fun_entry).nfrozen };
+    let mut frozen: Vec<Term> = Vec::with_capacity(expected_nfrozen);
+
+    if env_terms != Term::nil() && env_terms != Term::empty_tuple() {
+      if env_terms.is_tuple() {
+        let t = unsafe { &*env_terms.get_tuple_ptr() };
+        let arity = t.get_arity();
+        frozen.reserve(arity.saturating_sub(frozen.capacity()));
+        for i in 0..arity {
+          let src = unsafe { t.get_element(i) };
+          let val = {
+            let hp = curr_p.get_heap_mut();
+            ctx.load(src, hp)
+          };
+          frozen.push(val);
+        }
+      } else if env_terms.is_cons() {
+        crate::term::cons::for_each(env_terms, |src| {
+          let val = {
+            let hp = curr_p.get_heap_mut();
+            ctx.load(src, hp)
+          };
+          frozen.push(val);
+          Ok(())
+        })?;
+      } else {
+        return fail::create::badarg();
+      }
+    }
+
+    if frozen.len() != expected_nfrozen {
+      return fail::create::badarg();
+    }
+
+    let closure = {
+      let hp = curr_p.get_heap_mut();
+      unsafe { boxed::Closure::create_into(hp, fun_entry.as_ref().unwrap(), &frozen)? }
+    };
+    {
+      let hp = curr_p.get_heap_mut();
+      ctx.store_value(closure, dst, hp)?;
+    }
+
+    Ok(DispatchResult::Normal)
+  }
+}
+
 // Structure: call_fun(arity:uint)
 // Expects: x[0..arity-1] = args. x[arity] = fun object
 define_opcode!(vm, ctx, curr_p,
@@ -69,6 +134,37 @@ impl OpcodeCallFun {
       runtime_ctx::call_closure::apply(vm, ctx, curr_p, closure, args)
     } else if let Ok(export) = unsafe { boxed::Export::mut_from_term(fun_object) } {
       // `fun_object` is an export made with `fun module:name/0`
+      runtime_ctx::call_export::apply(vm, ctx, curr_p, export, args, true)
+    } else {
+      fail::create::badfun()
+    }
+  }
+}
+
+// Structure: call_fun2(tag:any, arity:uint, func:src)
+// OTP25+ variant of fun call where callable location is explicit.
+define_opcode!(vm, ctx, curr_p,
+  name: OpcodeCallFun2, arity: 3,
+  run: { Self::call_fun2(vm, ctx, curr_p, arity, func) },
+  args: IGNORE(tag), usize(arity), load(func),
+);
+
+impl OpcodeCallFun2 {
+  #[inline]
+  pub fn call_fun2(
+    vm: &mut VM,
+    ctx: &mut RuntimeContext,
+    curr_p: &mut Process,
+    arity: usize,
+    func: Term,
+  ) -> RtResult<DispatchResult> {
+    let args = ctx.registers_slice(0, arity);
+
+    // `tag` can carry optimizer hints or a direct target in OTP.
+    // This runtime currently uses the explicit fun object argument.
+    if let Ok(closure) = unsafe { boxed::Closure::mut_from_term(func) } {
+      runtime_ctx::call_closure::apply(vm, ctx, curr_p, closure, args)
+    } else if let Ok(export) = unsafe { boxed::Export::mut_from_term(func) } {
       runtime_ctx::call_export::apply(vm, ctx, curr_p, export, args, true)
     } else {
       fail::create::badfun()

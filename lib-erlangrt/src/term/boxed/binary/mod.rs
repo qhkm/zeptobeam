@@ -49,6 +49,7 @@ pub enum BinaryType {
 
 /// Binary which stores everything in its allocated memory on process heap.
 #[allow(dead_code)]
+#[repr(C)]
 pub struct Binary {
   header: BoxHeader,
   /// Based on the bin_type, the pointer should be converted to one of binary

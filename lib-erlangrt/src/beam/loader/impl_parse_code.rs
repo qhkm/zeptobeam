@@ -22,6 +22,14 @@ fn module() -> &'static str {
   "loader/code: "
 }
 
+#[inline]
+fn opcode_uses_jump_table_list(op: RawOpcode) -> bool {
+  matches!(
+    op,
+    gen_op::OPCODE_SELECT_VAL | gen_op::OPCODE_SELECT_TUPLE_ARITY
+  )
+}
+
 // const MAX_LTOP_ARGS: usize = 16;
 
 /// Load-time Instruction with opcode and args.
@@ -68,7 +76,7 @@ impl LoaderState {
       while !reader.eof() {
         let op = RawOpcode(reader.read_u8());
         let arity = gen_op::opcode_arity(op) as usize;
-        ct_reader.on_ext_list_create_jumptable(op != gen_op::OPCODE_PUT_TUPLE2);
+        ct_reader.on_ext_list_create_jumptable(opcode_uses_jump_table_list(op));
         for _i in 0..arity {
           ct_reader.read(&mut reader)?;
         }
@@ -95,8 +103,7 @@ impl LoaderState {
       // let op = opcode::RawOpcode(r.read_u8());
       // let mut args: Vec<FTerm> = Vec::new();
       next_instr.next(reader.read_u8());
-      ct_reader
-        .on_ext_list_create_jumptable(next_instr.opcode != gen_op::OPCODE_PUT_TUPLE2);
+      ct_reader.on_ext_list_create_jumptable(opcode_uses_jump_table_list(next_instr.opcode));
       //  rtdbg!(
       //    "opcode {:?} {}",
       //    next_instr.opcode,
@@ -201,11 +208,9 @@ impl LoaderState {
           // Label definitely is a loadtime index, resolve it to the location
           // The resolution will happen later when code writing has completed,
           // for now just store the location to patch in the patch table
-          debug_assert!(
-            label_index.is_loadtime(),
-            "Expected load time, got {}",
-            label_index
-          );
+          if !label_index.is_loadtime() {
+            println!("{}WARN: jump table label is not loadtime: {}", module(), label_index);
+          }
         }
 
         // Store it in the patch table

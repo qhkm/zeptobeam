@@ -2,16 +2,20 @@
 //! opcodes for binaries.
 mod bs_get_binary;
 mod bs_init;
+mod bs_create_bin;
+mod bs_match;
 mod bs_put_binary;
 mod bs_put_integer;
 mod bs_start_match;
 
 pub use self::{
-  bs_get_binary::*, bs_init::*, bs_put_binary::*, bs_put_integer::*, bs_start_match::*,
+  bs_create_bin::*, bs_get_binary::*, bs_init::*, bs_match::*, bs_put_binary::*,
+  bs_put_integer::*, bs_start_match::*,
 };
 
 use crate::{
   beam::disp_result::DispatchResult,
+  defs::BitSize,
   emulator::{heap::THeapOwner, process::Process, runtime_ctx::*},
   fail::RtResult,
   term::{boxed::binary::match_state::BinaryMatchState, *},
@@ -61,6 +65,34 @@ impl OpcodeBsTestTail2 {
     if remaining != bits {
       runtime_ctx.jump(fail);
     }
+    Ok(DispatchResult::Normal)
+  }
+}
+
+// Skip Size*Unit bits in an existing binary match context.
+// Structure: bs_skip_bits2(Fail, MatchState, Size, Unit, Flags)
+define_opcode!(
+  _vm, rt_ctx, _proc, name: OpcodeBsSkipBits2, arity: 5,
+  run: { Self::bs_skip_bits2(rt_ctx, fail, match_state, size, unit) },
+  args: cp_or_nil(fail), binary_match_state(match_state), load_usize(size), usize(unit), IGNORE(flags),
+);
+
+impl OpcodeBsSkipBits2 {
+  #[inline]
+  fn bs_skip_bits2(
+    runtime_ctx: &mut RuntimeContext,
+    fail: Term,
+    match_state: *mut BinaryMatchState,
+    size: usize,
+    unit: usize,
+  ) -> RtResult<DispatchResult> {
+    let skip = BitSize::with_unit(size, unit);
+    let remaining = unsafe { (*match_state).get_bits_remaining() };
+    if skip.bits > remaining.bits {
+      runtime_ctx.jump(fail);
+      return Ok(DispatchResult::Normal);
+    }
+    unsafe { (*match_state).increase_offset(skip) };
     Ok(DispatchResult::Normal)
   }
 }

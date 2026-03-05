@@ -25,6 +25,7 @@ const fn module() -> &'static str {
 
 /// Boxed `Closure` is placed on heap and referred via Term::p
 #[allow(dead_code)]
+#[repr(C)]
 pub struct Closure {
   pub header: BoxHeader,
 
