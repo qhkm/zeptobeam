@@ -8,6 +8,7 @@ pub mod rate_limiter;
 pub mod registry;
 pub mod scheduler;
 pub mod supervision;
+pub mod tool_factory;
 pub mod types;
 
 #[cfg(test)]
