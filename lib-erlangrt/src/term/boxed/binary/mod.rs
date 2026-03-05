@@ -13,8 +13,7 @@ use crate::{
       trait_interface::TBoxed,
       BoxHeader,
     },
-    classify,
-    Term,
+    classify, Term,
   },
 };
 
@@ -55,8 +54,8 @@ pub struct Binary {
   /// Based on the bin_type, the pointer should be converted to one of binary
   /// subtypes and then used accordingly.
   bin_type: BinaryType,
-  /* Size is stored in the storage object, which is overlaid onto this depending
-   * on the bin_type */
+  // Size is stored in the storage object, which is overlaid onto this depending
+  // on the bin_type
 }
 
 impl TBoxed for Binary {
@@ -101,13 +100,19 @@ impl Binary {
     }
   }
 
-  pub unsafe fn create_with_data(data: &[u8], hp: &mut dyn THeap) -> RtResult<*mut dyn TBinary> {
+  pub unsafe fn create_with_data(
+    data: &[u8],
+    hp: &mut dyn THeap,
+  ) -> RtResult<*mut dyn TBinary> {
     let btrait = Self::create_into(BitSize::with_bytes(data.len()), hp)?;
     (*btrait).store(data)?;
     Ok(btrait)
   }
 
-  pub unsafe fn create_into(size: BitSize, hp: &mut dyn THeap) -> RtResult<*mut dyn TBinary> {
+  pub unsafe fn create_into(
+    size: BitSize,
+    hp: &mut dyn THeap,
+  ) -> RtResult<*mut dyn TBinary> {
     if size.bits == 0 {
       // Return binary {} immediate special instead!
       return Err(RtErr::CreatingZeroSizedBinary);
@@ -204,7 +209,10 @@ impl Binary {
     )
   }
 
-  pub unsafe fn format(bin_trait: *const dyn TBinary, f: &mut fmt::Formatter) -> fmt::Result {
+  pub unsafe fn format(
+    bin_trait: *const dyn TBinary,
+    f: &mut fmt::Formatter,
+  ) -> fmt::Result {
     // let size = (*bin_trait).get_bit_size();
 
     // Print opening '<<'

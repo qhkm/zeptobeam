@@ -1,9 +1,7 @@
 use crate::{
-  beam::disp_result::DispatchResult,
+  beam::{disp_result::DispatchResult, opcodes::binary::ArchUsize},
   defs::BitSize,
-  emulator::{
-    gen_atoms, heap::THeapOwner, process::Process, runtime_ctx::*, vm::VM,
-  },
+  emulator::{gen_atoms, heap::THeapOwner, process::Process, runtime_ctx::*, vm::VM},
   fail::{RtErr, RtResult},
   term::{
     boxed::{
@@ -13,7 +11,6 @@ use crate::{
     Term,
   },
 };
-use crate::beam::opcodes::binary::ArchUsize;
 
 // Store `src` into the binary open for writing, the binary and the write
 // position are stored in the process runtime context.

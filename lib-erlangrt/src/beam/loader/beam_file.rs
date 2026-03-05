@@ -286,8 +286,8 @@ impl BeamFile {
     // Decompress deflated literal table
     let iocursor = Cursor::new(&deflated);
     zlib::Decoder::new(iocursor)
-        .read_to_end(&mut inflated)
-        .unwrap();
+      .read_to_end(&mut inflated)
+      .unwrap();
     assert_eq!(
       inflated.len(),
       uncomp_sz as usize,

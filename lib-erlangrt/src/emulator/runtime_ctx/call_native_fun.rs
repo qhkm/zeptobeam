@@ -139,8 +139,10 @@ fn callbif_resolve_import(
   // Possibly a `boxed::Import` object on heap which contains m:f/arity
   let imp_p = imp.get_box_ptr_safe::<import::Import>()?;
   let imp_arity = unsafe { (*imp_p).mfarity.arity };
-  assert_eq!(imp_arity, check_arity,
-             "callbif: Import arity 0x{imp_arity:x} not eq check_arity {check_arity}");
+  assert_eq!(
+    imp_arity, check_arity,
+    "callbif: Import arity 0x{imp_arity:x} not eq check_arity {check_arity}"
+  );
 
   // Here HOImport pointer is found, try and resolve it to a Rust function ptr
   if let Some(fn_ptr) = unsafe { (*imp_p).get_native_fn_ptr(code_srv) } {

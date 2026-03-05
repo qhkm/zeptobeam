@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use crate::agent_rt::process::AgentProcess;
-use crate::agent_rt::types::*;
+use crate::agent_rt::{process::AgentProcess, types::*};
 
 /// Maps PIDs to processes and manages named
 /// process registration.
@@ -34,17 +32,11 @@ impl AgentRegistry {
     self.processes.get(pid)
   }
 
-  pub fn lookup_mut(
-    &mut self,
-    pid: &AgentPid,
-  ) -> Option<&mut AgentProcess> {
+  pub fn lookup_mut(&mut self, pid: &AgentPid) -> Option<&mut AgentProcess> {
     self.processes.get_mut(pid)
   }
 
-  pub fn remove(
-    &mut self,
-    pid: &AgentPid,
-  ) -> Option<AgentProcess> {
+  pub fn remove(&mut self, pid: &AgentPid) -> Option<AgentProcess> {
     let proc = self.processes.remove(pid);
     if proc.is_some() {
       self.names.retain(|_, v| v != pid);
@@ -54,17 +46,10 @@ impl AgentRegistry {
 
   /// Register a name for a process. Returns an error
   /// if the name is already taken by a different process.
-  pub fn register_name(
-    &mut self,
-    name: &str,
-    pid: AgentPid,
-  ) -> Result<(), String> {
+  pub fn register_name(&mut self, name: &str, pid: AgentPid) -> Result<(), String> {
     if let Some(&existing) = self.names.get(name) {
       if existing != pid {
-        return Err(format!(
-          "Name '{}' already registered",
-          name
-        ));
+        return Err(format!("Name '{}' already registered", name));
       }
     }
     self.names.insert(name.to_string(), pid);

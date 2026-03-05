@@ -76,11 +76,12 @@ impl TBinary for BinarySlice {
   fn get_byte_reader(&self) -> Option<ByteReader> {
     if self.offset.get_last_byte_bits() == 0 {
       // The offset is byte-aligned, we can actually return a faster byte-reader
-      unsafe { (*self.orig).get_byte_reader() }.map(
-        |r| unsafe {
-          r.set_offset_and_size(self.offset.get_byte_size_rounded_down(),
-                                self.size.get_byte_size_rounded_down())
-        })
+      unsafe { (*self.orig).get_byte_reader() }.map(|r| unsafe {
+        r.set_offset_and_size(
+          self.offset.get_byte_size_rounded_down(),
+          self.size.get_byte_size_rounded_down(),
+        )
+      })
     } else {
       None
     }

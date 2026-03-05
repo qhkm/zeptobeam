@@ -12,8 +12,7 @@ use crate::{
       trait_interface::TBoxed,
       BoxHeader, BOXTYPETAG_EXPORT,
     },
-    classify,
-    *,
+    classify, *,
   },
 };
 use core::mem::size_of;

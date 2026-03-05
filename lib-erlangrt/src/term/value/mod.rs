@@ -104,7 +104,10 @@ impl Term {
 
   #[inline]
   pub fn is_immediate(self) -> bool {
-    !matches!(self.get_term_tag(), PrimaryTag::BOX_PTR | PrimaryTag::CONS_PTR | PrimaryTag::HEADER)
+    !matches!(
+      self.get_term_tag(),
+      PrimaryTag::BOX_PTR | PrimaryTag::CONS_PTR | PrimaryTag::HEADER
+    )
   }
 
   /// Return true if the value is a first header word of something large on heap
@@ -148,7 +151,7 @@ impl Term {
   pub fn get_term_val_without_tag(self) -> usize {
     debug_assert!(
       self.get_term_tag() != PrimaryTag::BOX_PTR
-          && self.get_term_tag() != PrimaryTag::CONS_PTR
+        && self.get_term_tag() != PrimaryTag::CONS_PTR
     );
     self.value >> PrimaryTag::TAG_BITS
   }
@@ -165,7 +168,11 @@ impl Term {
     Self::make_from_tag_and_value(PrimaryTag::LOCAL_PID, pindex)
   }
 
-  pub fn make_remote_pid(hp: &mut dyn THeap, node: Self, pindex: usize) -> RtResult<Self> {
+  pub fn make_remote_pid(
+    hp: &mut dyn THeap,
+    node: Self,
+    pindex: usize,
+  ) -> RtResult<Self> {
     let rpid_ptr = boxed::ExternalPid::create_into(hp, node, pindex)?;
     Ok(Self::make_boxed(rpid_ptr))
   }

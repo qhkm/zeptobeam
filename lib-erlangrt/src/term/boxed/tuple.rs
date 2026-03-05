@@ -1,5 +1,5 @@
 use crate::{
-  defs::{SizeBytes, Word, SizeWords},
+  defs::{SizeBytes, SizeWords, Word},
   emulator::heap::{AllocInit, THeap},
   fail::RtResult,
   term::{
@@ -8,8 +8,7 @@ use crate::{
       trait_interface::TBoxed,
       BoxHeader,
     },
-    classify,
-    Term,
+    classify, Term,
   },
 };
 use core::fmt;

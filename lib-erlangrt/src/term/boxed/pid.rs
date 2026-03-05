@@ -1,5 +1,5 @@
 use crate::{
-  defs::{SizeBytes, Word, SizeWords},
+  defs::{SizeBytes, SizeWords, Word},
   emulator::heap::{AllocInit, THeap},
   fail::RtResult,
   term::{
@@ -45,7 +45,11 @@ impl ExternalPid {
   }
 
   /// Allocates
-  pub fn create_into(hp: &mut dyn THeap, node: Term, id: Word) -> RtResult<*mut BoxHeader> {
+  pub fn create_into(
+    hp: &mut dyn THeap,
+    node: Term,
+    id: Word,
+  ) -> RtResult<*mut BoxHeader> {
     // TODO do something with possible error from hp.heap_allocate
     let p = hp.alloc(ExternalPid::storage_size(), AllocInit::Uninitialized)? as *mut Self;
     unsafe { p.write(ExternalPid::new(node, id)) }

@@ -1,14 +1,15 @@
 use std::collections::VecDeque;
 
-use crate::agent_rt::bridge::BridgeHandle;
-use crate::agent_rt::process::{Priority, ProcessStatus};
-use crate::agent_rt::registry::AgentRegistry;
-use crate::agent_rt::types::*;
+use crate::agent_rt::{
+  bridge::BridgeHandle,
+  process::{Priority, ProcessStatus},
+  registry::AgentRegistry,
+  types::*,
+};
 
 const DEFAULT_REDUCTIONS: u32 = 200;
 const NORMAL_ADVANTAGE: usize = 8;
-type ExitHandler =
-  Box<dyn FnMut(&mut AgentScheduler, AgentPid, Reason)>;
+type ExitHandler = Box<dyn FnMut(&mut AgentScheduler, AgentPid, Reason)>;
 
 /// Reduction-counting preemptive scheduler with
 /// three priority queues (High > Normal > Low) and
@@ -59,9 +60,7 @@ impl AgentScheduler {
     };
     match priority {
       Priority::High => self.queue_high.push_back(pid),
-      Priority::Normal => {
-        self.queue_normal.push_back(pid)
-      }
+      Priority::Normal => self.queue_normal.push_back(pid),
       Priority::Low => self.queue_low.push_back(pid),
     }
   }
@@ -75,9 +74,7 @@ impl AgentScheduler {
     }
     if !self.queue_normal.is_empty() {
       self.advantage_count += 1;
-      if self.advantage_count < NORMAL_ADVANTAGE
-        || self.queue_low.is_empty()
-      {
+      if self.advantage_count < NORMAL_ADVANTAGE || self.queue_low.is_empty() {
         return self.queue_normal.pop_front();
       }
       // Give low priority a turn
@@ -92,18 +89,12 @@ impl AgentScheduler {
 
   /// Deliver a message to a process. If the process was
   /// Waiting, wake it and re-enqueue it.
-  pub fn send(
-    &mut self,
-    to: AgentPid,
-    msg: Message,
-  ) -> Result<(), String> {
+  pub fn send(&mut self, to: AgentPid, msg: Message) -> Result<(), String> {
     let was_waiting = {
       let proc = self
         .registry
         .lookup_mut(&to)
-        .ok_or_else(|| {
-          format!("Process {:?} not found", to)
-        })?;
+        .ok_or_else(|| format!("Process {:?} not found", to))?;
       let was = proc.status == ProcessStatus::Waiting;
       proc.deliver_message(msg);
       was
@@ -149,12 +140,9 @@ impl AgentScheduler {
       proc.reductions = DEFAULT_REDUCTIONS;
     }
 
-    let mut pending_sends: Vec<(AgentPid, Message)> =
+    let mut pending_sends: Vec<(AgentPid, Message)> = Vec::new();
+    let mut pending_spawns: Vec<(std::sync::Arc<dyn AgentBehavior>, serde_json::Value)> =
       Vec::new();
-    let mut pending_spawns: Vec<(
-      std::sync::Arc<dyn AgentBehavior>,
-      serde_json::Value,
-    )> = Vec::new();
     let mut should_stop: Option<Reason> = None;
     let mut should_wait = false;
     let mut out_of_reductions = false;
@@ -175,11 +163,10 @@ impl AgentScheduler {
 
       // Get next message
       let msg = {
-        let proc =
-          match self.registry.lookup_mut(&pid) {
-            Some(p) => p,
-            None => break,
-          };
+        let proc = match self.registry.lookup_mut(&pid) {
+          Some(p) => p,
+          None => break,
+        };
         proc.next_message()
       };
 
@@ -195,31 +182,21 @@ impl AgentScheduler {
       // Dispatch message: get behavior + state, call
       // the appropriate callback, then put state back.
       let action = {
-        let proc =
-          match self.registry.lookup_mut(&pid) {
-            Some(p) => p,
-            None => break,
-          };
-        proc.reductions =
-          proc.reductions.saturating_sub(1);
+        let proc = match self.registry.lookup_mut(&pid) {
+          Some(p) => p,
+          None => break,
+        };
+        proc.reductions = proc.reductions.saturating_sub(1);
         let behavior = proc.behavior.clone();
         let mut state = match proc.state.take() {
           Some(s) => s,
           None => break,
         };
         let action = match msg {
-          Message::System(SystemMsg::Exit {
-            from,
-            reason,
-          }) => behavior.handle_exit(
-            AgentPid::from_raw(from),
-            reason,
-            state.as_mut(),
-          ),
-          other => behavior.handle_message(
-            other,
-            state.as_mut(),
-          ),
+          Message::System(SystemMsg::Exit { from, reason }) => {
+            behavior.handle_exit(AgentPid::from_raw(from), reason, state.as_mut())
+          }
+          other => behavior.handle_message(other, state.as_mut()),
         };
         proc.state = Some(state);
         action
@@ -229,11 +206,8 @@ impl AgentScheduler {
       match action {
         Action::Continue => {}
         Action::Send { to, msg } => {
-          if let Some(proc) =
-            self.registry.lookup_mut(&pid)
-          {
-            proc.reductions =
-              proc.reductions.saturating_sub(2);
+          if let Some(proc) = self.registry.lookup_mut(&pid) {
+            proc.reductions = proc.reductions.saturating_sub(2);
           }
           pending_sends.push((to, msg));
         }
@@ -242,11 +216,8 @@ impl AgentScheduler {
           break;
         }
         Action::IoRequest(op) => {
-          if let Some(proc) =
-            self.registry.lookup_mut(&pid)
-          {
-            proc.reductions =
-              proc.reductions.saturating_sub(1);
+          if let Some(proc) = self.registry.lookup_mut(&pid) {
+            proc.reductions = proc.reductions.saturating_sub(1);
             proc.status = ProcessStatus::Waiting;
           }
           // Submit to bridge if available
@@ -254,12 +225,8 @@ impl AgentScheduler {
             if let Err(err) = bridge.submit(pid, op) {
               // Bridge overflow/disconnect — wake
               // process with error
-              if let Some(proc) =
-                self.registry.lookup_mut(&pid)
-              {
-                proc.deliver_message(
-                  Message::Text(err),
-                );
+              if let Some(proc) = self.registry.lookup_mut(&pid) {
+                proc.deliver_message(Message::Text(err));
                 proc.status = ProcessStatus::Runnable;
               }
               self.enqueue(pid);
@@ -268,11 +235,8 @@ impl AgentScheduler {
           break;
         }
         Action::Spawn { behavior, args } => {
-          if let Some(proc) =
-            self.registry.lookup_mut(&pid)
-          {
-            proc.reductions =
-              proc.reductions.saturating_sub(10);
+          if let Some(proc) = self.registry.lookup_mut(&pid) {
+            proc.reductions = proc.reductions.saturating_sub(10);
           }
           pending_spawns.push((behavior, args));
         }
@@ -281,9 +245,7 @@ impl AgentScheduler {
 
     // Post-dispatch: handle deferred operations
     if should_wait {
-      if let Some(proc) =
-        self.registry.lookup_mut(&pid)
-      {
+      if let Some(proc) = self.registry.lookup_mut(&pid) {
         proc.status = ProcessStatus::Waiting;
       }
     }
@@ -299,26 +261,19 @@ impl AgentScheduler {
 
     // Process pending spawns
     for (behavior, args) in pending_spawns {
-      if let Ok(child_pid) =
-        self.registry.spawn(behavior, args)
-      {
+      if let Ok(child_pid) = self.registry.spawn(behavior, args) {
         // Auto-link parent <-> child
-        if let Some(parent_proc) =
-          self.registry.lookup_mut(&pid)
-        {
+        if let Some(parent_proc) = self.registry.lookup_mut(&pid) {
           parent_proc.links.push(child_pid);
         }
-        if let Some(child_proc) =
-          self.registry.lookup_mut(&child_pid)
-        {
+        if let Some(child_proc) = self.registry.lookup_mut(&child_pid) {
           child_proc.links.push(pid);
         }
 
         // Notify parent with SpawnResult
-        let spawn_msg =
-          Message::System(SystemMsg::SpawnResult {
-            child_pid: child_pid.raw(),
-          });
+        let spawn_msg = Message::System(SystemMsg::SpawnResult {
+          child_pid: child_pid.raw(),
+        });
         let _ = self.send(pid, spawn_msg);
 
         self.enqueue(child_pid);
@@ -339,11 +294,7 @@ impl AgentScheduler {
   /// as a mailbox message. If trap_exit=false and reason
   /// is not Normal, cascade termination. Normal exits
   /// with trap_exit=false do not propagate.
-  pub fn terminate_process(
-    &mut self,
-    pid: AgentPid,
-    reason: Reason,
-  ) {
+  pub fn terminate_process(&mut self, pid: AgentPid, reason: Reason) {
     // Collect links before terminating
     let links: Vec<AgentPid> = self
       .registry
@@ -352,9 +303,7 @@ impl AgentScheduler {
       .unwrap_or_default();
 
     // Call terminate on the process
-    if let Some(proc) =
-      self.registry.lookup_mut(&pid)
-    {
+    if let Some(proc) = self.registry.lookup_mut(&pid) {
       proc.terminate(reason.clone());
     }
 
@@ -363,10 +312,8 @@ impl AgentScheduler {
     self.registry.remove(&pid);
 
     // Notify linked processes
-    let mut pids_to_cascade: Vec<AgentPid> =
-      Vec::new();
-    let mut pids_to_wake: Vec<AgentPid> =
-      Vec::new();
+    let mut pids_to_cascade: Vec<AgentPid> = Vec::new();
+    let mut pids_to_wake: Vec<AgentPid> = Vec::new();
 
     for linked_pid in &links {
       let trap = self
@@ -374,24 +321,19 @@ impl AgentScheduler {
         .lookup(linked_pid)
         .map(|p| p.trap_exit)
         .unwrap_or(false);
-      let exists =
-        self.registry.lookup(linked_pid).is_some();
+      let exists = self.registry.lookup(linked_pid).is_some();
       if !exists {
         continue;
       }
 
       if trap {
         // Deliver Exit as mailbox message
-        let exit_msg =
-          Message::System(SystemMsg::Exit {
-            from: pid.raw(),
-            reason: reason.clone(),
-          });
-        if let Some(lp) =
-          self.registry.lookup_mut(linked_pid)
-        {
-          let was_waiting =
-            lp.status == ProcessStatus::Waiting;
+        let exit_msg = Message::System(SystemMsg::Exit {
+          from: pid.raw(),
+          reason: reason.clone(),
+        });
+        if let Some(lp) = self.registry.lookup_mut(linked_pid) {
+          let was_waiting = lp.status == ProcessStatus::Waiting;
           lp.deliver_message(exit_msg);
           if was_waiting {
             pids_to_wake.push(*linked_pid);
@@ -411,17 +353,12 @@ impl AgentScheduler {
 
     // Cascade termination after the loop
     for cascade_pid in pids_to_cascade {
-      self.terminate_process(
-        cascade_pid,
-        reason.clone(),
-      );
+      self.terminate_process(cascade_pid, reason.clone());
     }
 
     // Notify optional exit handler (for supervisor
     // integration) after termination is complete.
-    if let Some(mut handler) =
-      self.exit_handler.take()
-    {
+    if let Some(mut handler) = self.exit_handler.take() {
       handler(self, pid, reason);
       self.exit_handler = Some(handler);
     }

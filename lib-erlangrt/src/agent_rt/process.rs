@@ -1,5 +1,4 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::agent_rt::types::*;
 

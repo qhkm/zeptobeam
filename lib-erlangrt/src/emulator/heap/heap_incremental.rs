@@ -8,7 +8,7 @@
 //!
 //! * The young values get garbaged more often, introduce an age mark.
 use crate::{
-  defs::{Word, SizeWords},
+  defs::{SizeWords, Word},
   emulator::heap::{catch::NextCatchResult, gc_trait::TGc, heap_trait::*, iter, *},
   fail::{RtErr, RtResult},
   term::{heap_walker::*, Term},
@@ -82,7 +82,8 @@ impl<GC: TGc> THeap for IncrementalHeap<GC> {
 
   #[inline]
   fn garbage_collect(&mut self, roots: Box<dyn TRootIterator>) -> RtResult<()> {
-    let walker = HeapWalker::new(self.get_heap_start_ptr_mut(), self.get_heap_top_ptr_mut());
+    let walker =
+      HeapWalker::new(self.get_heap_start_ptr_mut(), self.get_heap_top_ptr_mut());
     GC::garbage_collect(self, walker, roots)
   }
 

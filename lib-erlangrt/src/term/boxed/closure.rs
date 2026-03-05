@@ -1,5 +1,5 @@
 use crate::{
-  defs::{Arity, SizeBytes, Word, SizeWords},
+  defs::{Arity, SizeBytes, SizeWords, Word},
   emulator::{
     code::pointer::{CodePtr, VersionedCodePtr},
     code_srv::CodeServer,
@@ -14,8 +14,7 @@ use crate::{
       trait_interface::TBoxed,
       BoxHeader, BOXTYPETAG_CLOSURE,
     },
-    classify,
-    *,
+    classify, *,
   },
 };
 use core::mem::size_of;
@@ -58,8 +57,8 @@ impl Closure {
   #[inline]
   const fn storage_size(nfrozen: Word) -> SizeWords {
     SizeBytes::new(size_of::<Self>())
-        .get_words_rounded_up()
-        .add(nfrozen)
+      .get_words_rounded_up()
+      .add(nfrozen)
   }
 
   fn new(mfa: ModFunArity, nfrozen: usize) -> Self {

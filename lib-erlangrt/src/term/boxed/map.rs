@@ -1,7 +1,7 @@
 use core::cmp::Ordering;
 
 use crate::{
-  defs::{Word, SizeWords},
+  defs::{SizeWords, Word},
   emulator::heap::{AllocInit, THeap},
   fail::RtResult,
   term::{

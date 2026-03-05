@@ -1,7 +1,5 @@
 use crate::agent_rt::types::*;
-use crossbeam_channel::{
-  bounded, Receiver, Sender, TrySendError,
-};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
 const RESPONSE_QUEUE_SIZE: usize = 4096;
@@ -60,11 +58,7 @@ pub fn create_bridge() -> (BridgeHandle, BridgeWorker) {
 impl BridgeHandle {
   /// Submit an I/O operation. Returns the correlation ID
   /// on success, or an error string if the queue is full.
-  pub fn submit(
-    &mut self,
-    pid: AgentPid,
-    op: IoOp,
-  ) -> Result<u64, String> {
+  pub fn submit(&mut self, pid: AgentPid, op: IoOp) -> Result<u64, String> {
     let cid = self.next_correlation_id;
     let req = IoRequest {
       correlation_id: cid,
@@ -76,31 +70,23 @@ impl BridgeHandle {
         self.next_correlation_id += 1;
         Ok(cid)
       }
-      Err(TrySendError::Full(_)) => {
-        Err("request queue full".into())
-      }
-      Err(TrySendError::Disconnected(_)) => {
-        Err("bridge worker disconnected".into())
-      }
+      Err(TrySendError::Full(_)) => Err("request queue full".into()),
+      Err(TrySendError::Disconnected(_)) => Err("bridge worker disconnected".into()),
     }
   }
 
   /// Non-blocking drain of all pending responses.
   /// Each response is wrapped into
   /// `(AgentPid, Message::System(SystemMsg::IoResponse))`.
-  pub fn drain_responses(
-    &self,
-  ) -> Vec<(AgentPid, Message)> {
+  pub fn drain_responses(&self) -> Vec<(AgentPid, Message)> {
     let mut out = Vec::new();
     loop {
       match self.response_rx.try_recv() {
         Ok(resp) => {
-          let msg = Message::System(
-            SystemMsg::IoResponse {
-              correlation_id: resp.correlation_id,
-              result: resp.result,
-            },
-          );
+          let msg = Message::System(SystemMsg::IoResponse {
+            correlation_id: resp.correlation_id,
+            result: resp.result,
+          });
           out.push((resp.source_pid, msg));
         }
         Err(_) => break,
@@ -121,9 +107,7 @@ impl BridgeWorker {
     let resp_tx = self.response_tx;
     loop {
       let rx = req_rx.clone();
-      let recv_result =
-        tokio::task::spawn_blocking(move || rx.recv())
-          .await;
+      let recv_result = tokio::task::spawn_blocking(move || rx.recv()).await;
       let req = match recv_result {
         Ok(Ok(r)) => r,
         // Channel disconnected or join error: stop.

@@ -42,7 +42,8 @@ pub fn from_memory_word(m: Word) -> RawOpcode {
   debug_assert_eq!(
     as_term.get_special_tag(),
     SpecialTag::OPCODE,
-    "Opcode 0x{m:x} from code memory must be tagged as Special/Opcode");
+    "Opcode 0x{m:x} from code memory must be tagged as Special/Opcode"
+  );
   debug_assert!(
     as_term.get_opcode_value() <= gen_op::OPCODE_MAX.0 as usize,
     "Value for rawOpcode is too big, get {} expected max {}",

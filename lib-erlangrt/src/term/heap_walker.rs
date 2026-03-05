@@ -1,6 +1,8 @@
-//use super::Term;
-use crate::defs::Word;
-use crate::term::{Term, boxed};
+// use super::Term;
+use crate::{
+  defs::Word,
+  term::{boxed, Term},
+};
 
 
 /// Walks a linear heap forward from start to the end, jumping over the objects

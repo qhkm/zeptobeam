@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod orchestration;
 pub mod process;
 pub mod registry;
 pub mod scheduler;

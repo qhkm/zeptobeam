@@ -1,9 +1,6 @@
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
-use crate::agent_rt::process::Priority;
-use crate::agent_rt::scheduler::AgentScheduler;
-use crate::agent_rt::types::*;
+use crate::agent_rt::{process::Priority, scheduler::AgentScheduler, types::*};
 
 /// Strategy for restarting children when one dies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,20 +70,14 @@ pub struct Supervisor {
 impl Supervisor {
   /// Start a supervisor by spawning all children from
   /// the spec.
-  pub fn start(
-    sched: &mut AgentScheduler,
-    spec: SupervisorSpec,
-  ) -> Result<Self, Reason> {
+  pub fn start(sched: &mut AgentScheduler, spec: SupervisorSpec) -> Result<Self, Reason> {
     let mut children = Vec::new();
     for child_spec in spec.children {
-      let pid = sched.registry.spawn(
-        child_spec.behavior.clone(),
-        child_spec.args.clone(),
-      )?;
+      let pid = sched
+        .registry
+        .spawn(child_spec.behavior.clone(), child_spec.args.clone())?;
       // Set priority on the spawned process
-      if let Some(proc) =
-        sched.registry.lookup_mut(&pid)
-      {
+      if let Some(proc) = sched.registry.lookup_mut(&pid) {
         proc.priority = child_spec.priority;
       }
       sched.enqueue(pid);
@@ -119,26 +110,14 @@ impl Supervisor {
     }
 
     // Find the index of the dead child
-    let idx = match self
-      .children
-      .iter()
-      .position(|c| c.pid == pid)
-    {
+    let idx = match self.children.iter().position(|c| c.pid == pid) {
       Some(i) => i,
       None => return,
     };
 
-    let should_restart = match self.children[idx]
-      .spec
-      .restart
-    {
+    let should_restart = match self.children[idx].spec.restart {
       ChildRestart::Permanent => true,
-      ChildRestart::Transient => {
-        !matches!(
-          reason,
-          Reason::Normal | Reason::Shutdown
-        )
-      }
+      ChildRestart::Transient => !matches!(reason, Reason::Normal | Reason::Shutdown),
       ChildRestart::Temporary => false,
     };
 
@@ -182,66 +161,45 @@ impl Supervisor {
     let now = Instant::now();
     self.restart_timestamps.push(now);
 
-    let window = std::time::Duration::from_secs(
-      self.max_seconds as u64,
-    );
+    let window = std::time::Duration::from_secs(self.max_seconds as u64);
     self
       .restart_timestamps
       .retain(|t| now.duration_since(*t) <= window);
 
-    self.restart_timestamps.len() as u32
-      > self.max_restarts
+    self.restart_timestamps.len() as u32 > self.max_restarts
   }
 
   /// OneForOne: restart only the dead child at idx.
-  fn restart_one(
-    &mut self,
-    sched: &mut AgentScheduler,
-    idx: usize,
-  ) {
+  fn restart_one(&mut self, sched: &mut AgentScheduler, idx: usize) {
     let dead = self.children.remove(idx);
     // Dead child is already terminated — don't call
     // terminate_process again (avoids duplicate exit
     // notifications to linked processes).
-    if let Some(new) =
-      self.spawn_child(sched, &dead.spec)
-    {
+    if let Some(new) = self.spawn_child(sched, &dead.spec) {
       self.children.insert(idx, new);
     }
   }
 
   /// OneForAll: terminate all children and restart
   /// them all from their specs.
-  fn restart_all(
-    &mut self,
-    sched: &mut AgentScheduler,
-    dead_idx: usize,
-  ) {
+  fn restart_all(&mut self, sched: &mut AgentScheduler, dead_idx: usize) {
     let dead_pid = self.children[dead_idx].pid;
 
     // Collect specs before draining children
-    let specs: Vec<ChildSpec> = self
-      .children
-      .iter()
-      .map(|c| c.spec.clone_spec())
-      .collect();
+    let specs: Vec<ChildSpec> =
+      self.children.iter().map(|c| c.spec.clone_spec()).collect();
 
     // Terminate all current children except the
     // already-dead one
     for child in self.children.drain(..) {
       if child.pid != dead_pid {
-        sched.terminate_process(
-          child.pid,
-          Reason::Shutdown,
-        );
+        sched.terminate_process(child.pid, Reason::Shutdown);
       }
     }
 
     // Respawn all from specs
     for spec in specs {
-      if let Some(new) =
-        self.spawn_child(sched, &spec)
-      {
+      if let Some(new) = self.spawn_child(sched, &spec) {
         self.children.push(new);
       }
     }
@@ -249,38 +207,27 @@ impl Supervisor {
 
   /// RestForOne: terminate children after the dead one
   /// (inclusive), then restart those.
-  fn restart_rest(
-    &mut self,
-    sched: &mut AgentScheduler,
-    dead_idx: usize,
-  ) {
+  fn restart_rest(&mut self, sched: &mut AgentScheduler, dead_idx: usize) {
     let dead_pid = self.children[dead_idx].pid;
 
     // Collect specs for children from dead_idx onward
-    let specs: Vec<ChildSpec> = self.children
-      [dead_idx..]
+    let specs: Vec<ChildSpec> = self.children[dead_idx..]
       .iter()
       .map(|c| c.spec.clone_spec())
       .collect();
 
     // Terminate and remove from dead_idx onward,
     // skipping the already-dead child
-    let rest: Vec<RunningChild> =
-      self.children.drain(dead_idx..).collect();
+    let rest: Vec<RunningChild> = self.children.drain(dead_idx..).collect();
     for child in rest {
       if child.pid != dead_pid {
-        sched.terminate_process(
-          child.pid,
-          Reason::Shutdown,
-        );
+        sched.terminate_process(child.pid, Reason::Shutdown);
       }
     }
 
     // Respawn the collected specs
     for spec in specs {
-      if let Some(new) =
-        self.spawn_child(sched, &spec)
-      {
+      if let Some(new) = self.spawn_child(sched, &spec) {
         self.children.push(new);
       }
     }
@@ -297,9 +244,7 @@ impl Supervisor {
       .registry
       .spawn(spec.behavior.clone(), spec.args.clone())
       .ok()?;
-    if let Some(proc) =
-      sched.registry.lookup_mut(&pid)
-    {
+    if let Some(proc) = sched.registry.lookup_mut(&pid) {
       proc.priority = spec.priority;
     }
     sched.enqueue(pid);

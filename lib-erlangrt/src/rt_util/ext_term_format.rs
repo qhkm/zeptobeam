@@ -107,7 +107,8 @@ pub fn decode_naked(r: &mut BinaryReader, hp: &mut dyn THeap) -> RtResult<Term> 
     }
 
     _ => {
-      let msg = format!("Don't know how to decode ETF value tag 0x{term_tag:x} ({term_tag})");
+      let msg =
+        format!("Don't know how to decode ETF value tag 0x{term_tag:x} ({term_tag})");
       fail(msg)
     }
   }

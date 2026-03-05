@@ -124,7 +124,7 @@ impl Term {
   #[inline]
   pub fn is_register_float(self) -> bool {
     self.is_special_of_type(SpecialTag::REG)
-        && self.get_reg_tag() == SpecialReg::REG_FLOAT
+      && self.get_reg_tag() == SpecialReg::REG_FLOAT
   }
 
   /// For register special, retrieve tag bits which are stored in the special value

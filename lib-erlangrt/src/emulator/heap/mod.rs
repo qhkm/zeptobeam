@@ -42,7 +42,11 @@ pub fn allocate_cons(hp: &mut dyn THeap) -> RtResult<*mut boxed::Cons> {
 }
 
 #[inline]
-pub fn heap_alloc<T>(hp: &mut dyn THeap, sz: SizeWords, fill: AllocInit) -> RtResult<*mut T> {
+pub fn heap_alloc<T>(
+  hp: &mut dyn THeap,
+  sz: SizeWords,
+  fill: AllocInit,
+) -> RtResult<*mut T> {
   match hp.alloc(sz, fill) {
     Ok(x) => Ok(x as *mut T),
     Err(y) => Err(y),

@@ -36,8 +36,8 @@ struct ModuleGenerations {
 pub enum MFALookupResult {
   FoundBeamCode(CodePtr),
   FoundBif(NativeFn),
-  /* TODO: also NIF?
-   * FoundNif(?), */
+  // TODO: also NIF?
+  // FoundNif(?),
 }
 
 pub struct CodeServer {
@@ -161,7 +161,11 @@ impl CodeServer {
       Err(_e) => {
         let mod_str = atom::to_str(mfarity.m)?;
         let fun_str = atom::to_str(mfarity.f)?;
-        let msg = format!("{}Func undef: {mod_str}:{fun_str}/{}", module(), mfarity.arity);
+        let msg = format!(
+          "{}Func undef: {mod_str}:{fun_str}/{}",
+          module(),
+          mfarity.arity
+        );
         Err(RtErr::FunctionNotFound(msg))
       }
     }
@@ -198,7 +202,10 @@ impl CodeServer {
 }
 
 /// Iterate through the search path list and try to find a file
-fn first_exists_in_search_path(search_paths: &[String], filename: &str) -> Option<PathBuf> {
+fn first_exists_in_search_path(
+  search_paths: &[String],
+  filename: &str,
+) -> Option<PathBuf> {
   for each_search_path in search_paths {
     let full_path = format!("{each_search_path}/{filename}.beam");
     let p = Path::new(&full_path);

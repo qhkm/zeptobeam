@@ -1,6 +1,10 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+  sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+  },
+  time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -44,9 +48,17 @@ pub enum Message {
 /// spawn notifications).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemMsg {
-  Exit { from: u64, reason: Reason },
-  IoResponse { correlation_id: u64, result: IoResult },
-  SpawnResult { child_pid: u64 },
+  Exit {
+    from: u64,
+    reason: Reason,
+  },
+  IoResponse {
+    correlation_id: u64,
+    result: IoResult,
+  },
+  SpawnResult {
+    child_pid: u64,
+  },
 }
 
 /// Reason for process termination.
@@ -69,7 +81,10 @@ pub enum IoResult {
 /// to direct the scheduler.
 pub enum Action {
   Continue,
-  Send { to: AgentPid, msg: Message },
+  Send {
+    to: AgentPid,
+    msg: Message,
+  },
   IoRequest(IoOp),
   Spawn {
     behavior: Arc<dyn AgentBehavior>,
@@ -99,26 +114,15 @@ pub enum IoOp {
 /// Implementations must be Send + Sync for
 /// cross-thread sharing via Arc.
 pub trait AgentBehavior: Send + Sync {
-  fn init(
-    &self,
-    args: serde_json::Value,
-  ) -> Result<Box<dyn AgentState>, Reason>;
-  fn handle_message(
-    &self,
-    msg: Message,
-    state: &mut dyn AgentState,
-  ) -> Action;
+  fn init(&self, args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason>;
+  fn handle_message(&self, msg: Message, state: &mut dyn AgentState) -> Action;
   fn handle_exit(
     &self,
     from: AgentPid,
     reason: Reason,
     state: &mut dyn AgentState,
   ) -> Action;
-  fn terminate(
-    &self,
-    reason: Reason,
-    state: &mut dyn AgentState,
-  );
+  fn terminate(&self, reason: Reason, state: &mut dyn AgentState);
 }
 
 /// Mutable state owned by an agent process.

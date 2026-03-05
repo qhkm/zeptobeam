@@ -11,7 +11,11 @@ fn generic_fail<T>(err_atom: Term) -> RtResult<T> {
 }
 
 #[inline]
-pub fn generic_tuple2_fail<T>(err_atom: Term, val: Term, hp: &mut dyn THeap) -> RtResult<T> {
+pub fn generic_tuple2_fail<T>(
+  err_atom: Term,
+  val: Term,
+  hp: &mut dyn THeap,
+) -> RtResult<T> {
   Err(RtErr::Exception(
     ExceptionType::Error,
     tuple2(hp, err_atom, val)?,

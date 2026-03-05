@@ -39,12 +39,8 @@ impl<'a> ModFunArgs<'a> {
 
   pub fn get_arity(&self) -> RtResult<usize> {
     match self.args {
-      Args::List(lst) => {
-        cons::list_length(lst)
-      }
-      Args::Slice(s) => {
-        Ok(s.len())
-      }
+      Args::List(lst) => cons::list_length(lst),
+      Args::Slice(s) => Ok(s.len()),
     }
     // panic!("Can't find length for {:?}", self.args)
   }

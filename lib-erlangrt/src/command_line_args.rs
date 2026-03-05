@@ -49,14 +49,14 @@ impl ErlStartArgs {
 
   pub fn add_start(&mut self, data: &[&str]) {
     self
-        .start
-        .push(data.iter().map(|s| s.to_string()).collect())
+      .start
+      .push(data.iter().map(|s| s.to_string()).collect())
   }
 
   /// Copy args from any string iterator source
   pub fn populate_with<'a, ITER>(&'a mut self, iter: ITER)
-    where
-        ITER: Iterator<Item=&'a String>,
+  where
+    ITER: Iterator<Item = &'a String>,
   {
     for s in iter {
       self.add_arg1(s.as_ref())

@@ -9,7 +9,7 @@ use crate::{
     process::Process,
     runtime_ctx::{
       call_native_fun::{self, find_and_call_native_fun},
-      RuntimeContext, ReturnResult,
+      ReturnResult, RuntimeContext,
     },
     vm::VM,
   },
@@ -33,7 +33,11 @@ define_opcode!(_vm, ctx, _curr_p,
 
 impl OpcodeCall {
   #[inline]
-  pub fn call(ctx: &mut RuntimeContext, arity: usize, dst: Term) -> RtResult<DispatchResult> {
+  pub fn call(
+    ctx: &mut RuntimeContext,
+    arity: usize,
+    dst: Term,
+  ) -> RtResult<DispatchResult> {
     ctx.live = arity;
     debug_assert!(dst.is_boxed(), "Call location must be a box (have {})", dst);
 

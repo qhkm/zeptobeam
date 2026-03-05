@@ -27,5 +27,8 @@ pub type NativeFn =
 #[inline]
 pub fn assert_arity(fn_name: &str, have_arity: usize, args: &[Term]) {
   let have_args = args.len();
-  debug_assert_eq!(have_arity, have_args, "{fn_name} arity is {have_arity}, called with {have_args} args");
+  debug_assert_eq!(
+    have_arity, have_args,
+    "{fn_name} arity is {have_arity}, called with {have_args} args"
+  );
 }

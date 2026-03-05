@@ -50,7 +50,7 @@ pub enum CompactTermError {
   YRegTag,
   LabelTag,
   CharacterTag,
-  //IntegerTag,
+  // IntegerTag,
   ExtendedTag(String),
 }
 

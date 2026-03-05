@@ -10,8 +10,7 @@ use crate::{
       trait_interface::TBoxed,
       BoxHeader, BOXTYPETAG_BIGINTEGER,
     },
-    classify,
-    *,
+    classify, *,
   },
 };
 

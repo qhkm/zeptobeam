@@ -1,11 +1,8 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use crate::agent_rt::process::*;
-use crate::agent_rt::registry::AgentRegistry;
-use crate::agent_rt::scheduler::AgentScheduler;
-use crate::agent_rt::types::*;
+use crate::agent_rt::{
+  process::*, registry::AgentRegistry, scheduler::AgentScheduler, types::*,
+};
 
 struct EchoState {
   received: Vec<Message>,
@@ -23,20 +20,13 @@ impl AgentState for EchoState {
 struct EchoBehavior;
 
 impl AgentBehavior for EchoBehavior {
-  fn init(
-    &self,
-    _args: serde_json::Value,
-  ) -> Result<Box<dyn AgentState>, Reason> {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
     Ok(Box::new(EchoState {
       received: Vec::new(),
     }))
   }
 
-  fn handle_message(
-    &self,
-    msg: Message,
-    state: &mut dyn AgentState,
-  ) -> Action {
+  fn handle_message(&self, msg: Message, state: &mut dyn AgentState) -> Action {
     let s = state.as_any_mut().downcast_mut::<EchoState>().unwrap();
     s.received.push(msg);
     Action::Continue
@@ -51,12 +41,7 @@ impl AgentBehavior for EchoBehavior {
     Action::Continue
   }
 
-  fn terminate(
-    &self,
-    _reason: Reason,
-    _state: &mut dyn AgentState,
-  ) {
-  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
 }
 
 struct ExitAwareState {
@@ -76,25 +61,15 @@ impl AgentState for ExitAwareState {
 struct ExitAwareBehavior;
 
 impl AgentBehavior for ExitAwareBehavior {
-  fn init(
-    &self,
-    _args: serde_json::Value,
-  ) -> Result<Box<dyn AgentState>, Reason> {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
     Ok(Box::new(ExitAwareState {
       message_count: 0,
       exit_count: 0,
     }))
   }
 
-  fn handle_message(
-    &self,
-    _msg: Message,
-    state: &mut dyn AgentState,
-  ) -> Action {
-    let s = state
-      .as_any_mut()
-      .downcast_mut::<ExitAwareState>()
-      .unwrap();
+  fn handle_message(&self, _msg: Message, state: &mut dyn AgentState) -> Action {
+    let s = state.as_any_mut().downcast_mut::<ExitAwareState>().unwrap();
     s.message_count += 1;
     Action::Continue
   }
@@ -105,20 +80,12 @@ impl AgentBehavior for ExitAwareBehavior {
     _reason: Reason,
     state: &mut dyn AgentState,
   ) -> Action {
-    let s = state
-      .as_any_mut()
-      .downcast_mut::<ExitAwareState>()
-      .unwrap();
+    let s = state.as_any_mut().downcast_mut::<ExitAwareState>().unwrap();
     s.exit_count += 1;
     Action::Continue
   }
 
-  fn terminate(
-    &self,
-    _reason: Reason,
-    _state: &mut dyn AgentState,
-  ) {
-  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
 }
 
 #[test]
@@ -140,8 +107,7 @@ fn test_agent_pid_increments() {
 #[test]
 fn test_agent_process_creation() {
   let behavior = Arc::new(EchoBehavior);
-  let proc =
-    AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
+  let proc = AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
   assert_eq!(proc.status, ProcessStatus::Runnable);
   assert!(!proc.has_messages());
   assert!(proc.links.is_empty());
@@ -151,8 +117,7 @@ fn test_agent_process_creation() {
 #[test]
 fn test_deliver_message() {
   let behavior = Arc::new(EchoBehavior);
-  let mut proc =
-    AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
+  let mut proc = AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
   assert!(!proc.has_messages());
 
   proc.deliver_message(Message::Text("hello".into()));
@@ -169,8 +134,7 @@ fn test_deliver_message() {
 #[test]
 fn test_deliver_message_wakes_waiting_process() {
   let behavior = Arc::new(EchoBehavior);
-  let mut proc =
-    AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
+  let mut proc = AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
   proc.status = ProcessStatus::Waiting;
 
   proc.deliver_message(Message::Text("wake up".into()));
@@ -180,24 +144,20 @@ fn test_deliver_message_wakes_waiting_process() {
 #[test]
 fn test_handle_message_stores_in_state() {
   let behavior = Arc::new(EchoBehavior);
-  let mut proc =
-    AgentProcess::new(behavior.clone(), serde_json::Value::Null)
-      .unwrap();
+  let mut proc = AgentProcess::new(behavior.clone(), serde_json::Value::Null).unwrap();
 
   let msg = Message::Text("test".into());
   let state = proc.state.as_mut().unwrap();
   let _action = behavior.handle_message(msg, state.as_mut());
 
-  let echo_state =
-    state.as_any().downcast_ref::<EchoState>().unwrap();
+  let echo_state = state.as_any().downcast_ref::<EchoState>().unwrap();
   assert_eq!(echo_state.received.len(), 1);
 }
 
 #[test]
 fn test_message_ordering_fifo() {
   let behavior = Arc::new(EchoBehavior);
-  let mut proc =
-    AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
+  let mut proc = AgentProcess::new(behavior, serde_json::Value::Null).unwrap();
 
   proc.deliver_message(Message::Text("first".into()));
   proc.deliver_message(Message::Text("second".into()));
@@ -223,8 +183,7 @@ fn test_message_ordering_fifo() {
 fn test_registry_spawn_returns_pid() {
   let mut reg = AgentRegistry::new();
   let behavior = Arc::new(EchoBehavior);
-  let pid =
-    reg.spawn(behavior, serde_json::Value::Null).unwrap();
+  let pid = reg.spawn(behavior, serde_json::Value::Null).unwrap();
   assert!(
     pid.raw() >= 0x8000_0000,
     "Spawned pid should be in the agent range"
@@ -235,8 +194,7 @@ fn test_registry_spawn_returns_pid() {
 fn test_registry_lookup_existing() {
   let mut reg = AgentRegistry::new();
   let behavior = Arc::new(EchoBehavior);
-  let pid =
-    reg.spawn(behavior, serde_json::Value::Null).unwrap();
+  let pid = reg.spawn(behavior, serde_json::Value::Null).unwrap();
   let proc = reg.lookup(&pid);
   assert!(proc.is_some());
   assert_eq!(proc.unwrap().pid, pid);
@@ -253,8 +211,7 @@ fn test_registry_lookup_missing() {
 fn test_registry_remove() {
   let mut reg = AgentRegistry::new();
   let behavior = Arc::new(EchoBehavior);
-  let pid =
-    reg.spawn(behavior, serde_json::Value::Null).unwrap();
+  let pid = reg.spawn(behavior, serde_json::Value::Null).unwrap();
   assert!(reg.lookup(&pid).is_some());
 
   let removed = reg.remove(&pid);
@@ -266,8 +223,7 @@ fn test_registry_remove() {
 fn test_registry_register_name() {
   let mut reg = AgentRegistry::new();
   let behavior = Arc::new(EchoBehavior);
-  let pid =
-    reg.spawn(behavior, serde_json::Value::Null).unwrap();
+  let pid = reg.spawn(behavior, serde_json::Value::Null).unwrap();
 
   reg.register_name("echo_server", pid).unwrap();
   let found = reg.lookup_name("echo_server");
@@ -309,9 +265,7 @@ fn test_scheduler_dispatches_message() {
     .registry
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
-  sched
-    .send(pid, Message::Text("hello".into()))
-    .unwrap();
+  sched.send(pid, Message::Text("hello".into())).unwrap();
   sched.enqueue(pid);
   assert!(sched.tick());
 }
@@ -362,14 +316,9 @@ fn test_scheduler_skips_stale_queue_entries() {
 
   let waiting_pid = sched
     .registry
-    .spawn(
-      behavior.clone(),
-      serde_json::Value::Null,
-    )
+    .spawn(behavior.clone(), serde_json::Value::Null)
     .unwrap();
-  if let Some(proc) =
-    sched.registry.lookup_mut(&waiting_pid)
-  {
+  if let Some(proc) = sched.registry.lookup_mut(&waiting_pid) {
     proc.status = ProcessStatus::Waiting;
   }
   sched.enqueue(waiting_pid);
@@ -379,10 +328,7 @@ fn test_scheduler_skips_stale_queue_entries() {
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
   sched
-    .send(
-      runnable_pid,
-      Message::Text("run".into()),
-    )
+    .send(runnable_pid, Message::Text("run".into()))
     .unwrap();
   sched.enqueue(runnable_pid);
 
@@ -405,10 +351,7 @@ fn test_scheduler_exit_handler_is_invoked() {
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
 
-  let seen = Rc::new(RefCell::new(None::<(
-    u64,
-    String,
-  )>));
+  let seen = Rc::new(RefCell::new(None::<(u64, String)>));
   let seen_closure = Rc::clone(&seen);
   sched.set_exit_handler(move |_sched, exited, reason| {
     let reason_label = match reason {
@@ -416,18 +359,13 @@ fn test_scheduler_exit_handler_is_invoked() {
       Reason::Shutdown => "shutdown".to_string(),
       Reason::Custom(s) => s,
     };
-    *seen_closure.borrow_mut() =
-      Some((exited.raw(), reason_label));
+    *seen_closure.borrow_mut() = Some((exited.raw(), reason_label));
   });
 
-  sched.terminate_process(
-    pid,
-    Reason::Custom("boom".into()),
-  );
+  sched.terminate_process(pid, Reason::Custom("boom".into()));
 
   let seen = seen.borrow();
-  let (seen_pid, seen_reason) =
-    seen.as_ref().expect("exit handler should be called");
+  let (seen_pid, seen_reason) = seen.as_ref().expect("exit handler should be called");
   assert_eq!(*seen_pid, pid.raw());
   assert_eq!(seen_reason, "boom");
 }
@@ -442,10 +380,7 @@ fn test_scheduler_process_yields_after_reductions() {
     .unwrap();
   for i in 0..500 {
     sched
-      .send(
-        pid,
-        Message::Text(format!("msg_{}", i)),
-      )
+      .send(pid, Message::Text(format!("msg_{}", i)))
       .unwrap();
   }
   sched.enqueue(pid);
@@ -474,9 +409,7 @@ fn test_scheduler_waiting_process_wakes_on_message() {
     ProcessStatus::Waiting
   );
 
-  sched
-    .send(pid, Message::Text("wake".into()))
-    .unwrap();
+  sched.send(pid, Message::Text("wake".into())).unwrap();
   assert_eq!(
     sched.registry.lookup(&pid).unwrap().status,
     ProcessStatus::Runnable
@@ -490,14 +423,9 @@ fn test_scheduler_high_priority_runs_first() {
 
   let low_pid = sched
     .registry
-    .spawn(
-      behavior.clone(),
-      serde_json::Value::Null,
-    )
+    .spawn(behavior.clone(), serde_json::Value::Null)
     .unwrap();
-  if let Some(p) =
-    sched.registry.lookup_mut(&low_pid)
-  {
+  if let Some(p) = sched.registry.lookup_mut(&low_pid) {
     p.priority = Priority::Low;
   }
 
@@ -505,24 +433,16 @@ fn test_scheduler_high_priority_runs_first() {
     .registry
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
-  if let Some(p) =
-    sched.registry.lookup_mut(&high_pid)
-  {
+  if let Some(p) = sched.registry.lookup_mut(&high_pid) {
     p.priority = Priority::High;
   }
 
   // Send messages to both
   sched
-    .send(
-      low_pid,
-      Message::Text("low_msg".into()),
-    )
+    .send(low_pid, Message::Text("low_msg".into()))
     .unwrap();
   sched
-    .send(
-      high_pid,
-      Message::Text("high_msg".into()),
-    )
+    .send(high_pid, Message::Text("high_msg".into()))
     .unwrap();
 
   // Enqueue low first, then high
@@ -534,8 +454,7 @@ fn test_scheduler_high_priority_runs_first() {
 
   // high_pid should have consumed its message
   // (now Waiting with empty mailbox)
-  let high_proc =
-    sched.registry.lookup(&high_pid).unwrap();
+  let high_proc = sched.registry.lookup(&high_pid).unwrap();
   assert_eq!(
     high_proc.status,
     ProcessStatus::Waiting,
@@ -544,8 +463,7 @@ fn test_scheduler_high_priority_runs_first() {
   assert!(!high_proc.has_messages());
 
   // low_pid should still have its message
-  let low_proc =
-    sched.registry.lookup(&low_pid).unwrap();
+  let low_proc = sched.registry.lookup(&low_pid).unwrap();
   assert!(
     low_proc.has_messages(),
     "Low priority should not have run yet"
@@ -573,10 +491,7 @@ fn test_scheduler_terminate_notifies_links() {
 
   let pid_a = sched
     .registry
-    .spawn(
-      behavior.clone(),
-      serde_json::Value::Null,
-    )
+    .spawn(behavior.clone(), serde_json::Value::Null)
     .unwrap();
   let pid_b = sched
     .registry
@@ -585,22 +500,17 @@ fn test_scheduler_terminate_notifies_links() {
 
   // Link a -> b, set trap_exit so b receives
   // the Exit as a message instead of cascading
-  if let Some(proc_a) =
-    sched.registry.lookup_mut(&pid_a)
-  {
+  if let Some(proc_a) = sched.registry.lookup_mut(&pid_a) {
     proc_a.links.push(pid_b);
   }
-  if let Some(proc_b) =
-    sched.registry.lookup_mut(&pid_b)
-  {
+  if let Some(proc_b) = sched.registry.lookup_mut(&pid_b) {
     proc_b.trap_exit = true;
   }
 
   // Terminate a, b should get Exit message
   sched.terminate_process(pid_a, Reason::Normal);
 
-  let proc_b =
-    sched.registry.lookup(&pid_b).unwrap();
+  let proc_b = sched.registry.lookup(&pid_b).unwrap();
   assert!(
     proc_b.has_messages(),
     "Linked process should receive Exit message"
@@ -611,8 +521,7 @@ fn test_scheduler_terminate_notifies_links() {
 fn test_scheduler_send_to_missing_process_errors() {
   let mut sched = AgentScheduler::new();
   let fake_pid = AgentPid::new();
-  let result = sched
-    .send(fake_pid, Message::Text("oops".into()));
+  let result = sched.send(fake_pid, Message::Text("oops".into()));
   assert!(result.is_err());
 }
 
@@ -628,10 +537,7 @@ fn test_scheduler_multiple_ticks_drain_mailbox() {
   // Send exactly 5 messages
   for i in 0..5 {
     sched
-      .send(
-        pid,
-        Message::Text(format!("msg_{}", i)),
-      )
+      .send(pid, Message::Text(format!("msg_{}", i)))
       .unwrap();
   }
   sched.enqueue(pid);
@@ -652,14 +558,12 @@ fn test_scheduler_multiple_ticks_drain_mailbox() {
 
 #[test]
 fn test_bridge_creation() {
-  let (_handle, _worker) =
-    crate::agent_rt::bridge::create_bridge();
+  let (_handle, _worker) = crate::agent_rt::bridge::create_bridge();
 }
 
 #[test]
 fn test_bridge_submit_returns_correlation_id() {
-  let (mut handle, _worker) =
-    crate::agent_rt::bridge::create_bridge();
+  let (mut handle, _worker) = crate::agent_rt::bridge::create_bridge();
   let pid = AgentPid::new();
   let op = IoOp::Timer {
     duration: std::time::Duration::from_millis(100),
@@ -675,19 +579,16 @@ fn test_bridge_submit_returns_correlation_id() {
 
 #[test]
 fn test_bridge_drain_empty() {
-  let (handle, _worker) =
-    crate::agent_rt::bridge::create_bridge();
+  let (handle, _worker) = crate::agent_rt::bridge::create_bridge();
   assert!(handle.drain_responses().is_empty());
 }
 
 #[tokio::test]
 async fn test_bridge_roundtrip_timer() {
-  let (mut handle, worker) =
-    crate::agent_rt::bridge::create_bridge();
+  let (mut handle, worker) = crate::agent_rt::bridge::create_bridge();
   let pid = AgentPid::new();
 
-  let worker_handle =
-    tokio::spawn(async move { worker.run().await });
+  let worker_handle = tokio::spawn(async move { worker.run().await });
 
   let _corr_id = handle
     .submit(
@@ -699,10 +600,7 @@ async fn test_bridge_roundtrip_timer() {
     .unwrap();
 
   // Wait for response
-  tokio::time::sleep(
-    std::time::Duration::from_millis(200),
-  )
-  .await;
+  tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
   let responses = handle.drain_responses();
   assert_eq!(responses.len(), 1);
@@ -740,7 +638,7 @@ fn test_supervisor_starts_children() {
         behavior: behavior.clone(),
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-      
+
         priority: Priority::Normal,
       },
       ChildSpec {
@@ -748,14 +646,13 @@ fn test_supervisor_starts_children() {
         behavior,
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-      
+
         priority: Priority::Normal,
       },
     ],
   };
   let mut sched = AgentScheduler::new();
-  let sup = Supervisor::start(&mut sched, spec)
-    .unwrap();
+  let sup = Supervisor::start(&mut sched, spec).unwrap();
   assert_eq!(sup.children.len(), 2);
   assert_eq!(sched.registry.count(), 2);
 }
@@ -772,21 +669,16 @@ fn test_one_for_one_restart() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Permanent,
-    
+
       priority: Priority::Normal,
     }],
   };
   let mut sched = AgentScheduler::new();
-  let mut sup = Supervisor::start(&mut sched, spec)
-    .unwrap();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
   let old_pid = sup.children[0].pid;
 
   // Simulate crash
-  sup.handle_child_exit(
-    &mut sched,
-    old_pid,
-    Reason::Custom("crash".into()),
-  );
+  sup.handle_child_exit(&mut sched, old_pid, Reason::Custom("crash".into()));
 
   assert_eq!(sup.children.len(), 1);
   assert_ne!(sup.children[0].pid, old_pid);
@@ -805,20 +697,15 @@ fn test_transient_not_restarted_on_normal_exit() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Transient,
-    
+
       priority: Priority::Normal,
     }],
   };
   let mut sched = AgentScheduler::new();
-  let mut sup = Supervisor::start(&mut sched, spec)
-    .unwrap();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
   let pid = sup.children[0].pid;
 
-  sup.handle_child_exit(
-    &mut sched,
-    pid,
-    Reason::Normal,
-  );
+  sup.handle_child_exit(&mut sched, pid, Reason::Normal);
   assert!(sup.children.is_empty());
 }
 
@@ -834,20 +721,15 @@ fn test_temporary_never_restarted() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Temporary,
-    
+
       priority: Priority::Normal,
     }],
   };
   let mut sched = AgentScheduler::new();
-  let mut sup = Supervisor::start(&mut sched, spec)
-    .unwrap();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
   let pid = sup.children[0].pid;
 
-  sup.handle_child_exit(
-    &mut sched,
-    pid,
-    Reason::Custom("crash".into()),
-  );
+  sup.handle_child_exit(&mut sched, pid, Reason::Custom("crash".into()));
   assert!(sup.children.is_empty());
 }
 
@@ -863,23 +745,18 @@ fn test_max_restarts_exceeded() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Permanent,
-    
+
       priority: Priority::Normal,
     }],
   };
   let mut sched = AgentScheduler::new();
-  let mut sup = Supervisor::start(&mut sched, spec)
-    .unwrap();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
 
   // Crash 3 times — exceeds max_restarts of 2
   for _ in 0..3 {
     if let Some(child) = sup.children.first() {
       let pid = child.pid;
-      sup.handle_child_exit(
-        &mut sched,
-        pid,
-        Reason::Custom("crash".into()),
-      );
+      sup.handle_child_exit(&mut sched, pid, Reason::Custom("crash".into()));
     }
   }
   assert!(sup.is_shutdown());
@@ -898,7 +775,7 @@ fn test_one_for_all_restarts_all() {
         behavior: behavior.clone(),
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-      
+
         priority: Priority::Normal,
       },
       ChildSpec {
@@ -906,31 +783,22 @@ fn test_one_for_all_restarts_all() {
         behavior,
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-      
+
         priority: Priority::Normal,
       },
     ],
   };
   let mut sched = AgentScheduler::new();
-  let mut sup = Supervisor::start(&mut sched, spec)
-    .unwrap();
-  let old_pids: Vec<_> =
-    sup.children.iter().map(|c| c.pid).collect();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
+  let old_pids: Vec<_> = sup.children.iter().map(|c| c.pid).collect();
 
   // Kill first child
-  sup.handle_child_exit(
-    &mut sched,
-    old_pids[0],
-    Reason::Custom("crash".into()),
-  );
+  sup.handle_child_exit(&mut sched, old_pids[0], Reason::Custom("crash".into()));
 
   // Both should be restarted with new PIDs
   assert_eq!(sup.children.len(), 2);
-  let new_pids: Vec<_> =
-    sup.children.iter().map(|c| c.pid).collect();
-  assert!(
-    new_pids.iter().all(|p| !old_pids.contains(p))
-  );
+  let new_pids: Vec<_> = sup.children.iter().map(|c| c.pid).collect();
+  assert!(new_pids.iter().all(|p| !old_pids.contains(p)));
 }
 
 // --- Bug C1: trap_exit cascading death tests ---
@@ -942,10 +810,7 @@ fn test_link_cascades_death_without_trap_exit() {
 
   let pid_a = sched
     .registry
-    .spawn(
-      behavior.clone(),
-      serde_json::Value::Null,
-    )
+    .spawn(behavior.clone(), serde_json::Value::Null)
     .unwrap();
   let pid_b = sched
     .registry
@@ -953,17 +818,12 @@ fn test_link_cascades_death_without_trap_exit() {
     .unwrap();
 
   // Link a -> b, both have trap_exit=false
-  if let Some(proc_a) =
-    sched.registry.lookup_mut(&pid_a)
-  {
+  if let Some(proc_a) = sched.registry.lookup_mut(&pid_a) {
     proc_a.links.push(pid_b);
   }
 
   // Kill a with a non-normal reason
-  sched.terminate_process(
-    pid_a,
-    Reason::Custom("crash".into()),
-  );
+  sched.terminate_process(pid_a, Reason::Custom("crash".into()));
 
   // Both should be gone from registry
   assert!(
@@ -983,10 +843,7 @@ fn test_link_does_not_cascade_on_normal_exit() {
 
   let pid_a = sched
     .registry
-    .spawn(
-      behavior.clone(),
-      serde_json::Value::Null,
-    )
+    .spawn(behavior.clone(), serde_json::Value::Null)
     .unwrap();
   let pid_b = sched
     .registry
@@ -994,9 +851,7 @@ fn test_link_does_not_cascade_on_normal_exit() {
     .unwrap();
 
   // Link a -> b, both have trap_exit=false
-  if let Some(proc_a) =
-    sched.registry.lookup_mut(&pid_a)
-  {
+  if let Some(proc_a) = sched.registry.lookup_mut(&pid_a) {
     proc_a.links.push(pid_b);
   }
 
@@ -1013,8 +868,7 @@ fn test_link_does_not_cascade_on_normal_exit() {
     "pid_b should still be alive on normal exit"
   );
   // b should have no messages (normal + no trap)
-  let proc_b =
-    sched.registry.lookup(&pid_b).unwrap();
+  let proc_b = sched.registry.lookup(&pid_b).unwrap();
   assert!(
     !proc_b.has_messages(),
     "No message delivered for normal exit \
@@ -1023,17 +877,13 @@ fn test_link_does_not_cascade_on_normal_exit() {
 }
 
 #[test]
-fn test_trap_exit_delivers_message_instead_of_cascade()
-{
+fn test_trap_exit_delivers_message_instead_of_cascade() {
   let mut sched = AgentScheduler::new();
   let behavior = Arc::new(EchoBehavior);
 
   let pid_a = sched
     .registry
-    .spawn(
-      behavior.clone(),
-      serde_json::Value::Null,
-    )
+    .spawn(behavior.clone(), serde_json::Value::Null)
     .unwrap();
   let pid_b = sched
     .registry
@@ -1041,42 +891,30 @@ fn test_trap_exit_delivers_message_instead_of_cascade()
     .unwrap();
 
   // Link a -> b, set trap_exit on b
-  if let Some(proc_a) =
-    sched.registry.lookup_mut(&pid_a)
-  {
+  if let Some(proc_a) = sched.registry.lookup_mut(&pid_a) {
     proc_a.links.push(pid_b);
   }
-  if let Some(proc_b) =
-    sched.registry.lookup_mut(&pid_b)
-  {
+  if let Some(proc_b) = sched.registry.lookup_mut(&pid_b) {
     proc_b.trap_exit = true;
   }
 
   // Kill a with crash reason
-  sched.terminate_process(
-    pid_a,
-    Reason::Custom("crash".into()),
-  );
+  sched.terminate_process(pid_a, Reason::Custom("crash".into()));
 
   // a is gone
   assert!(sched.registry.lookup(&pid_a).is_none());
 
   // b should still be alive with an Exit message
-  let proc_b =
-    sched.registry.lookup(&pid_b).unwrap();
+  let proc_b = sched.registry.lookup(&pid_b).unwrap();
   assert!(
     proc_b.has_messages(),
     "trap_exit process should receive Exit msg"
   );
   // Verify it's an Exit system message
-  let proc_b =
-    sched.registry.lookup_mut(&pid_b).unwrap();
+  let proc_b = sched.registry.lookup_mut(&pid_b).unwrap();
   let msg = proc_b.next_message().unwrap();
   match msg {
-    Message::System(SystemMsg::Exit {
-      from,
-      reason,
-    }) => {
+    Message::System(SystemMsg::Exit { from, reason }) => {
       assert_eq!(from, pid_a.raw());
       match reason {
         Reason::Custom(s) => {
@@ -1109,18 +947,11 @@ impl AgentState for SendState {
 }
 
 impl AgentBehavior for SendBehavior {
-  fn init(
-    &self,
-    _args: serde_json::Value,
-  ) -> Result<Box<dyn AgentState>, Reason> {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
     Ok(Box::new(SendState))
   }
 
-  fn handle_message(
-    &self,
-    _msg: Message,
-    _state: &mut dyn AgentState,
-  ) -> Action {
+  fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
     Action::Send {
       to: self.target,
       msg: Message::Text("reply".into()),
@@ -1136,12 +967,7 @@ impl AgentBehavior for SendBehavior {
     Action::Continue
   }
 
-  fn terminate(
-    &self,
-    _reason: Reason,
-    _state: &mut dyn AgentState,
-  ) {
-  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
 }
 
 #[test]
@@ -1149,14 +975,10 @@ fn test_send_action_costs_reductions() {
   // Create a target process to receive sends
   let mut sched = AgentScheduler::new();
   let echo = Arc::new(EchoBehavior);
-  let target = sched
-    .registry
-    .spawn(echo, serde_json::Value::Null)
-    .unwrap();
+  let target = sched.registry.spawn(echo, serde_json::Value::Null).unwrap();
 
   // Create a sender that returns Send on every msg
-  let sender_behavior =
-    Arc::new(SendBehavior { target });
+  let sender_behavior = Arc::new(SendBehavior { target });
   let sender = sched
     .registry
     .spawn(sender_behavior, serde_json::Value::Null)
@@ -1165,10 +987,7 @@ fn test_send_action_costs_reductions() {
   // Give sender 10 messages
   for i in 0..10 {
     sched
-      .send(
-        sender,
-        Message::Text(format!("m{}", i)),
-      )
+      .send(sender, Message::Text(format!("m{}", i)))
       .unwrap();
   }
   sched.enqueue(sender);
@@ -1179,8 +998,7 @@ fn test_send_action_costs_reductions() {
   // floor(200/3) = 66 messages. All 10 should be
   // consumed. Check that reductions were actually
   // deducted: 200 - 10*3 = 170.
-  let proc =
-    sched.registry.lookup(&sender).unwrap();
+  let proc = sched.registry.lookup(&sender).unwrap();
   assert_eq!(
     proc.reductions, 170,
     "Each Send should cost 3 reductions total \
@@ -1202,20 +1020,15 @@ fn test_transient_not_restarted_on_shutdown() {
       behavior,
       args: serde_json::Value::Null,
       restart: ChildRestart::Transient,
-    
+
       priority: Priority::Normal,
     }],
   };
   let mut sched = AgentScheduler::new();
-  let mut sup =
-    Supervisor::start(&mut sched, spec).unwrap();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
   let pid = sup.children[0].pid;
 
-  sup.handle_child_exit(
-    &mut sched,
-    pid,
-    Reason::Shutdown,
-  );
+  sup.handle_child_exit(&mut sched, pid, Reason::Shutdown);
   assert!(
     sup.children.is_empty(),
     "Transient should NOT restart on Shutdown"
@@ -1235,7 +1048,7 @@ fn test_rest_for_one_restarts_only_subsequent() {
         behavior: behavior.clone(),
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-      
+
         priority: Priority::Normal,
       },
       ChildSpec {
@@ -1243,7 +1056,7 @@ fn test_rest_for_one_restarts_only_subsequent() {
         behavior: behavior.clone(),
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-      
+
         priority: Priority::Normal,
       },
       ChildSpec {
@@ -1251,41 +1064,27 @@ fn test_rest_for_one_restarts_only_subsequent() {
         behavior,
         args: serde_json::Value::Null,
         restart: ChildRestart::Permanent,
-      
+
         priority: Priority::Normal,
       },
     ],
   };
   let mut sched = AgentScheduler::new();
-  let mut sup =
-    Supervisor::start(&mut sched, spec).unwrap();
+  let mut sup = Supervisor::start(&mut sched, spec).unwrap();
 
   let pid_a = sup.children[0].pid;
   let pid_b = sup.children[1].pid;
   let pid_c = sup.children[2].pid;
 
   // Kill child b — should restart b and c, leave a
-  sup.handle_child_exit(
-    &mut sched,
-    pid_b,
-    Reason::Custom("crash".into()),
-  );
+  sup.handle_child_exit(&mut sched, pid_b, Reason::Custom("crash".into()));
 
   assert_eq!(sup.children.len(), 3);
   // a should keep same PID
-  assert_eq!(
-    sup.children[0].pid, pid_a,
-    "Child a should be unchanged"
-  );
+  assert_eq!(sup.children[0].pid, pid_a, "Child a should be unchanged");
   // b and c should have new PIDs
-  assert_ne!(
-    sup.children[1].pid, pid_b,
-    "Child b should be restarted"
-  );
-  assert_ne!(
-    sup.children[2].pid, pid_c,
-    "Child c should be restarted"
-  );
+  assert_ne!(sup.children[1].pid, pid_b, "Child b should be restarted");
+  assert_ne!(sup.children[2].pid, pid_c, "Child c should be restarted");
 }
 
 // --- H6: Scheduler-bridge integration tests ---
@@ -1305,17 +1104,10 @@ impl AgentState for IoState {
 }
 
 impl AgentBehavior for IoBehavior {
-  fn init(
-    &self,
-    _args: serde_json::Value,
-  ) -> Result<Box<dyn AgentState>, Reason> {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
     Ok(Box::new(IoState))
   }
-  fn handle_message(
-    &self,
-    _msg: Message,
-    _state: &mut dyn AgentState,
-  ) -> Action {
+  fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
     Action::IoRequest(IoOp::Timer {
       duration: std::time::Duration::from_millis(10),
     })
@@ -1328,18 +1120,12 @@ impl AgentBehavior for IoBehavior {
   ) -> Action {
     Action::Continue
   }
-  fn terminate(
-    &self,
-    _reason: Reason,
-    _state: &mut dyn AgentState,
-  ) {
-  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
 }
 
 #[test]
 fn test_scheduler_with_bridge_submits_io_request() {
-  let (bridge_handle, _worker) =
-    crate::agent_rt::bridge::create_bridge();
+  let (bridge_handle, _worker) = crate::agent_rt::bridge::create_bridge();
   let mut sched = AgentScheduler::new();
   sched.set_bridge(bridge_handle);
 
@@ -1348,9 +1134,7 @@ fn test_scheduler_with_bridge_submits_io_request() {
     .registry
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
-  sched
-    .send(pid, Message::Text("trigger".into()))
-    .unwrap();
+  sched.send(pid, Message::Text("trigger".into())).unwrap();
   sched.enqueue(pid);
   sched.tick();
 
@@ -1370,9 +1154,7 @@ fn test_scheduler_without_bridge_io_still_waits() {
     .registry
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
-  sched
-    .send(pid, Message::Text("trigger".into()))
-    .unwrap();
+  sched.send(pid, Message::Text("trigger".into())).unwrap();
   sched.enqueue(pid);
   sched.tick();
 
@@ -1386,13 +1168,11 @@ fn test_scheduler_without_bridge_io_still_waits() {
 
 #[tokio::test]
 async fn test_scheduler_bridge_roundtrip() {
-  let (bridge_handle, worker) =
-    crate::agent_rt::bridge::create_bridge();
+  let (bridge_handle, worker) = crate::agent_rt::bridge::create_bridge();
   let mut sched = AgentScheduler::new();
   sched.set_bridge(bridge_handle);
 
-  let worker_handle =
-    tokio::spawn(async move { worker.run().await });
+  let worker_handle = tokio::spawn(async move { worker.run().await });
 
   // IoBehavior always returns IoRequest, so after
   // the response comes back and is dispatched, the
@@ -1405,9 +1185,7 @@ async fn test_scheduler_bridge_roundtrip() {
     .registry
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
-  sched
-    .send(pid, Message::Text("trigger".into()))
-    .unwrap();
+  sched.send(pid, Message::Text("trigger".into())).unwrap();
   sched.enqueue(pid);
 
   // First tick: dispatches message, gets IoRequest,
@@ -1419,10 +1197,7 @@ async fn test_scheduler_bridge_roundtrip() {
   );
 
   // Wait for Tokio to process the timer
-  tokio::time::sleep(
-    std::time::Duration::from_millis(200),
-  )
-  .await;
+  tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
   // Second tick: drains IoResponse, delivers to
   // process (wakes it), picks it, dispatches the
@@ -1461,17 +1236,10 @@ impl AgentState for StopState {
 }
 
 impl AgentBehavior for StopBehavior {
-  fn init(
-    &self,
-    _args: serde_json::Value,
-  ) -> Result<Box<dyn AgentState>, Reason> {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
     Ok(Box::new(StopState))
   }
-  fn handle_message(
-    &self,
-    _msg: Message,
-    _state: &mut dyn AgentState,
-  ) -> Action {
+  fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
     Action::Stop(Reason::Normal)
   }
   fn handle_exit(
@@ -1482,12 +1250,7 @@ impl AgentBehavior for StopBehavior {
   ) -> Action {
     Action::Continue
   }
-  fn terminate(
-    &self,
-    _reason: Reason,
-    _state: &mut dyn AgentState,
-  ) {
-  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
 }
 
 #[test]
@@ -1498,9 +1261,7 @@ fn test_scheduler_stop_terminates_process() {
     .registry
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
-  sched
-    .send(pid, Message::Text("die".into()))
-    .unwrap();
+  sched.send(pid, Message::Text("die".into())).unwrap();
   sched.enqueue(pid);
   sched.tick();
 
@@ -1528,17 +1289,10 @@ impl AgentState for SpawnState {
 }
 
 impl AgentBehavior for SpawnBehavior {
-  fn init(
-    &self,
-    _args: serde_json::Value,
-  ) -> Result<Box<dyn AgentState>, Reason> {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
     Ok(Box::new(SpawnState))
   }
-  fn handle_message(
-    &self,
-    _msg: Message,
-    _state: &mut dyn AgentState,
-  ) -> Action {
+  fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
     Action::Spawn {
       behavior: Arc::new(EchoBehavior),
       args: serde_json::Value::Null,
@@ -1552,12 +1306,7 @@ impl AgentBehavior for SpawnBehavior {
   ) -> Action {
     Action::Continue
   }
-  fn terminate(
-    &self,
-    _reason: Reason,
-    _state: &mut dyn AgentState,
-  ) {
-  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
 }
 
 #[test]
@@ -1570,9 +1319,7 @@ fn test_scheduler_spawn_creates_child() {
     .unwrap();
   assert_eq!(sched.registry.count(), 1);
 
-  sched
-    .send(pid, Message::Text("spawn".into()))
-    .unwrap();
+  sched.send(pid, Message::Text("spawn".into())).unwrap();
   sched.enqueue(pid);
   sched.tick();
 
@@ -1605,27 +1352,16 @@ impl AgentState for SpawnAndTrackState {
 }
 
 impl AgentBehavior for SpawnAndTrackBehavior {
-  fn init(
-    &self,
-    _args: serde_json::Value,
-  ) -> Result<Box<dyn AgentState>, Reason> {
-    Ok(Box::new(SpawnAndTrackState {
-      child_pid: None,
-    }))
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(SpawnAndTrackState { child_pid: None }))
   }
-  fn handle_message(
-    &self,
-    msg: Message,
-    state: &mut dyn AgentState,
-  ) -> Action {
+  fn handle_message(&self, msg: Message, state: &mut dyn AgentState) -> Action {
     let s = state
       .as_any_mut()
       .downcast_mut::<SpawnAndTrackState>()
       .unwrap();
     match msg {
-      Message::System(SystemMsg::SpawnResult {
-        child_pid,
-      }) => {
+      Message::System(SystemMsg::SpawnResult { child_pid }) => {
         s.child_pid = Some(AgentPid::from_raw(child_pid));
         Action::Continue
       }
@@ -1644,12 +1380,7 @@ impl AgentBehavior for SpawnAndTrackBehavior {
   ) -> Action {
     Action::Continue
   }
-  fn terminate(
-    &self,
-    _reason: Reason,
-    _state: &mut dyn AgentState,
-  ) {
-  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
 }
 
 #[test]
@@ -1662,9 +1393,7 @@ fn test_spawn_notifies_parent_with_child_pid() {
     .unwrap();
 
   // Send trigger to spawn a child
-  sched
-    .send(parent, Message::Text("spawn".into()))
-    .unwrap();
+  sched.send(parent, Message::Text("spawn".into())).unwrap();
   sched.enqueue(parent);
 
   // First tick: processes Text, returns Spawn action,
@@ -1706,9 +1435,7 @@ fn test_spawn_auto_links_parent_to_child() {
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
 
-  sched
-    .send(parent, Message::Text("spawn".into()))
-    .unwrap();
+  sched.send(parent, Message::Text("spawn".into())).unwrap();
   sched.enqueue(parent);
   sched.tick();
 
@@ -1721,16 +1448,14 @@ fn test_spawn_auto_links_parent_to_child() {
     .expect("Child should exist");
 
   // Parent should be linked to child
-  let parent_proc =
-    sched.registry.lookup(&parent).unwrap();
+  let parent_proc = sched.registry.lookup(&parent).unwrap();
   assert!(
     parent_proc.links.contains(&child_pid),
     "Parent should have link to child after spawn"
   );
 
   // Child should be linked back to parent
-  let child_proc =
-    sched.registry.lookup(&child_pid).unwrap();
+  let child_proc = sched.registry.lookup(&child_pid).unwrap();
   assert!(
     child_proc.links.contains(&parent),
     "Child should have link back to parent"
@@ -1741,8 +1466,7 @@ fn test_spawn_auto_links_parent_to_child() {
 
 #[test]
 fn test_custom_io_op_through_bridge() {
-  let (bridge_handle, _worker) =
-    crate::agent_rt::bridge::create_bridge();
+  let (bridge_handle, _worker) = crate::agent_rt::bridge::create_bridge();
   let mut sched = AgentScheduler::new();
   sched.set_bridge(bridge_handle);
 
@@ -1760,17 +1484,10 @@ fn test_custom_io_op_through_bridge() {
   }
 
   impl AgentBehavior for CustomIoBehavior {
-    fn init(
-      &self,
-      _args: serde_json::Value,
-    ) -> Result<Box<dyn AgentState>, Reason> {
+    fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
       Ok(Box::new(CustomIoState))
     }
-    fn handle_message(
-      &self,
-      _msg: Message,
-      _state: &mut dyn AgentState,
-    ) -> Action {
+    fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
       Action::IoRequest(IoOp::Custom {
         kind: "llm_request".to_string(),
         payload: serde_json::json!({
@@ -1787,23 +1504,15 @@ fn test_custom_io_op_through_bridge() {
     ) -> Action {
       Action::Continue
     }
-    fn terminate(
-      &self,
-      _reason: Reason,
-      _state: &mut dyn AgentState,
-    ) {
-    }
+    fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
   }
 
-  let behavior: Arc<dyn AgentBehavior> =
-    Arc::new(CustomIoBehavior);
+  let behavior: Arc<dyn AgentBehavior> = Arc::new(CustomIoBehavior);
   let pid = sched
     .registry
     .spawn(behavior, serde_json::Value::Null)
     .unwrap();
-  sched
-    .send(pid, Message::Text("go".into()))
-    .unwrap();
+  sched.send(pid, Message::Text("go".into())).unwrap();
   sched.enqueue(pid);
   sched.tick();
 
@@ -1821,19 +1530,14 @@ fn test_register_name_rejects_duplicate() {
   let mut reg = AgentRegistry::new();
   let b1 = Arc::new(EchoBehavior);
   let b2 = Arc::new(EchoBehavior);
-  let pid1 =
-    reg.spawn(b1, serde_json::Value::Null).unwrap();
-  let pid2 =
-    reg.spawn(b2, serde_json::Value::Null).unwrap();
+  let pid1 = reg.spawn(b1, serde_json::Value::Null).unwrap();
+  let pid2 = reg.spawn(b2, serde_json::Value::Null).unwrap();
 
   reg.register_name("server", pid1).unwrap();
 
   // Different pid with same name should fail
   let result = reg.register_name("server", pid2);
-  assert!(
-    result.is_err(),
-    "Should reject duplicate name registration"
-  );
+  assert!(result.is_err(), "Should reject duplicate name registration");
 
   // Original registration should be unchanged
   assert_eq!(reg.lookup_name("server"), Some(pid1));

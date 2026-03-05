@@ -148,17 +148,13 @@ impl RuntimeContext {
   /// as multiple reads and a single increment.
   #[inline]
   pub fn ip_read(&mut self) -> Word {
-    unsafe {
-      *(self.ip.get_pointer())
-    }
+    unsafe { *(self.ip.get_pointer()) }
   }
 
   /// Read raw word from `ip[offs]`
   #[inline]
   pub fn op_arg_read_at(&mut self, offs: usize) -> Word {
-    unsafe {
-      *(self.args_ptr.add(offs))
-    }
+    unsafe { *(self.args_ptr.add(offs)) }
   }
 
   #[inline]
@@ -245,7 +241,12 @@ impl RuntimeContext {
   /// Copy a value `val` to `dst`. No attempt is done to load val from a
   /// stack value or a register, val is assumed to be a ready value, not a source.
   /// Returns void `()` or an error.
-  pub fn store_value(&mut self, val: Term, dst: Term, hp: &mut dyn THeap) -> RtResult<()> {
+  pub fn store_value(
+    &mut self,
+    val: Term,
+    dst: Term,
+    hp: &mut dyn THeap,
+  ) -> RtResult<()> {
     debug_assert!(
       !val.is_register_x(),
       "ctx.store value must not be a X reg, have {}",
@@ -265,7 +266,9 @@ impl RuntimeContext {
       dst.is_register_x() || dst.is_register_y() || dst.is_register_float(),
       "ctx.store destination must be a X, Y or FP register"
     );
-    if dst.get_term_tag() == PrimaryTag::SPECIAL && dst.get_special_tag() == SpecialTag::REG {
+    if dst.get_term_tag() == PrimaryTag::SPECIAL
+      && dst.get_special_tag() == SpecialTag::REG
+    {
       let r_tag = dst.get_reg_tag();
       if r_tag == SpecialReg::REG_X {
         self.set_x(dst.get_reg_value(), val);

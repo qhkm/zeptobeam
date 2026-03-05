@@ -1,5 +1,5 @@
 use crate::{
-  defs::{BitReader, BitSize, ByteReader, SizeBytes, Word, SizeWords},
+  defs::{BitReader, BitSize, ByteReader, SizeBytes, SizeWords, Word},
   fail::{RtErr, RtResult},
   term::{
     boxed::{
