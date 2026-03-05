@@ -142,7 +142,8 @@ impl CheckpointStore for FileCheckpointStore {
   }
 
   fn prune_before(&self, epoch_secs: i64) -> Result<u64, AgentRtError> {
-    let threshold = std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch_secs as u64);
+    let safe_secs = if epoch_secs < 0 { 0u64 } else { epoch_secs as u64 };
+    let threshold = std::time::UNIX_EPOCH + std::time::Duration::from_secs(safe_secs);
     let mut pruned = 0u64;
     for entry in fs::read_dir(&self.dir)? {
       let entry = entry?;

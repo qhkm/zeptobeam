@@ -8,7 +8,7 @@ use erlangrt::agent_rt::{
 
 #[tokio::test]
 async fn test_health_server_responds() {
-    let config = AppConfig::default();
+    let _config = AppConfig::default();
     let metrics = Arc::new(RuntimeMetrics::new());
     let process_count = Arc::new(AtomicUsize::new(3));
 

@@ -83,7 +83,7 @@ Make the runtime deployable as a standalone service.
 - **Checkpoint pruning**: list_keys and prune_before on CheckpointStore trait, background pruner task with configurable interval and TTL
 - **Signal handling**: SIGTERM/SIGINT graceful shutdown, drain in-flight ops, stop server
 
-**Commits:** `e9256a2` through `TBD`
+**Commits:** `e9256a2` through `5869ea8`
 
 ---
 
