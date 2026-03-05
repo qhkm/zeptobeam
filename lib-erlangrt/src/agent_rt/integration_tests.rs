@@ -723,4 +723,44 @@ auto_start = false
     // Agent should still be alive
     assert!(scheduler.registry.lookup(&pid).is_some());
   }
+
+  #[test]
+  fn test_orchestrator_decomposes_goal_into_task_graph() {
+    use crate::agent_rt::decomposition::parse_decomposition_response;
+
+    let goal = serde_json::json!("Build a REST API for todo items");
+
+    // Simulate an LLM response with decomposed tasks
+    let llm_response = r#"{"tasks": [
+        {"task_id": "design", "goal": "Design the API schema and endpoints"},
+        {"task_id": "implement", "goal": "Implement CRUD endpoints", "depends_on": ["design"]},
+        {"task_id": "test", "goal": "Write integration tests", "depends_on": ["implement"]}
+    ]}"#;
+
+    let result = parse_decomposition_response(llm_response, &goal);
+    let tasks = result["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 3);
+    assert_eq!(tasks[0]["task_id"], "design");
+    assert_eq!(tasks[1]["task_id"], "implement");
+    assert_eq!(tasks[2]["task_id"], "test");
+
+    // Verify dependency chain
+    let deps = tasks[1]["depends_on"].as_array().unwrap();
+    assert_eq!(deps[0], "design");
+  }
+
+  #[test]
+  fn test_orchestrator_fallback_on_bad_decomposition() {
+    use crate::agent_rt::decomposition::parse_decomposition_response;
+
+    let goal = serde_json::json!("Do something complex");
+
+    let bad_response = "Sorry, I can't help with that.";
+    let result = parse_decomposition_response(bad_response, &goal);
+    let tasks = result["tasks"].as_array().unwrap();
+
+    // Should fall back to single task
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["goal"], "Do something complex");
+  }
 }
