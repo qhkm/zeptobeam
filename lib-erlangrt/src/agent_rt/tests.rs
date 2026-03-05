@@ -1004,3 +1004,103 @@ fn test_send_action_costs_reductions() {
      (1 dispatch + 2 send)"
   );
 }
+
+// --- Bug C3: supervisor double-terminate tests ---
+
+#[test]
+fn test_transient_not_restarted_on_shutdown() {
+  let behavior = Arc::new(EchoBehavior);
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![ChildSpec {
+      id: "child1".into(),
+      behavior,
+      args: serde_json::Value::Null,
+      restart: ChildRestart::Transient,
+      shutdown: ShutdownPolicy::Timeout(5000),
+      priority: Priority::Normal,
+    }],
+  };
+  let mut sched = AgentScheduler::new();
+  let mut sup =
+    Supervisor::start(&mut sched, spec).unwrap();
+  let pid = sup.children[0].pid;
+
+  sup.handle_child_exit(
+    &mut sched,
+    pid,
+    Reason::Shutdown,
+  );
+  assert!(
+    sup.children.is_empty(),
+    "Transient should NOT restart on Shutdown"
+  );
+}
+
+#[test]
+fn test_rest_for_one_restarts_only_subsequent() {
+  let behavior = Arc::new(EchoBehavior);
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::RestForOne,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![
+      ChildSpec {
+        id: "a".into(),
+        behavior: behavior.clone(),
+        args: serde_json::Value::Null,
+        restart: ChildRestart::Permanent,
+        shutdown: ShutdownPolicy::Timeout(5000),
+        priority: Priority::Normal,
+      },
+      ChildSpec {
+        id: "b".into(),
+        behavior: behavior.clone(),
+        args: serde_json::Value::Null,
+        restart: ChildRestart::Permanent,
+        shutdown: ShutdownPolicy::Timeout(5000),
+        priority: Priority::Normal,
+      },
+      ChildSpec {
+        id: "c".into(),
+        behavior,
+        args: serde_json::Value::Null,
+        restart: ChildRestart::Permanent,
+        shutdown: ShutdownPolicy::Timeout(5000),
+        priority: Priority::Normal,
+      },
+    ],
+  };
+  let mut sched = AgentScheduler::new();
+  let mut sup =
+    Supervisor::start(&mut sched, spec).unwrap();
+
+  let pid_a = sup.children[0].pid;
+  let pid_b = sup.children[1].pid;
+  let pid_c = sup.children[2].pid;
+
+  // Kill child b — should restart b and c, leave a
+  sup.handle_child_exit(
+    &mut sched,
+    pid_b,
+    Reason::Custom("crash".into()),
+  );
+
+  assert_eq!(sup.children.len(), 3);
+  // a should keep same PID
+  assert_eq!(
+    sup.children[0].pid, pid_a,
+    "Child a should be unchanged"
+  );
+  // b and c should have new PIDs
+  assert_ne!(
+    sup.children[1].pid, pid_b,
+    "Child b should be restarted"
+  );
+  assert_ne!(
+    sup.children[2].pid, pid_c,
+    "Child c should be restarted"
+  );
+}

@@ -134,7 +134,10 @@ impl Supervisor {
     {
       ChildRestart::Permanent => true,
       ChildRestart::Transient => {
-        !matches!(reason, Reason::Normal)
+        !matches!(
+          reason,
+          Reason::Normal | Reason::Shutdown
+        )
       }
       ChildRestart::Temporary => false,
     };
@@ -197,10 +200,9 @@ impl Supervisor {
     idx: usize,
   ) {
     let dead = self.children.remove(idx);
-    // Terminate if still in registry (may already
-    // be gone)
-    sched
-      .terminate_process(dead.pid, Reason::Shutdown);
+    // Dead child is already terminated — don't call
+    // terminate_process again (avoids duplicate exit
+    // notifications to linked processes).
     if let Some(new) =
       self.spawn_child(sched, &dead.spec)
     {
@@ -213,8 +215,10 @@ impl Supervisor {
   fn restart_all(
     &mut self,
     sched: &mut AgentScheduler,
-    _dead_idx: usize,
+    dead_idx: usize,
   ) {
+    let dead_pid = self.children[dead_idx].pid;
+
     // Collect specs before draining children
     let specs: Vec<ChildSpec> = self
       .children
@@ -222,12 +226,15 @@ impl Supervisor {
       .map(|c| c.spec.clone_spec())
       .collect();
 
-    // Terminate all current children
+    // Terminate all current children except the
+    // already-dead one
     for child in self.children.drain(..) {
-      sched.terminate_process(
-        child.pid,
-        Reason::Shutdown,
-      );
+      if child.pid != dead_pid {
+        sched.terminate_process(
+          child.pid,
+          Reason::Shutdown,
+        );
+      }
     }
 
     // Respawn all from specs
@@ -247,6 +254,8 @@ impl Supervisor {
     sched: &mut AgentScheduler,
     dead_idx: usize,
   ) {
+    let dead_pid = self.children[dead_idx].pid;
+
     // Collect specs for children from dead_idx onward
     let specs: Vec<ChildSpec> = self.children
       [dead_idx..]
@@ -254,14 +263,17 @@ impl Supervisor {
       .map(|c| c.spec.clone_spec())
       .collect();
 
-    // Terminate and remove from dead_idx onward
+    // Terminate and remove from dead_idx onward,
+    // skipping the already-dead child
     let rest: Vec<RunningChild> =
       self.children.drain(dead_idx..).collect();
     for child in rest {
-      sched.terminate_process(
-        child.pid,
-        Reason::Shutdown,
-      );
+      if child.pid != dead_pid {
+        sched.terminate_process(
+          child.pid,
+          Reason::Shutdown,
+        );
+      }
     }
 
     // Respawn the collected specs
