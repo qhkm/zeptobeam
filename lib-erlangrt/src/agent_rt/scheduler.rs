@@ -21,6 +21,8 @@ pub struct AgentScheduler {
   queue_high: VecDeque<AgentPid>,
   queue_normal: VecDeque<AgentPid>,
   queue_low: VecDeque<AgentPid>,
+  allow_external_routing: bool,
+  outbound_messages: Vec<(AgentPid, Message)>,
   advantage_count: usize,
   bridge: Option<BridgeHandle>,
   metrics: Arc<RuntimeMetrics>,
@@ -34,6 +36,8 @@ impl AgentScheduler {
       queue_high: VecDeque::new(),
       queue_normal: VecDeque::new(),
       queue_low: VecDeque::new(),
+      allow_external_routing: false,
+      outbound_messages: Vec::new(),
       advantage_count: 0,
       bridge: None,
       metrics: Arc::new(RuntimeMetrics::new()),
@@ -72,6 +76,20 @@ impl AgentScheduler {
 
   pub fn set_bridge(&mut self, bridge: BridgeHandle) {
     self.bridge = bridge.into();
+  }
+
+  /// Enable or disable external routing mode.
+  /// When enabled, messages addressed to unknown local
+  /// PIDs are queued for external delivery instead of
+  /// returning an error.
+  pub fn set_external_routing(&mut self, enabled: bool) {
+    self.allow_external_routing = enabled;
+  }
+
+  /// Drain messages that were addressed to unknown local
+  /// PIDs while external routing mode was enabled.
+  pub fn drain_outbound_messages(&mut self) -> Vec<(AgentPid, Message)> {
+    std::mem::take(&mut self.outbound_messages)
   }
 
   /// Shut down runtime resources in a bounded time.
@@ -232,14 +250,20 @@ impl AgentScheduler {
   /// Waiting, wake it and re-enqueue it.
   pub fn send(&mut self, to: AgentPid, msg: Message) -> Result<(), String> {
     let msg_kind = message_kind(&msg);
-    let was_waiting = {
-      let proc = self
-        .registry
-        .lookup_mut(&to)
-        .ok_or_else(|| format!("Process {:?} not found", to))?;
+    let was_waiting = if let Some(proc) = self.registry.lookup_mut(&to) {
       let was = proc.status == ProcessStatus::Waiting;
       proc.deliver_message(msg);
       was
+    } else if self.allow_external_routing {
+      self.outbound_messages.push((to, msg));
+      debug!(
+        to = to.raw(),
+        msg_kind = msg_kind,
+        "scheduler queued outbound message for external routing"
+      );
+      return Ok(());
+    } else {
+      return Err(format!("Process {:?} not found", to));
     };
     self.metrics.record_message_sent();
     debug!(

@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod checkpoint;
+pub mod cluster;
 pub mod observability;
 pub mod orchestration;
 pub mod process;

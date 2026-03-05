@@ -1,0 +1,282 @@
+use std::{
+  collections::{HashMap, HashSet},
+  sync::Arc,
+  time::Duration,
+};
+
+use crate::agent_rt::{scheduler::AgentScheduler, types::*};
+use tracing::warn;
+
+/// Multi-scheduler runtime with round-robin process
+/// placement and cross-partition message routing.
+pub struct SchedulerCluster {
+  schedulers: Vec<AgentScheduler>,
+  pid_owner: HashMap<AgentPid, usize>,
+  next_spawn_partition: usize,
+  next_tick_partition: usize,
+}
+
+impl SchedulerCluster {
+  pub fn new(partitions: usize) -> Self {
+    let count = partitions.max(1);
+    let mut schedulers = Vec::with_capacity(count);
+    for _ in 0..count {
+      let mut scheduler = AgentScheduler::new();
+      scheduler.set_external_routing(true);
+      schedulers.push(scheduler);
+    }
+    Self {
+      schedulers,
+      pid_owner: HashMap::new(),
+      next_spawn_partition: 0,
+      next_tick_partition: 0,
+    }
+  }
+
+  pub fn scheduler_count(&self) -> usize {
+    self.schedulers.len()
+  }
+
+  pub fn scheduler(&self, index: usize) -> Option<&AgentScheduler> {
+    self.schedulers.get(index)
+  }
+
+  pub fn scheduler_mut(&mut self, index: usize) -> Option<&mut AgentScheduler> {
+    self.schedulers.get_mut(index)
+  }
+
+  pub fn owner_of(&self, pid: AgentPid) -> Option<usize> {
+    self.pid_owner.get(&pid).copied()
+  }
+
+  pub fn spawn(
+    &mut self,
+    behavior: Arc<dyn AgentBehavior>,
+    args: serde_json::Value,
+  ) -> Result<AgentPid, Reason> {
+    let idx = self.next_spawn_partition % self.schedulers.len();
+    self.next_spawn_partition = (self.next_spawn_partition + 1) % self.schedulers.len();
+    self.spawn_on(idx, behavior, args)
+  }
+
+  pub fn spawn_on(
+    &mut self,
+    partition: usize,
+    behavior: Arc<dyn AgentBehavior>,
+    args: serde_json::Value,
+  ) -> Result<AgentPid, Reason> {
+    let scheduler = self
+      .schedulers
+      .get_mut(partition)
+      .ok_or_else(|| Reason::Custom(format!("invalid partition {}", partition)))?;
+    let pid = scheduler.registry.spawn(behavior, args)?;
+    self.pid_owner.insert(pid, partition);
+    Ok(pid)
+  }
+
+  pub fn enqueue(&mut self, pid: AgentPid) -> Result<(), String> {
+    self.reconcile_pid_map();
+    let idx = self
+      .pid_owner
+      .get(&pid)
+      .copied()
+      .ok_or_else(|| format!("Process {:?} not found in cluster", pid))?;
+    self.schedulers[idx].enqueue(pid);
+    Ok(())
+  }
+
+  pub fn send(&mut self, to: AgentPid, msg: Message) -> Result<(), String> {
+    self.reconcile_pid_map();
+    let idx = self
+      .pid_owner
+      .get(&to)
+      .copied()
+      .ok_or_else(|| format!("Process {:?} not found in cluster", to))?;
+    self.schedulers[idx].send(to, msg)
+  }
+
+  /// Execute one scheduling round across partitions.
+  /// Returns true if any scheduler did work or any
+  /// cross-scheduler message was routed.
+  pub fn tick(&mut self) -> bool {
+    let mut did_work = false;
+    let count = self.schedulers.len();
+    for offset in 0..count {
+      let idx = (self.next_tick_partition + offset) % count;
+      if self.schedulers[idx].tick() {
+        did_work = true;
+      }
+    }
+    self.next_tick_partition = (self.next_tick_partition + 1) % count;
+
+    let routed = self.route_outbound_messages();
+    self.reconcile_pid_map();
+    did_work || routed > 0
+  }
+
+  pub fn graceful_shutdown(&mut self, timeout: Duration) {
+    for scheduler in &mut self.schedulers {
+      scheduler.graceful_shutdown(timeout);
+    }
+    self.pid_owner.clear();
+  }
+
+  fn route_outbound_messages(&mut self) -> usize {
+    let mut outbound: Vec<(AgentPid, Message)> = Vec::new();
+    for scheduler in &mut self.schedulers {
+      outbound.extend(scheduler.drain_outbound_messages());
+    }
+
+    let mut routed = 0;
+    for (to, msg) in outbound {
+      match self.send(to, msg) {
+        Ok(()) => routed += 1,
+        Err(err) => warn!(to = to.raw(), error = err, "dropping unroutable message"),
+      }
+    }
+    routed
+  }
+
+  fn reconcile_pid_map(&mut self) {
+    let mut seen: HashSet<AgentPid> = HashSet::new();
+    for (idx, scheduler) in self.schedulers.iter().enumerate() {
+      for pid in scheduler.registry.pids() {
+        self.pid_owner.insert(pid, idx);
+        seen.insert(pid);
+      }
+    }
+    self.pid_owner.retain(|pid, _| seen.contains(pid));
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::agent_rt::types::{Action, AgentState, Message, Reason};
+
+  struct EmptyState;
+
+  impl AgentState for EmptyState {
+    fn as_any(&self) -> &dyn std::any::Any {
+      self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+      self
+    }
+  }
+
+  struct NopBehavior;
+
+  impl AgentBehavior for NopBehavior {
+    fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+      Ok(Box::new(EmptyState))
+    }
+    fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
+      Action::Continue
+    }
+    fn handle_exit(
+      &self,
+      _from: AgentPid,
+      _reason: Reason,
+      _state: &mut dyn AgentState,
+    ) -> Action {
+      Action::Continue
+    }
+    fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+  }
+
+  struct SenderState {
+    target: AgentPid,
+  }
+
+  impl AgentState for SenderState {
+    fn as_any(&self) -> &dyn std::any::Any {
+      self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+      self
+    }
+  }
+
+  struct SenderBehavior;
+
+  impl AgentBehavior for SenderBehavior {
+    fn init(&self, args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+      let target = args
+        .get("target")
+        .and_then(|v| v.as_u64())
+        .map(AgentPid::from_raw)
+        .ok_or_else(|| Reason::Custom("missing target".to_string()))?;
+      Ok(Box::new(SenderState { target }))
+    }
+
+    fn handle_message(&self, _msg: Message, state: &mut dyn AgentState) -> Action {
+      let s = state.as_any_mut().downcast_mut::<SenderState>().unwrap();
+      Action::Send {
+        to: s.target,
+        msg: Message::Text("cross-partition".to_string()),
+      }
+    }
+
+    fn handle_exit(
+      &self,
+      _from: AgentPid,
+      _reason: Reason,
+      _state: &mut dyn AgentState,
+    ) -> Action {
+      Action::Continue
+    }
+
+    fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+  }
+
+  #[test]
+  fn test_cluster_spawn_round_robin_across_partitions() {
+    let mut cluster = SchedulerCluster::new(2);
+
+    let p1 = cluster
+      .spawn(Arc::new(NopBehavior), serde_json::Value::Null)
+      .unwrap();
+    let p2 = cluster
+      .spawn(Arc::new(NopBehavior), serde_json::Value::Null)
+      .unwrap();
+    let p3 = cluster
+      .spawn(Arc::new(NopBehavior), serde_json::Value::Null)
+      .unwrap();
+
+    assert_eq!(cluster.owner_of(p1), Some(0));
+    assert_eq!(cluster.owner_of(p2), Some(1));
+    assert_eq!(cluster.owner_of(p3), Some(0));
+  }
+
+  #[test]
+  fn test_cluster_routes_cross_scheduler_messages() {
+    let mut cluster = SchedulerCluster::new(2);
+    let receiver = cluster
+      .spawn(Arc::new(NopBehavior), serde_json::Value::Null)
+      .unwrap();
+    let sender = cluster
+      .spawn(
+        Arc::new(SenderBehavior),
+        serde_json::json!({ "target": receiver.raw() }),
+      )
+      .unwrap();
+
+    cluster.send(sender, Message::Text("go".into())).unwrap();
+    cluster.enqueue(sender).unwrap();
+    cluster.tick();
+
+    let receiver_partition = cluster.owner_of(receiver).unwrap();
+    let receiver_proc = cluster
+      .scheduler(receiver_partition)
+      .unwrap()
+      .registry
+      .lookup(&receiver)
+      .unwrap();
+    assert_eq!(receiver_proc.mailbox.len(), 1);
+    assert!(matches!(
+      receiver_proc.mailbox.front(),
+      Some(Message::Text(text)) if text == "cross-partition"
+    ));
+  }
+}
