@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::agent_rt::process::*;
+use crate::agent_rt::registry::AgentRegistry;
 use crate::agent_rt::types::*;
 
 struct EchoState {
@@ -149,4 +150,77 @@ fn test_message_ordering_fifo() {
     Message::Text(s) => assert_eq!(s, "third"),
     _ => panic!("Expected Text"),
   }
+}
+
+// --- AgentRegistry tests ---
+
+#[test]
+fn test_registry_spawn_returns_pid() {
+  let mut reg = AgentRegistry::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid =
+    reg.spawn(behavior, serde_json::Value::Null).unwrap();
+  assert!(
+    pid.raw() >= 0x8000_0000,
+    "Spawned pid should be in the agent range"
+  );
+}
+
+#[test]
+fn test_registry_lookup_existing() {
+  let mut reg = AgentRegistry::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid =
+    reg.spawn(behavior, serde_json::Value::Null).unwrap();
+  let proc = reg.lookup(&pid);
+  assert!(proc.is_some());
+  assert_eq!(proc.unwrap().pid, pid);
+}
+
+#[test]
+fn test_registry_lookup_missing() {
+  let reg = AgentRegistry::new();
+  let fake_pid = AgentPid::new();
+  assert!(reg.lookup(&fake_pid).is_none());
+}
+
+#[test]
+fn test_registry_remove() {
+  let mut reg = AgentRegistry::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid =
+    reg.spawn(behavior, serde_json::Value::Null).unwrap();
+  assert!(reg.lookup(&pid).is_some());
+
+  let removed = reg.remove(&pid);
+  assert!(removed.is_some());
+  assert!(reg.lookup(&pid).is_none());
+}
+
+#[test]
+fn test_registry_register_name() {
+  let mut reg = AgentRegistry::new();
+  let behavior = Arc::new(EchoBehavior);
+  let pid =
+    reg.spawn(behavior, serde_json::Value::Null).unwrap();
+
+  reg.register_name("echo_server", pid);
+  let found = reg.lookup_name("echo_server");
+  assert_eq!(found, Some(pid));
+
+  // Unregister and verify gone
+  reg.unregister_name("echo_server");
+  assert!(reg.lookup_name("echo_server").is_none());
+}
+
+#[test]
+fn test_registry_count() {
+  let mut reg = AgentRegistry::new();
+  assert_eq!(reg.count(), 0);
+
+  let b1 = Arc::new(EchoBehavior);
+  let b2 = Arc::new(EchoBehavior);
+  reg.spawn(b1, serde_json::Value::Null).unwrap();
+  reg.spawn(b2, serde_json::Value::Null).unwrap();
+  assert_eq!(reg.count(), 2);
 }
