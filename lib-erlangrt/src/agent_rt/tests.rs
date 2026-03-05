@@ -3124,3 +3124,41 @@ async fn test_graceful_shutdown_timeout_force_stops_bridge() {
   drop(sched);
   let _ = worker_handle.await;
 }
+
+#[test]
+fn test_agent_chat_io_op_fields() {
+  let op = IoOp::AgentChat {
+    provider: "anthropic".to_string(),
+    model: Some("claude-3-5-sonnet-latest".to_string()),
+    system_prompt: Some("You are a researcher.".to_string()),
+    prompt: "Find recent papers on BEAM VM.".to_string(),
+    tools: Some(vec!["web_search".to_string(), "web_fetch".to_string()]),
+    max_iterations: Some(5),
+    timeout_ms: Some(60_000),
+  };
+  match op {
+    IoOp::AgentChat {
+      provider,
+      prompt,
+      tools,
+      ..
+    } => {
+      assert_eq!(provider, "anthropic");
+      assert_eq!(prompt, "Find recent papers on BEAM VM.");
+      assert_eq!(tools.unwrap().len(), 2);
+    }
+    _ => panic!("expected AgentChat"),
+  }
+}
+
+#[test]
+fn test_agent_destroy_io_op() {
+  let pid = AgentPid::from_raw(0x8000_9999);
+  let op = IoOp::AgentDestroy { target_pid: pid };
+  match op {
+    IoOp::AgentDestroy { target_pid } => {
+      assert_eq!(target_pid.raw(), 0x8000_9999);
+    }
+    _ => panic!("expected AgentDestroy"),
+  }
+}

@@ -326,6 +326,8 @@ fn io_op_kind(op: &IoOp) -> &'static str {
     IoOp::LlmRequest { .. } => "LlmRequest",
     IoOp::Timer { .. } => "Timer",
     IoOp::Custom { .. } => "Custom",
+    IoOp::AgentChat { .. } => "AgentChat",
+    IoOp::AgentDestroy { .. } => "AgentDestroy",
   }
 }
 
@@ -430,6 +432,9 @@ pub(crate) async fn execute_io_op_with_config(
         "payload": payload,
         "status": "placeholder"
       }))
+    }
+    IoOp::AgentChat { .. } | IoOp::AgentDestroy { .. } => {
+      IoResult::Error("agent operations not yet implemented".to_string())
     }
   }
 }

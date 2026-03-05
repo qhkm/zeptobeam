@@ -709,5 +709,7 @@ fn io_op_kind(op: &IoOp) -> &'static str {
     IoOp::LlmRequest { .. } => "LlmRequest",
     IoOp::Timer { .. } => "Timer",
     IoOp::Custom { .. } => "Custom",
+    IoOp::AgentChat { .. } => "AgentChat",
+    IoOp::AgentDestroy { .. } => "AgentDestroy",
   }
 }

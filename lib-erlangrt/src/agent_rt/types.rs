@@ -148,6 +148,18 @@ pub enum IoOp {
     kind: String,
     payload: serde_json::Value,
   },
+  AgentChat {
+    provider: String,
+    model: Option<String>,
+    system_prompt: Option<String>,
+    prompt: String,
+    tools: Option<Vec<String>>,
+    max_iterations: Option<usize>,
+    timeout_ms: Option<u64>,
+  },
+  AgentDestroy {
+    target_pid: AgentPid,
+  },
 }
 
 /// Defines the callbacks for an agent process.
