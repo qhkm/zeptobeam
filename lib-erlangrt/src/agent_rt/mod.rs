@@ -1,3 +1,4 @@
+pub mod agent_worker;
 pub mod approval_gate;
 pub mod bridge;
 pub mod bridge_metrics;
