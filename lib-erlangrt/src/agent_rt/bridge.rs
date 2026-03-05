@@ -2,7 +2,7 @@ use crate::agent_rt::{
   bridge_metrics::BridgeMetrics,
   observability::RuntimeMetrics,
   rate_limiter::RateLimiter,
-  tool_factory::ToolFactory,
+  tool_factory::{DefaultToolFactory, ToolFactory},
   types::*,
 };
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
@@ -17,8 +17,7 @@ use std::{
 };
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, warn};
-use zeptoclaw::agent::ZeptoAgent;
-use zeptoclaw::providers::LLMProvider;
+use zeptoclaw::{agent::ZeptoAgent, providers::LLMProvider};
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
 const RESPONSE_QUEUE_SIZE: usize = 4096;
@@ -53,16 +52,6 @@ pub struct BridgeHandle {
   response_rx: Receiver<IoResponse>,
   next_correlation_id: Arc<AtomicU64>,
   shutdown_enabled: bool,
-}
-
-struct NoopToolFactory;
-impl ToolFactory for NoopToolFactory {
-  fn build_tools(
-    &self,
-    _whitelist: Option<&[String]>,
-  ) -> Vec<Box<dyn zeptoclaw::tools::Tool>> {
-    vec![]
-  }
 }
 
 /// Tokio-side worker that receives I/O requests
@@ -119,7 +108,7 @@ pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorke
       metrics: None,
       agent_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
       agent_provider_registry: Arc::new(HashMap::new()),
-      agent_tool_factory: Arc::new(NoopToolFactory),
+      agent_tool_factory: Arc::new(DefaultToolFactory::from_env()),
       agent_metrics: Arc::new(BridgeMetrics::new()),
     });
   }
@@ -231,11 +220,7 @@ impl BridgeWorker {
     self.agent_metrics = metrics;
   }
 
-  pub async fn execute_agent_chat(
-    &self,
-    pid: AgentPid,
-    op: &IoOp,
-  ) -> IoResult {
+  pub async fn execute_agent_chat(&self, pid: AgentPid, op: &IoOp) -> IoResult {
     execute_agent_chat_standalone(
       pid,
       op,
@@ -316,9 +301,7 @@ impl BridgeWorker {
                 let removed = reg.remove(target_pid).is_some();
                 IoResult::Ok(serde_json::json!({ "destroyed": removed }))
               }
-              _ => {
-                execute_io_op(&req.op, rl.as_ref()).await
-              }
+              _ => execute_io_op(&req.op, rl.as_ref()).await,
             };
             let latency = start.elapsed();
             if let Some(ref m) = metrics {
@@ -395,34 +378,31 @@ fn io_op_kind(op: &IoOp) -> &'static str {
 async fn execute_agent_chat_standalone(
   pid: AgentPid,
   op: &IoOp,
-  agent_registry: Arc<
-    std::sync::Mutex<HashMap<AgentPid, Arc<TokioMutex<ZeptoAgent>>>>,
-  >,
-  provider_registry: Arc<
-    HashMap<String, Arc<dyn LLMProvider + Send + Sync>>,
-  >,
+  agent_registry: Arc<std::sync::Mutex<HashMap<AgentPid, Arc<TokioMutex<ZeptoAgent>>>>>,
+  provider_registry: Arc<HashMap<String, Arc<dyn LLMProvider + Send + Sync>>>,
   tool_factory: Arc<dyn ToolFactory>,
   metrics: Arc<BridgeMetrics>,
 ) -> IoResult {
-  let (
-    provider_name,
-    model,
-    system_prompt,
-    prompt,
-    tools_whitelist,
-    max_iterations,
-  ) = match op {
-    IoOp::AgentChat {
-      provider,
-      model,
-      system_prompt,
-      prompt,
-      tools,
-      max_iterations,
-      ..
-    } => (provider, model, system_prompt, prompt, tools, max_iterations),
-    _ => return IoResult::Error("not an AgentChat op".into()),
-  };
+  let (provider_name, model, system_prompt, prompt, tools_whitelist, max_iterations) =
+    match op {
+      IoOp::AgentChat {
+        provider,
+        model,
+        system_prompt,
+        prompt,
+        tools,
+        max_iterations,
+        ..
+      } => (
+        provider,
+        model,
+        system_prompt,
+        prompt,
+        tools,
+        max_iterations,
+      ),
+      _ => return IoResult::Error("not an AgentChat op".into()),
+    };
 
   let agent_arc = {
     let mut registry = agent_registry.lock().unwrap();
@@ -440,9 +420,8 @@ async fn execute_agent_chat_standalone(
               .clone()
           });
 
-        let tools = tool_factory.build_tools(
-          tools_whitelist.as_ref().map(|v| v.as_slice()),
-        );
+        let tools =
+          tool_factory.build_tools(tools_whitelist.as_ref().map(|v| v.as_slice()));
 
         let mut builder = ZeptoAgent::builder()
           .provider_arc(llm_provider)
@@ -458,9 +437,7 @@ async fn execute_agent_chat_standalone(
           builder = builder.max_iterations(*mi);
         }
 
-        Arc::new(TokioMutex::new(
-          builder.build().expect("agent build"),
-        ))
+        Arc::new(TokioMutex::new(builder.build().expect("agent build")))
       })
       .clone()
   };
@@ -476,9 +453,7 @@ async fn execute_agent_chat_standalone(
   .await;
 
   match chat_result {
-    Ok(Ok(response)) => {
-      IoResult::Ok(serde_json::json!({ "response": response }))
-    }
+    Ok(Ok(response)) => IoResult::Ok(serde_json::json!({ "response": response })),
     Ok(Err(e)) => IoResult::Error(format!("agent chat error: {}", e)),
     Err(join_err) => {
       metrics.inc_chat_panics();
