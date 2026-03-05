@@ -100,6 +100,20 @@ impl AgentScheduler {
     true
   }
 
+  /// Set a receive timeout on a process. If the process
+  /// is Waiting and the deadline expires, the scheduler
+  /// delivers a ReceiveTimeout message and wakes it.
+  pub fn set_receive_timeout(
+    &mut self,
+    pid: AgentPid,
+    duration: std::time::Duration,
+  ) {
+    if let Some(proc) = self.registry.lookup_mut(&pid) {
+      proc.receive_timeout =
+        Some(std::time::Instant::now() + duration);
+    }
+  }
+
   /// Add a process to the appropriate priority queue
   /// based on its Priority field.
   pub fn enqueue(&mut self, pid: AgentPid) {
@@ -165,6 +179,30 @@ impl AgentScheduler {
       .unwrap_or_default();
     for (resp_pid, msg) in responses {
       let _ = self.send(resp_pid, msg);
+    }
+
+    // Check receive timeouts on Waiting processes
+    let now = std::time::Instant::now();
+    let timed_out: Vec<AgentPid> = self
+      .registry
+      .pids()
+      .into_iter()
+      .filter(|pid| {
+        self
+          .registry
+          .lookup(pid)
+          .map(|p| {
+            p.status == ProcessStatus::Waiting
+              && p.receive_timeout.map_or(false, |d| now >= d)
+          })
+          .unwrap_or(false)
+      })
+      .collect();
+    for pid in timed_out {
+      if let Some(proc) = self.registry.lookup_mut(&pid) {
+        proc.receive_timeout = None;
+      }
+      let _ = self.send(pid, Message::System(SystemMsg::ReceiveTimeout));
     }
 
     // Skip stale/non-runnable queue entries until we

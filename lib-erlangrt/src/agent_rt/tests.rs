@@ -2122,3 +2122,108 @@ fn test_supervisor_start_linked_auto_restarts_children() {
     "Auto-restarted child should exist in registry"
   );
 }
+
+// === Step 5: Receive timeout ===
+
+#[test]
+fn test_receive_timeout_wakes_waiting_process() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(EchoBehavior), serde_json::Value::Null)
+    .unwrap();
+
+  // Process has no messages — goes to Waiting on first tick
+  sched.enqueue(pid);
+  sched.tick();
+  assert_eq!(
+    sched.registry.lookup(&pid).unwrap().status,
+    ProcessStatus::Waiting
+  );
+
+  // Set an already-expired timeout (duration 0)
+  sched.set_receive_timeout(pid, std::time::Duration::from_millis(0));
+
+  // Next tick: detect expired timeout, deliver ReceiveTimeout,
+  // wake process, dispatch the message
+  let ran = sched.tick();
+  assert!(ran, "tick should run work after timeout wakes process");
+
+  // EchoBehavior stores received messages in state
+  let proc = sched.registry.lookup(&pid).unwrap();
+  let state = proc
+    .state
+    .as_ref()
+    .unwrap()
+    .as_any()
+    .downcast_ref::<EchoState>()
+    .unwrap();
+  assert_eq!(state.received.len(), 1);
+  assert!(
+    matches!(&state.received[0], Message::System(SystemMsg::ReceiveTimeout)),
+    "Process should receive ReceiveTimeout message"
+  );
+}
+
+#[test]
+fn test_receive_timeout_canceled_by_real_message() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(EchoBehavior), serde_json::Value::Null)
+    .unwrap();
+
+  // Process goes Waiting
+  sched.enqueue(pid);
+  sched.tick();
+  assert_eq!(
+    sched.registry.lookup(&pid).unwrap().status,
+    ProcessStatus::Waiting
+  );
+
+  // Set timeout (won't expire yet — 10 seconds)
+  sched.set_receive_timeout(pid, std::time::Duration::from_secs(10));
+
+  // Deliver a real message — should cancel the timeout
+  sched.send(pid, Message::Text("hello".into())).unwrap();
+
+  // Process should have no receive_timeout after real message delivery
+  let proc = sched.registry.lookup(&pid).unwrap();
+  assert!(
+    proc.receive_timeout.is_none(),
+    "Real message delivery should cancel receive timeout"
+  );
+}
+
+#[test]
+fn test_receive_timeout_only_fires_when_waiting() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(EchoBehavior), serde_json::Value::Null)
+    .unwrap();
+
+  // Give the process a message so it stays Runnable
+  sched.send(pid, Message::Text("keep busy".into())).unwrap();
+
+  // Set an expired timeout on a Runnable process
+  sched.set_receive_timeout(pid, std::time::Duration::from_millis(0));
+
+  // tick dispatches "keep busy", process goes Waiting (mailbox empty)
+  sched.enqueue(pid);
+  sched.tick();
+
+  // The timeout should NOT have fired during this tick because the
+  // process was Runnable when we checked timeouts (before dispatch)
+  let proc = sched.registry.lookup(&pid).unwrap();
+  let state = proc
+    .state
+    .as_ref()
+    .unwrap()
+    .as_any()
+    .downcast_ref::<EchoState>()
+    .unwrap();
+  // Only "keep busy" was processed, no ReceiveTimeout
+  assert_eq!(state.received.len(), 1);
+  assert!(matches!(&state.received[0], Message::Text(_)));
+}

@@ -84,6 +84,7 @@ pub enum SystemMsg {
     pid: u64,
     reason: Reason,
   },
+  ReceiveTimeout,
 }
 
 /// Reason for process termination.

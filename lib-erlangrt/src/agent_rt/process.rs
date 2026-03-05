@@ -17,6 +17,7 @@ pub struct AgentProcess {
   pub monitored_by: Vec<(MonitorRef, AgentPid)>,
   pub supervisor: Option<AgentPid>,
   pub trap_exit: bool,
+  pub receive_timeout: Option<std::time::Instant>,
 }
 
 /// Scheduling status of an agent process.
@@ -62,11 +63,13 @@ impl AgentProcess {
       monitored_by: Vec::new(),
       supervisor: None,
       trap_exit: false,
+      receive_timeout: None,
     })
   }
 
   pub fn deliver_message(&mut self, msg: Message) {
     self.mailbox.push_back(msg);
+    self.receive_timeout = None;
     if self.status == ProcessStatus::Waiting {
       self.status = ProcessStatus::Runnable;
     }
