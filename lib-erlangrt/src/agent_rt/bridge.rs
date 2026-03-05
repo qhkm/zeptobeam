@@ -434,7 +434,7 @@ async fn execute_agent_chat_standalone(
     HashMap<String, Arc<dyn LLMProvider + Send + Sync>>,
   >,
   tool_factory: Arc<dyn ToolFactory>,
-  _metrics: Arc<BridgeMetrics>,
+  metrics: Arc<BridgeMetrics>,
 ) -> IoResult {
   let (
     provider_name,
@@ -497,12 +497,25 @@ async fn execute_agent_chat_standalone(
       .clone()
   };
 
-  let agent = agent_arc.lock().await;
-  match agent.chat(prompt).await {
-    Ok(response) => {
+  // Panic containment: spawn a task to isolate panics
+  let agent = agent_arc.clone();
+  let prompt_owned = prompt.to_string();
+
+  let chat_result = tokio::task::spawn(async move {
+    let guard = agent.lock().await;
+    guard.chat(&prompt_owned).await
+  })
+  .await;
+
+  match chat_result {
+    Ok(Ok(response)) => {
       IoResult::Ok(serde_json::json!({ "response": response }))
     }
-    Err(e) => IoResult::Error(format!("agent chat error: {}", e)),
+    Ok(Err(e)) => IoResult::Error(format!("agent chat error: {}", e)),
+    Err(join_err) => {
+      metrics.inc_chat_panics();
+      IoResult::Error(format!("agent chat panicked: {}", join_err))
+    }
   }
 }
 

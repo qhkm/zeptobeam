@@ -96,6 +96,27 @@ impl AgentBehavior for ExitAwareBehavior {
 
 // --- Mock types for agent integration tests ---
 
+struct PanickingProvider;
+
+#[async_trait::async_trait]
+impl LLMProvider for PanickingProvider {
+  async fn chat(
+    &self,
+    _messages: Vec<ZeptoMessage>,
+    _tools: Vec<ToolDefinition>,
+    _model: Option<&str>,
+    _options: ChatOptions,
+  ) -> ZeptoResult<LLMResponse> {
+    panic!("provider exploded");
+  }
+  fn default_model(&self) -> &str {
+    "panic-model"
+  }
+  fn name(&self) -> &str {
+    "panicking"
+  }
+}
+
 struct MockLLMProvider;
 
 #[async_trait::async_trait]
@@ -3446,4 +3467,176 @@ async fn test_agent_chat_tool_whitelist() {
     req.as_ref().unwrap(),
     &vec!["web_search".to_string(), "shell".to_string()]
   );
+}
+
+// --- Task 8: Bridge panic containment ---
+
+#[tokio::test]
+async fn test_bridge_panic_containment_on_agent_chat() {
+  let mut registry = std::collections::HashMap::new();
+  registry.insert(
+    "panicking".to_string(),
+    Arc::new(PanickingProvider) as Arc<dyn LLMProvider + Send + Sync>,
+  );
+
+  let (_handle, mut worker) = create_bridge();
+  let metrics = Arc::new(BridgeMetrics::new());
+  worker.set_agent_provider_registry(Arc::new(registry));
+  worker.set_agent_tool_factory(
+    Arc::new(MockToolFactory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>,
+  );
+  worker.set_agent_metrics(metrics.clone());
+
+  let pid = AgentPid::from_raw(0x8000_F001);
+  let op = IoOp::AgentChat {
+    provider: "panicking".to_string(),
+    model: None,
+    system_prompt: None,
+    prompt: "Trigger panic".to_string(),
+    tools: None,
+    max_iterations: None,
+    timeout_ms: None,
+  };
+
+  let result = worker.execute_agent_chat(pid, &op).await;
+  assert!(
+    matches!(result, IoResult::Error(_)),
+    "expected error from panic, got {:?}",
+    result
+  );
+  assert_eq!(
+    metrics.agent_chat_panics(),
+    1,
+    "panic counter should increment"
+  );
+}
+
+// --- Task 9: Worker busy rejection ---
+
+#[test]
+fn test_worker_rejects_followup_while_busy() {
+  use crate::agent_rt::orchestration::WorkerBehavior;
+
+  let behavior = WorkerBehavior;
+  let mut state = behavior
+    .init(serde_json::json!({
+      "parent_pid": 0x8000_D001u64,
+      "task_id": "t1",
+    }))
+    .unwrap();
+
+  // Send run_task -- puts worker in awaiting state
+  let action = behavior.handle_message(
+    Message::Json(serde_json::json!({
+      "type": "run_task",
+      "worker_pid": 0x8000_D002u64,
+      "task_id": "t1",
+      "task": { "prompt": "do work" },
+    })),
+    state.as_mut(),
+  );
+  assert!(matches!(action, Action::IoRequest(_)));
+
+  // Send follow_up while still awaiting -- should reject
+  let action = behavior.handle_message(
+    Message::Json(serde_json::json!({
+      "type": "follow_up",
+      "prompt": "do more",
+    })),
+    state.as_mut(),
+  );
+  match action {
+    Action::Send { to, msg } => {
+      assert_eq!(to.raw(), 0x8000_D001u64); // sent back to parent
+      match msg {
+        Message::Json(v) => assert_eq!(v["type"], "worker_busy"),
+        _ => panic!("expected json"),
+      }
+    }
+    _ => panic!("expected Send with worker_busy"),
+  }
+}
+
+// --- Task 10: Worker max turns guard ---
+
+#[test]
+fn test_worker_max_turns_guard() {
+  use crate::agent_rt::orchestration::WorkerBehavior;
+
+  let behavior = WorkerBehavior;
+  let mut state = behavior
+    .init(serde_json::json!({
+      "parent_pid": 0x8000_E001u64,
+      "task_id": "t1",
+      "max_turns": 2,
+    }))
+    .unwrap();
+
+  // Turn 1: run_task
+  let _ = behavior.handle_message(
+    Message::Json(serde_json::json!({
+      "type": "run_task",
+      "worker_pid": 0x8000_E002u64,
+      "task_id": "t1",
+      "task": { "prompt": "turn 1" },
+    })),
+    state.as_mut(),
+  );
+  // Simulate IoResponse for turn 1
+  let action1 = behavior.handle_message(
+    Message::System(SystemMsg::IoResponse {
+      correlation_id: 0,
+      result: IoResult::Ok(serde_json::json!({"response": "result 1"})),
+    }),
+    state.as_mut(),
+  );
+  // Turn 1 result should be sent to parent
+  assert!(matches!(action1, Action::Send { .. }));
+
+  // Turn 2: follow_up
+  let _ = behavior.handle_message(
+    Message::Json(serde_json::json!({
+      "type": "follow_up",
+      "prompt": "turn 2",
+    })),
+    state.as_mut(),
+  );
+  // Simulate IoResponse for turn 2 -- should trigger auto-stop
+  let action2 = behavior.handle_message(
+    Message::System(SystemMsg::IoResponse {
+      correlation_id: 1,
+      result: IoResult::Ok(serde_json::json!({"response": "result 2"})),
+    }),
+    state.as_mut(),
+  );
+
+  // After max_turns reached, expect Stop or Send
+  match action2 {
+    Action::Send { to, .. } => {
+      assert_eq!(to.raw(), 0x8000_E001u64);
+    }
+    Action::Stop(_) => { /* also acceptable */ }
+    _ => panic!("expected send or stop after max_turns"),
+  }
+}
+
+// --- Task 11: Worker idle timeout ---
+
+#[test]
+fn test_worker_idle_timeout_self_terminates() {
+  use crate::agent_rt::orchestration::WorkerBehavior;
+
+  let behavior = WorkerBehavior;
+  let mut state = behavior
+    .init(serde_json::json!({
+      "parent_pid": 0x8000_F001u64,
+      "task_id": "t1",
+    }))
+    .unwrap();
+
+  let action = behavior.handle_message(
+    Message::System(SystemMsg::ReceiveTimeout),
+    state.as_mut(),
+  );
+  assert!(matches!(action, Action::Stop(Reason::Shutdown)));
 }

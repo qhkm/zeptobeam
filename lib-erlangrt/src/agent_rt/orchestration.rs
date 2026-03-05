@@ -380,6 +380,8 @@ pub struct WorkerState {
   task_id: String,
   awaiting_result: bool,
   worker_pid: Option<u64>,
+  max_turns: usize,
+  turn_count: usize,
 }
 
 impl AgentState for WorkerState {
@@ -400,11 +402,17 @@ impl AgentBehavior for WorkerBehavior {
       .and_then(|v| v.as_str())
       .unwrap_or("task")
       .to_string();
+    let max_turns = args
+      .get("max_turns")
+      .and_then(|v| v.as_u64())
+      .unwrap_or(10) as usize;
     Ok(Box::new(WorkerState {
       parent: parent_pid,
       task_id,
       awaiting_result: false,
       worker_pid: None,
+      max_turns,
+      turn_count: 0,
     }))
   }
 
@@ -417,6 +425,32 @@ impl AgentBehavior for WorkerBehavior {
       Message::Json(payload) => {
         if payload.get("type").and_then(|v| v.as_str()) == Some("shutdown_worker") {
           return Action::Stop(Reason::Normal);
+        }
+        if payload.get("type").and_then(|v| v.as_str()) == Some("follow_up") {
+          if s.awaiting_result {
+            return Action::Send {
+              to: s.parent,
+              msg: Message::Json(serde_json::json!({
+                "type": "worker_busy",
+              })),
+            };
+          }
+          // Not busy -- emit AgentChat for follow-up
+          let prompt = payload
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+          s.awaiting_result = true;
+          return Action::IoRequest(IoOp::AgentChat {
+            provider: "default".to_string(),
+            model: None,
+            system_prompt: None,
+            prompt,
+            tools: None,
+            max_iterations: None,
+            timeout_ms: None,
+          });
         }
         if payload.get("type").and_then(|v| v.as_str()) != Some("run_task") {
           return Action::Continue;
@@ -440,6 +474,10 @@ impl AgentBehavior for WorkerBehavior {
           return Action::Continue;
         }
         s.awaiting_result = false;
+        s.turn_count += 1;
+        if s.turn_count >= s.max_turns {
+          return Action::Stop(Reason::Normal);
+        }
         Action::Send {
           to: s.parent,
           msg: Message::Json(serde_json::json!({
@@ -449,6 +487,9 @@ impl AgentBehavior for WorkerBehavior {
             "result": io_result_to_value(result),
           })),
         }
+      }
+      Message::System(SystemMsg::ReceiveTimeout) => {
+        Action::Stop(Reason::Shutdown)
       }
       _ => Action::Continue,
     }
