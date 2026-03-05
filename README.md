@@ -117,17 +117,17 @@ rustup toolchain install nightly
 # Clone and build
 git clone https://github.com/qhkm/zeptobeam.git
 cd zeptobeam
-cargo build --release -p zeptoclaw-rtd
+cargo build --release -p zeptobeam
 ```
 
 ### Run the Daemon
 
 ```bash
 # Start with defaults
-./target/release/zeptoclaw-rtd
+./target/release/zeptobeam
 
 # Or with custom config
-./target/release/zeptoclaw-rtd -c zeptoclaw-rt.toml
+./target/release/zeptobeam -c zeptoclaw-rt.toml
 ```
 
 ### Create a Config File
