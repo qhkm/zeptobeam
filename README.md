@@ -1,37 +1,30 @@
 # ZeptoBeam
 
-> **AI agents that crash without killing your system.**
+> **Fault-tolerant AI agent runtime. Built in Rust. Inspired by Erlang.**
 
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://rust-lang.github.io/rustup/concepts/channels.html)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ---
 
-## One Bad Agent, 3 AM
+## The Problem
 
-You have 47 agents running. One hallucinates a bad command and panics.
+AI agents fail. They hallucinate, loop infinitely, hit context limits, panic on bad tool output. In most systems, one failing agent takes down the entire workflow.
 
-In most systems: Everything dies. You wake up to a P0.
+## The Solution
 
-In ZeptoBeam: That agent restarts. The other 46 keep running.
+ZeptoBeam treats failure as a first-class concept. Each agent runs in an isolated process with:
 
----
+- **Private state** — No shared memory between agents
+- **Message passing** — Async communication only
+- **Supervision trees** — Automatic restart on crash with backoff
+- **Checkpoint/resume** — State persists to SQLite
 
-## What Is It?
-
-ZeptoBeam is a **runtime for fault-tolerant AI agents**.
-
-Each agent runs as an isolated process with:
-- Private mailbox for messages
-- Private state (no shared memory)
-- A supervisor that restarts it on crash
-- Automatic checkpoint/resume to SQLite
-
-Built in Rust. Inspired by Erlang/BEAM.
+When an agent fails, it restarts. The rest of the system keeps running.
 
 ---
 
-## The Model
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -61,36 +54,40 @@ Built in Rust. Inspired by Erlang/BEAM.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Processes** — Each agent is isolated. If one corrupts its state, it doesn't affect others.
+**Process Isolation** — Each agent has its own mailbox, state, and lifecycle. Crash one, the others survive.
 
-**Messages** — Agents communicate only via async messages. No blocking calls, no deadlocks.
+**Message Passing** — Agents communicate only through async messages. No blocking RPC, no shared-state corruption.
 
-**Supervisors** — When an agent crashes, its supervisor restarts it with exponential backoff. If restarts exceed limits, the supervisor itself fails and escalates.
+**Supervision** — Supervisors monitor child agents. On crash: restart (with exponential backoff), escalate if restarts exceed limits, or propagate failure depending on strategy (OneForOne, OneForAll, RestForOne).
 
-**Checkpoints** — Agent state is periodically saved to SQLite. Resume after crashes without losing progress.
+**Checkpointing** — Agent state periodically saved to SQLite. Resume from checkpoint after restart instead of starting fresh.
 
 ---
 
-## Why This Approach?
+## Why Erlang/BEAM?
 
-Erlang/BEAM runs WhatsApp (2 billion users), Discord, and RabbitMQ with **nine nines of uptime**.
+The BEAM virtual machine runs WhatsApp (2 billion users), Discord, and RabbitMQ with **nine nines of uptime** (99.9999999%).
 
-Their philosophy: *Let it crash.*
+Their approach: *Let it crash.*
 
-Don't defensively program against every failure mode. Isolate failures. Restart clean. Design for failure from day one.
+Don't defensively code against every failure. Isolate processes. Restart on failure. Design the system to fail and recover continuously.
 
-ZeptoBeam applies this to AI agents.
+ZeptoBeam brings this philosophy to AI agents.
 
 ---
 
 ## Status
 
-- ✅ **Core runtime** — Process scheduler, mailboxes, links, monitors
-- ✅ **Supervision** — OneForOne, OneForAll, RestForOne strategies
-- ✅ **Agent integration** — ZeptoAgent with tools, multi-turn conversations
-- ✅ **Reliability** — Bounded mailboxes, dead-letter queue, chaos testing
-- ✅ **Production** — TOML config, health server, tracing, checkpoint pruning
-- 📝 **Planned** — DAG task dependencies, MCP protocol, distributed clustering
+| Component | Status |
+|-----------|--------|
+| Process runtime (scheduler, mailboxes, links, monitors) | ✅ Complete |
+| Supervision trees (all restart strategies, backoff) | ✅ Complete |
+| ZeptoAgent integration (multi-turn, tools) | ✅ Complete |
+| Reliability (bounded mailboxes, DLQ, chaos testing) | ✅ Complete |
+| Production (config, health server, tracing, pruning) | ✅ Complete |
+| DAG task dependencies, retry policies, budgets | 📝 Planned |
+| MCP (Model Context Protocol) | 📝 Planned |
+| Distributed clustering | 📝 Planned |
 
 ---
 
@@ -105,9 +102,19 @@ cargo build --release -p zeptoclaw-rtd
 
 ---
 
+## Principles
+
+1. **Isolation > Sharing** — Private state prevents cascade failures
+2. **Messages > Calls** — Async communication eliminates deadlocks
+3. **Crash > Corrupt** — Restart clean rather than recover from undefined state
+4. **Supervise > Defend** — Let supervisors handle restarts, not application code
+5. **Checkpoint > Repeat** — Resume progress, don't restart from scratch
+
+---
+
 ## Inspiration
 
-- [Erlang/OTP](https://www.erlang.org/) — The gold standard for fault-tolerant systems
+- [Erlang/OTP](https://www.erlang.org/) — Fault-tolerant systems
 - [The Zen of Erlang](https://ferd.ca/the-zen-of-erlang.html) — *"The only way to make a reliable system is to accept that things will fail."*
 
 ---
@@ -115,7 +122,3 @@ cargo build --release -p zeptoclaw-rtd
 ## License
 
 Apache 2.0
-
----
-
-> *"If the agent fails, restart it. If it keeps failing, escalate. If everything fails, log and continue."*
