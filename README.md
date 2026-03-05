@@ -127,12 +127,12 @@ cargo build --release -p zeptobeam
 ./target/release/zeptobeam
 
 # Or with custom config
-./target/release/zeptobeam -c zeptoclaw-rt.toml
+./target/release/zeptobeam -c zeptobeam.toml
 ```
 
 ### Create a Config File
 
-Create `zeptoclaw-rt.toml`:
+Create `zeptobeam.toml`:
 
 ```toml
 [runtime]
@@ -141,7 +141,7 @@ mailbox_capacity = 1024
 
 [checkpoint]
 store = "sqlite"
-path = "./zeptoclaw-rt.db"
+path = "./zeptobeam.db"
 ttl_hours = 24
 
 [server]

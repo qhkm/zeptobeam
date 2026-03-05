@@ -67,7 +67,7 @@ impl Default for CheckpointConfig {
     fn default() -> Self {
         Self {
             store: "sqlite".into(),
-            path: "./zeptoclaw-rt.db".into(),
+            path: "./zeptobeam.db".into(),
             ttl_hours: 24,
             prune_interval_secs: 3600,
         }

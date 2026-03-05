@@ -13,10 +13,10 @@ use erlangrt::agent_rt::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "zeptoclaw-rtd", version, about = "Zeptoclaw agent runtime daemon")]
+#[command(name = "zeptobeam", version, about = "Zeptoclaw agent runtime daemon")]
 struct Cli {
     /// Config file path
-    #[arg(short, long, default_value = "zeptoclaw-rt.toml")]
+    #[arg(short, long, default_value = "zeptobeam.toml")]
     config: String,
 
     /// Override log level (trace|debug|info|warn|error)
@@ -89,7 +89,7 @@ async fn main() {
     // Init tracing
     init_tracing(&config, cli.log_level.as_deref());
 
-    info!("zeptoclaw-rtd starting");
+    info!("zeptobeam starting");
     info!(
         workers = config.runtime.worker_count,
         mailbox_capacity = config.runtime.mailbox_capacity,
@@ -182,5 +182,5 @@ async fn main() {
         info!("health server stopped");
     }
 
-    info!("zeptoclaw-rtd stopped");
+    info!("zeptobeam stopped");
 }
