@@ -79,7 +79,10 @@ impl AgentProcess {
   pub fn terminate(&mut self, reason: Reason) {
     self.status = ProcessStatus::Exiting;
     if let Some(ref mut state) = self.state {
-      self.behavior.terminate(reason, state.as_mut());
+      let behavior = self.behavior.clone();
+      let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        behavior.terminate(reason, state.as_mut());
+      }));
     }
     self.state = None;
   }

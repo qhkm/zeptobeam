@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 
 use crate::agent_rt::{process::Priority, scheduler::AgentScheduler, types::*};
 
@@ -68,6 +68,23 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+  /// Start a supervisor and auto-wire it to the
+  /// scheduler's exit handler so child deaths are
+  /// automatically routed to handle_child_exit.
+  /// Returns an Rc<RefCell<Supervisor>> for shared
+  /// ownership between caller and exit handler closure.
+  pub fn start_linked(
+    sched: &mut AgentScheduler,
+    spec: SupervisorSpec,
+  ) -> Result<Rc<RefCell<Self>>, Reason> {
+    let sup = Rc::new(RefCell::new(Self::start(sched, spec)?));
+    let sup_ref = sup.clone();
+    sched.set_exit_handler(move |sched, pid, reason| {
+      sup_ref.borrow_mut().handle_child_exit(sched, pid, reason);
+    });
+    Ok(sup)
+  }
+
   /// Start a supervisor by spawning all children from
   /// the spec.
   pub fn start(sched: &mut AgentScheduler, spec: SupervisorSpec) -> Result<Self, Reason> {

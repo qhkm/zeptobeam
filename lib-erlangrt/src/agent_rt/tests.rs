@@ -1147,7 +1147,7 @@ fn test_scheduler_with_bridge_submits_io_request() {
 }
 
 #[test]
-fn test_scheduler_without_bridge_io_still_waits() {
+fn test_scheduler_without_bridge_io_delivers_error() {
   let mut sched = AgentScheduler::new();
   let behavior = Arc::new(IoBehavior);
   let pid = sched
@@ -1161,8 +1161,12 @@ fn test_scheduler_without_bridge_io_still_waits() {
   let proc = sched.registry.lookup(&pid).unwrap();
   assert_eq!(
     proc.status,
-    ProcessStatus::Waiting,
-    "Without bridge, IoRequest still sets Waiting"
+    ProcessStatus::Runnable,
+    "Without bridge, IoRequest should deliver error and set Runnable"
+  );
+  assert!(
+    proc.has_messages(),
+    "Without bridge, process should receive error message"
   );
 }
 
@@ -1541,4 +1545,277 @@ fn test_register_name_rejects_duplicate() {
 
   // Original registration should be unchanged
   assert_eq!(reg.lookup_name("server"), Some(pid1));
+}
+
+// === Fix 1: catch_unwind around behavior callbacks ===
+
+/// A behavior that panics in handle_message.
+struct PanicOnMessageBehavior;
+
+struct PanicState;
+
+impl AgentState for PanicState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for PanicOnMessageBehavior {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(PanicState))
+  }
+  fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
+    panic!("behavior bug in handle_message!")
+  }
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+}
+
+#[test]
+fn test_panic_in_handle_message_terminates_process() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(PanicOnMessageBehavior), serde_json::Value::Null)
+    .unwrap();
+  sched.send(pid, Message::Text("boom".into())).unwrap();
+  sched.enqueue(pid);
+
+  // Should NOT panic — scheduler catches it and terminates process
+  let ran = sched.tick();
+  assert!(ran);
+
+  // Process should be removed (terminated due to panic)
+  assert!(
+    sched.registry.lookup(&pid).is_none(),
+    "Panicking process should be terminated and removed"
+  );
+}
+
+/// A behavior that panics in handle_exit.
+struct PanicOnExitBehavior;
+
+impl AgentBehavior for PanicOnExitBehavior {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(PanicState))
+  }
+  fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
+    Action::Continue
+  }
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    panic!("behavior bug in handle_exit!")
+  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+}
+
+#[test]
+fn test_panic_in_handle_exit_terminates_process() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(PanicOnExitBehavior), serde_json::Value::Null)
+    .unwrap();
+
+  // Deliver an Exit system message to trigger handle_exit
+  sched
+    .send(
+      pid,
+      Message::System(SystemMsg::Exit {
+        from: 0,
+        reason: Reason::Custom("test".into()),
+      }),
+    )
+    .unwrap();
+  sched.enqueue(pid);
+
+  // Should NOT panic
+  let ran = sched.tick();
+  assert!(ran);
+
+  // Process should be terminated
+  assert!(
+    sched.registry.lookup(&pid).is_none(),
+    "Process panicking in handle_exit should be terminated"
+  );
+}
+
+/// A behavior that panics in terminate callback.
+struct PanicOnTerminateBehavior;
+
+impl AgentBehavior for PanicOnTerminateBehavior {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(PanicState))
+  }
+  fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
+    Action::Stop(Reason::Normal)
+  }
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {
+    panic!("behavior bug in terminate!")
+  }
+}
+
+#[test]
+fn test_panic_in_terminate_does_not_crash_scheduler() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(
+      Arc::new(PanicOnTerminateBehavior),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  sched.send(pid, Message::Text("stop".into())).unwrap();
+  sched.enqueue(pid);
+
+  // tick() triggers handle_message -> Stop -> terminate_process -> terminate() which panics
+  // Should NOT crash the scheduler
+  let ran = sched.tick();
+  assert!(ran);
+
+  // Process should still be cleaned up from registry
+  assert!(
+    sched.registry.lookup(&pid).is_none(),
+    "Process should be removed even if terminate() panics"
+  );
+}
+
+// === Fix 2: No-bridge IoRequest delivers error ===
+
+#[test]
+fn test_no_bridge_io_request_delivers_error() {
+  let mut sched = AgentScheduler::new();
+  // No bridge set
+  let behavior = Arc::new(IoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched.send(pid, Message::Text("trigger".into())).unwrap();
+  sched.enqueue(pid);
+  sched.tick();
+
+  // Process should NOT be stuck in Waiting — should have error message
+  let proc = sched.registry.lookup(&pid).unwrap();
+  assert!(
+    proc.has_messages(),
+    "Should have error message in mailbox when no bridge"
+  );
+  assert_eq!(
+    proc.status,
+    ProcessStatus::Runnable,
+    "Should be Runnable after error delivery, not stuck Waiting"
+  );
+}
+
+// === Fix 3: Supervisor auto-wire via start_linked ===
+
+#[test]
+fn test_supervisor_start_linked_auto_restarts_children() {
+  use crate::agent_rt::supervision::*;
+
+  // A behavior that stops on first message (simulates crash)
+  struct CrashOnMessageBehavior;
+  struct CrashState;
+
+  impl AgentState for CrashState {
+    fn as_any(&self) -> &dyn std::any::Any {
+      self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+      self
+    }
+  }
+
+  impl AgentBehavior for CrashOnMessageBehavior {
+    fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+      Ok(Box::new(CrashState))
+    }
+    fn handle_message(&self, _msg: Message, _state: &mut dyn AgentState) -> Action {
+      Action::Stop(Reason::Custom("crash".into()))
+    }
+    fn handle_exit(
+      &self,
+      _from: AgentPid,
+      _reason: Reason,
+      _state: &mut dyn AgentState,
+    ) -> Action {
+      Action::Continue
+    }
+    fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+  }
+
+  let mut sched = AgentScheduler::new();
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![ChildSpec {
+      id: "worker".to_string(),
+      behavior: Arc::new(CrashOnMessageBehavior) as Arc<dyn AgentBehavior>,
+      args: serde_json::Value::Null,
+      restart: ChildRestart::Permanent,
+      priority: Priority::Normal,
+    }],
+  };
+
+  // start_linked should auto-wire the exit handler
+  let sup = Supervisor::start_linked(&mut sched, spec).unwrap();
+  let original_pid = sup.borrow().children[0].pid;
+
+  // Send message to trigger crash
+  sched
+    .send(original_pid, Message::Text("crash".into()))
+    .unwrap();
+  sched.enqueue(original_pid);
+
+  // tick() will: dispatch message -> Stop -> terminate_process -> exit_handler -> supervisor restart
+  sched.tick();
+
+  // Original child should be gone
+  assert!(
+    sched.registry.lookup(&original_pid).is_none(),
+    "Original child should be terminated"
+  );
+
+  // Supervisor should have restarted the child automatically
+  let sup_ref = sup.borrow();
+  assert_eq!(
+    sup_ref.children.len(),
+    1,
+    "Supervisor should still have 1 child after auto-restart"
+  );
+  assert_ne!(
+    sup_ref.children[0].pid, original_pid,
+    "Restarted child should have a new PID"
+  );
+
+  // New child should exist in registry
+  let new_pid = sup_ref.children[0].pid;
+  assert!(
+    sched.registry.lookup(&new_pid).is_some(),
+    "Auto-restarted child should exist in registry"
+  );
 }

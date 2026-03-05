@@ -181,6 +181,9 @@ impl AgentScheduler {
 
       // Dispatch message: get behavior + state, call
       // the appropriate callback, then put state back.
+      // Wrapped in catch_unwind for BEAM-style process
+      // isolation — a panicking behavior terminates the
+      // process instead of crashing the scheduler.
       let action = {
         let proc = match self.registry.lookup_mut(&pid) {
           Some(p) => p,
@@ -192,14 +195,32 @@ impl AgentScheduler {
           Some(s) => s,
           None => break,
         };
-        let action = match msg {
-          Message::System(SystemMsg::Exit { from, reason }) => {
-            behavior.handle_exit(AgentPid::from_raw(from), reason, state.as_mut())
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+          match msg {
+            Message::System(SystemMsg::Exit { from, reason }) => {
+              behavior.handle_exit(AgentPid::from_raw(from), reason, state.as_mut())
+            }
+            other => behavior.handle_message(other, state.as_mut()),
           }
-          other => behavior.handle_message(other, state.as_mut()),
-        };
-        proc.state = Some(state);
-        action
+        }));
+        match result {
+          Ok(action) => {
+            if let Some(proc) = self.registry.lookup_mut(&pid) {
+              proc.state = Some(state);
+            }
+            action
+          }
+          Err(panic_info) => {
+            // State may be corrupted — drop it
+            drop(state);
+            let panic_msg = panic_info
+              .downcast_ref::<String>()
+              .cloned()
+              .or_else(|| panic_info.downcast_ref::<&str>().map(|s| s.to_string()))
+              .unwrap_or_else(|| "unknown panic".to_string());
+            Action::Stop(Reason::Custom(format!("panic: {}", panic_msg)))
+          }
+        }
       };
 
       // Handle the action
@@ -231,6 +252,16 @@ impl AgentScheduler {
               }
               self.enqueue(pid);
             }
+          } else {
+            // No bridge configured — deliver error
+            // back to process so it doesn't get stuck
+            if let Some(proc) = self.registry.lookup_mut(&pid) {
+              proc.deliver_message(Message::Text(
+                "no I/O bridge configured".to_string(),
+              ));
+              proc.status = ProcessStatus::Runnable;
+            }
+            self.enqueue(pid);
           }
           break;
         }
