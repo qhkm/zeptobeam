@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use zeptoclaw::tools::{
   filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool},
@@ -6,6 +6,8 @@ use zeptoclaw::tools::{
   web::{DdgSearchTool, SearxngSearchTool, WebFetchTool, WebSearchTool},
   GitTool, HttpRequestTool, Tool,
 };
+
+use crate::agent_rt::{mcp_client::McpClientManager, types::AgentPid};
 
 /// Builds tool sets for ZeptoAgent instances.
 /// Implementations know about available tools and filter
@@ -27,6 +29,94 @@ pub trait ToolFactory: Send + Sync {
 ///
 /// Tools are only enabled when explicitly requested via whitelist.
 pub struct DefaultToolFactory;
+
+/// MCP-aware tool factory that wraps DefaultToolFactory and adds MCP remote tools.
+///
+/// This factory extends the default toolset with tools from configured external
+/// MCP servers. MCP tools are namespaced as "servername__toolname".
+pub struct McpToolFactory {
+  inner: DefaultToolFactory,
+  mcp_manager: Arc<McpClientManager>,
+  agent_pid: AgentPid,
+}
+
+impl McpToolFactory {
+  /// Create a new MCP tool factory.
+  pub fn new(
+    inner: DefaultToolFactory,
+    mcp_manager: Arc<McpClientManager>,
+    agent_pid: AgentPid,
+  ) -> Self {
+    Self {
+      inner,
+      mcp_manager,
+      agent_pid,
+    }
+  }
+
+  /// Create a new MCP tool factory from environment.
+  pub fn from_env(mcp_manager: Arc<McpClientManager>, agent_pid: AgentPid) -> Self {
+    Self::new(DefaultToolFactory::from_env(), mcp_manager, agent_pid)
+  }
+
+  /// Get the inner DefaultToolFactory.
+  pub fn inner(&self) -> &DefaultToolFactory {
+    &self.inner
+  }
+
+  /// Get the MCP client manager.
+  pub fn mcp_manager(&self) -> &McpClientManager {
+    &self.mcp_manager
+  }
+
+  /// Get the agent PID.
+  pub fn agent_pid(&self) -> AgentPid {
+    self.agent_pid
+  }
+}
+
+impl ToolFactory for McpToolFactory {
+  fn build_tools(&self, whitelist: Option<&[String]>) -> Vec<Box<dyn Tool>> {
+    // Build local tools from inner factory
+    // Filter out MCP tool names (those containing "__")
+    let local_whitelist = whitelist.map(|names| {
+      names
+        .iter()
+        .filter(|n| !n.contains("__"))
+        .cloned()
+        .collect::<Vec<_>>()
+    });
+
+    let mut tools = self.inner.build_tools(local_whitelist.as_deref());
+
+    // If MCP is enabled and whitelist contains MCP tools, add them
+    if self.mcp_manager.is_enabled() {
+      if let Some(names) = whitelist {
+        let mcp_tool_names: Vec<&str> = names
+          .iter()
+          .filter(|n| n.contains("__"))
+          .map(|n| n.as_str())
+          .collect();
+
+        if !mcp_tool_names.is_empty() {
+          // Try to get tools from the session
+          // This is synchronous, so we use try_get_tools_for_agent which returns
+          // immediately if no session exists (lazy initialization on first use)
+          if let Ok(mcp_tools) = self.mcp_manager.try_get_tools_for_agent(self.agent_pid)
+          {
+            for tool in mcp_tools {
+              if mcp_tool_names.contains(&tool.name()) {
+                tools.push(Box::new(tool));
+              }
+            }
+          }
+        }
+      }
+    }
+
+    tools
+  }
+}
 
 impl DefaultToolFactory {
   pub fn from_env() -> Self {
@@ -178,7 +268,8 @@ fn parse_csv_env(key: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-  use super::{DefaultToolFactory, ToolFactory};
+  use super::{DefaultToolFactory, McpToolFactory, ToolFactory};
+  use crate::agent_rt::{mcp_client::McpClientManager, types::AgentPid};
 
   #[test]
   fn test_default_tool_factory_returns_empty_when_no_whitelist() {
@@ -199,5 +290,34 @@ mod tests {
     let names: Vec<String> = tools.into_iter().map(|t| t.name().to_string()).collect();
 
     assert_eq!(names, vec!["web_search".to_string(), "shell".to_string()]);
+  }
+
+  #[test]
+  fn test_mcp_tool_factory_disabled_when_empty() {
+    let inner = DefaultToolFactory::from_env();
+    let mcp_manager = std::sync::Arc::new(McpClientManager::empty());
+    let factory = McpToolFactory::new(inner, mcp_manager, AgentPid::new());
+
+    assert!(!factory.mcp_manager().is_enabled());
+
+    // Should still return local tools
+    let tools = factory.build_tools(Some(&["shell".to_string()]));
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name(), "shell");
+  }
+
+  #[test]
+  fn test_mcp_tool_factory_returns_local_tools() {
+    let inner = DefaultToolFactory::from_env();
+    let mcp_manager = std::sync::Arc::new(McpClientManager::empty());
+    let factory = McpToolFactory::new(inner, mcp_manager, AgentPid::new());
+
+    let tools =
+      factory.build_tools(Some(&["read_file".to_string(), "write_file".to_string()]));
+
+    assert_eq!(tools.len(), 2);
+    let names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+    assert!(names.contains(&"read_file".to_string()));
+    assert!(names.contains(&"write_file".to_string()));
   }
 }

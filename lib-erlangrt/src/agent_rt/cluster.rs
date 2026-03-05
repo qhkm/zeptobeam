@@ -5,7 +5,10 @@ use std::{
 };
 
 use crate::agent_rt::{
-  bridge::{create_bridge_pool, BridgeHandle, BridgeWorker},
+  bridge::{
+    create_bridge_pool, create_bridge_pool_with_mcp_servers, BridgeHandle, BridgeWorker,
+  },
+  config::McpServerEntry,
   scheduler::AgentScheduler,
   types::*,
 };
@@ -71,6 +74,21 @@ impl SchedulerCluster {
   pub fn create_shared_bridge_pool(&mut self, worker_count: usize) -> Vec<BridgeWorker> {
     let worker_count = worker_count.max(1);
     let (handle, workers) = create_bridge_pool(worker_count);
+    self.shared_bridge_workers = workers.len();
+    self.attach_shared_bridge(handle);
+    workers
+  }
+
+  /// Create and attach a shared bridge worker pool pre-configured with
+  /// external MCP server definitions.
+  pub fn create_shared_bridge_pool_with_mcp_servers(
+    &mut self,
+    worker_count: usize,
+    server_configs: Vec<McpServerEntry>,
+  ) -> Vec<BridgeWorker> {
+    let worker_count = worker_count.max(1);
+    let (handle, workers) =
+      create_bridge_pool_with_mcp_servers(worker_count, server_configs);
     self.shared_bridge_workers = workers.len();
     self.attach_shared_bridge(handle);
     workers
