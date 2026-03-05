@@ -48,6 +48,7 @@ get_hd
 #=== === Comparisons and Predicates === ===
 is_eq
 is_eq_exact
+is_ne
 is_ne_exact
 is_ge
 is_lt
@@ -55,6 +56,8 @@ is_lt
 #=== === Type Tests === ===
 is_atom
 is_binary
+is_bitstr
+is_boolean
 is_float
 is_function
 is_function2
@@ -69,6 +72,10 @@ is_tuple
 #=== === Mailbox === ===
 loop_rec
 loop_rec_end
+recv_marker_bind
+recv_marker_clear
+recv_marker_reserve
+recv_marker_use
 remove_message
 send
 wait

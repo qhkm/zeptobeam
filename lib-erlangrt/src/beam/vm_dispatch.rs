@@ -147,6 +147,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeIsEq::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_IS_NE => {
+      assert_arity(OPCODE_IS_NE, OpcodeIsNe::ARITY);
+      return OpcodeIsNe::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_IS_EQ_EXACT => {
       assert_arity(OPCODE_IS_EQ_EXACT, OpcodeIsEqExact::ARITY);
       return OpcodeIsEqExact::__run(vm, ctx, curr_p);
@@ -412,6 +417,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeApplyLast::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_IS_BOOLEAN => {
+      assert_arity(OPCODE_IS_BOOLEAN, OpcodeIsBoolean::ARITY);
+      return OpcodeIsBoolean::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_IS_FUNCTION2 => {
       assert_arity(OPCODE_IS_FUNCTION2, OpcodeIsFunction2::ARITY);
       return OpcodeIsFunction2::__run(vm, ctx, curr_p);
@@ -440,6 +450,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_GC_BIF2 => {
       assert_arity(OPCODE_GC_BIF2, OpcodeGcBif2::ARITY);
       return OpcodeGcBif2::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_IS_BITSTR => {
+      assert_arity(OPCODE_IS_BITSTR, OpcodeIsBitstr::ARITY);
+      return OpcodeIsBitstr::__run(vm, ctx, curr_p);
     },
 
     OPCODE_TRIM => {
@@ -545,6 +560,26 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_INIT_YREGS => {
       assert_arity(OPCODE_INIT_YREGS, OpcodeInitYregs::ARITY);
       return OpcodeInitYregs::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RECV_MARKER_BIND => {
+      assert_arity(OPCODE_RECV_MARKER_BIND, OpcodeRecvMarkerBind::ARITY);
+      return OpcodeRecvMarkerBind::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RECV_MARKER_CLEAR => {
+      assert_arity(OPCODE_RECV_MARKER_CLEAR, OpcodeRecvMarkerClear::ARITY);
+      return OpcodeRecvMarkerClear::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RECV_MARKER_RESERVE => {
+      assert_arity(OPCODE_RECV_MARKER_RESERVE, OpcodeRecvMarkerReserve::ARITY);
+      return OpcodeRecvMarkerReserve::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RECV_MARKER_USE => {
+      assert_arity(OPCODE_RECV_MARKER_USE, OpcodeRecvMarkerUse::ARITY);
+      return OpcodeRecvMarkerUse::__run(vm, ctx, curr_p);
     },
 
     OPCODE_BS_CREATE_BIN => {

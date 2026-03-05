@@ -70,6 +70,18 @@ define_opcode!(_vm, ctx, curr_p,
   args: cp_or_nil(fail), load(a), load(b),
 );
 
+// Checks relaxed inequality between arg1 and arg2, on false jump to arg0
+// Structure: is_ne(on_false:CP, a:src, b:src)
+define_opcode!(_vm, ctx, curr_p,
+  name: OpcodeIsNe, arity: 3,
+  run: {
+    // relaxed comparison, Not
+    generic_comparison(ctx, fail, a, b,
+      CmpPrecision::Relaxed, Ordering::Equal, CmpInvert::Not)
+  },
+  args: cp_or_nil(fail), load(a), load(b),
+);
+
 #[derive(Eq, PartialEq, Debug)]
 enum CmpPrecision {
   Relaxed,

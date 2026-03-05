@@ -155,3 +155,34 @@ impl OpcodeWaitTimeout {
     Ok(DispatchResult::Yield(YieldType::InfiniteWait))
   }
 }
+
+// Recv marker opcodes — optimization hints for the receive implementation.
+// These are no-ops in our simplified implementation.
+
+// recv_marker_bind/2: bind a marker to a reference
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeRecvMarkerBind, arity: 2,
+  run: { Ok(DispatchResult::Normal) },
+  args: IGNORE(_marker), IGNORE(_ref),
+);
+
+// recv_marker_clear/1: clear a receive marker
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeRecvMarkerClear, arity: 1,
+  run: { Ok(DispatchResult::Normal) },
+  args: IGNORE(_ref),
+);
+
+// recv_marker_reserve/1: reserve a receive marker
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeRecvMarkerReserve, arity: 1,
+  run: { Ok(DispatchResult::Normal) },
+  args: IGNORE(_marker),
+);
+
+// recv_marker_use/1: use a receive marker
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeRecvMarkerUse, arity: 1,
+  run: { Ok(DispatchResult::Normal) },
+  args: IGNORE(_ref),
+);
