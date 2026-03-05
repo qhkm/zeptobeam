@@ -2,8 +2,7 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::agent_rt::checkpoint::CheckpointStore;
-use crate::agent_rt::error::AgentRtError;
+use crate::agent_rt::{checkpoint::CheckpointStore, error::AgentRtError};
 
 pub struct SqliteCheckpointStore {
   conn: Mutex<Connection>,
@@ -11,8 +10,8 @@ pub struct SqliteCheckpointStore {
 
 impl SqliteCheckpointStore {
   pub fn open(path: &str) -> Result<Self, AgentRtError> {
-    let conn =
-      Connection::open(path).map_err(|e| AgentRtError::Checkpoint(format!("sqlite open: {}", e)))?;
+    let conn = Connection::open(path)
+      .map_err(|e| AgentRtError::Checkpoint(format!("sqlite open: {}", e)))?;
     conn
       .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
       .map_err(|e| AgentRtError::Checkpoint(format!("sqlite pragma: {}", e)))?;
@@ -88,7 +87,10 @@ impl CheckpointStore for SqliteCheckpointStore {
       .lock()
       .map_err(|_| AgentRtError::Checkpoint("sqlite mutex poisoned".into()))?;
     conn
-      .execute("DELETE FROM checkpoints WHERE key = ?1", rusqlite::params![key])
+      .execute(
+        "DELETE FROM checkpoints WHERE key = ?1",
+        rusqlite::params![key],
+      )
       .map_err(|e| AgentRtError::Checkpoint(format!("sqlite delete: {}", e)))?;
     Ok(())
   }
