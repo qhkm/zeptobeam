@@ -458,3 +458,67 @@ fn test_scheduler_multiple_ticks_drain_mailbox() {
   );
   assert_eq!(proc.status, ProcessStatus::Waiting);
 }
+
+// --- Bridge tests ---
+
+#[test]
+fn test_bridge_creation() {
+  let (_handle, _worker) =
+    crate::agent_rt::bridge::create_bridge();
+}
+
+#[test]
+fn test_bridge_submit_returns_correlation_id() {
+  let (mut handle, _worker) =
+    crate::agent_rt::bridge::create_bridge();
+  let pid = AgentPid::new();
+  let op = IoOp::Timer {
+    duration: std::time::Duration::from_millis(100),
+  };
+  let id1 = handle.submit(pid, op).unwrap();
+  let op2 = IoOp::Timer {
+    duration: std::time::Duration::from_millis(50),
+  };
+  let id2 = handle.submit(pid, op2).unwrap();
+  assert_eq!(id1, 0);
+  assert_eq!(id2, 1);
+}
+
+#[test]
+fn test_bridge_drain_empty() {
+  let (handle, _worker) =
+    crate::agent_rt::bridge::create_bridge();
+  assert!(handle.drain_responses().is_empty());
+}
+
+#[tokio::test]
+async fn test_bridge_roundtrip_timer() {
+  let (mut handle, worker) =
+    crate::agent_rt::bridge::create_bridge();
+  let pid = AgentPid::new();
+
+  let worker_handle =
+    tokio::spawn(async move { worker.run().await });
+
+  let _corr_id = handle
+    .submit(
+      pid,
+      IoOp::Timer {
+        duration: std::time::Duration::from_millis(10),
+      },
+    )
+    .unwrap();
+
+  // Wait for response
+  tokio::time::sleep(
+    std::time::Duration::from_millis(200),
+  )
+  .await;
+
+  let responses = handle.drain_responses();
+  assert_eq!(responses.len(), 1);
+  assert_eq!(responses[0].0, pid);
+
+  drop(handle); // disconnect channels to stop worker
+  let _ = worker_handle.await;
+}

@@ -56,6 +56,7 @@ pub enum Action {
   Stop(Reason),
 }
 
+#[derive(Debug)]
 pub enum IoOp {
   HttpRequest {
     method: String,
