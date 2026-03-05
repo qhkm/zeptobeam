@@ -118,24 +118,6 @@ Expose the runtime as an MCP server and consume MCP tools natively.
 
 ---
 
-## Phase 8: Multi-Node Clustering [PLANNED]
-
-Distribute agents across multiple runtime nodes.
-
-- **Network transport**: gRPC (tonic) inter-node communication for message passing
-- **Node discovery**: Static config node registry
-- **Remote spawn**: Spawn processes on remote nodes, transparent PID routing
-- **Partition rebalancing**: Migrate agent processes between nodes on load imbalance
-- **Distributed supervision**: Supervisors that span nodes, restart on remote node failure
-- **Cross-node dead-letter routing**: Forward undeliverable messages to origin node's DLQ
-- **Split-brain resolution**: Leader-based consistency for shared state (agent registry, checkpoints)
-
-**Prerequisite:** Phase 5 (production readiness), Phase 7 (MCP transport layer reusable for node communication).
-
-**Status:** This is the only remaining core phase.
-
----
-
 ## Phase Summary
 
 | Phase | Name | Status | Tests |
@@ -147,9 +129,8 @@ Distribute agents across multiple runtime nodes.
 | 5 | Production Readiness | Done | ~20 |
 | 6 | Advanced Orchestration | Done | 48 |
 | 7 | MCP Integration | Done | ~18 |
-| 8 | Multi-Node Clustering | Planned | — |
 | 9 | BEAM Parity | Done | ~80 |
-| **Total** | | **9 of 9 core phases done** | **343** |
+| **Total** | | **All core phases complete** | **343** |
 
 ---
 
@@ -171,7 +152,19 @@ True Erlang/BEAM-inspired features that make the runtime uniquely powerful.
 
 The following features are designated as **Enterprise** — they extend the core runtime for production deployments at scale but are not required for the fundamental BEAM-inspired agent experience.
 
-## Enterprise Phase E1: Cloud Native
+## Enterprise Phase E1: Multi-Node Clustering
+
+Distribute agents across multiple runtime nodes.
+
+- Network transport: gRPC (tonic) inter-node communication for message passing
+- Node discovery: Static config node registry
+- Remote spawn: Spawn processes on remote nodes, transparent PID routing
+- Partition rebalancing: Migrate agent processes between nodes on load imbalance
+- Distributed supervision: Supervisors that span nodes, restart on remote node failure
+- Cross-node dead-letter routing: Forward undeliverable messages to origin node's DLQ
+- Split-brain resolution: Leader-based consistency for shared state (agent registry, checkpoints)
+
+## Enterprise Phase E2: Cloud Native
 
 - Kubernetes Operator with CRDs for AgentRuntime, AgentPool
 - Horizontal Pod Autoscaler (HPA) integration
@@ -181,7 +174,7 @@ The following features are designated as **Enterprise** — they extend the core
 - Resource quotas and per-tenant rate limiting
 - Cost optimization: token budgeting, model tier routing, spot instance support
 
-## Enterprise Phase E2: Security & Compliance
+## Enterprise Phase E3: Security & Compliance
 
 - Zero-trust architecture with mTLS between nodes
 - OIDC/OAuth2 authentication and RBAC
@@ -191,7 +184,7 @@ The following features are designated as **Enterprise** — they extend the core
 - Wasm-based agent sandboxing
 - FIPS 140-2 compliance mode
 
-## Enterprise Phase E3: Advanced AI Patterns
+## Enterprise Phase E4: Advanced AI Patterns
 
 - Agent swarm intelligence (emergent coordination, pheromone trails)
 - Federated learning across agent nodes
@@ -200,7 +193,7 @@ The following features are designated as **Enterprise** — they extend the core
 - Multi-modal agents (vision, audio, code)
 - Agent-to-agent negotiation protocols
 
-## Enterprise Phase E4: Enterprise Observability
+## Enterprise Phase E5: Enterprise Observability
 
 - OpenTelemetry distributed tracing
 - Real-time WebSocket event streaming
@@ -213,6 +206,6 @@ The following features are designated as **Enterprise** — they extend the core
 
 ## Philosophy
 
-**Core (Phases 1-9)**: Open source, BEAM-inspired, essential for any serious agent runtime. These features make zeptobeam unique and powerful on its own.
+**Core (Phases 1–9)**: Open source, BEAM-inspired, essential for any serious agent runtime. All core phases are complete. These features make zeptobeam unique and powerful on its own.
 
-**Enterprise (E1-E4)**: Production-hardening for organizations running at scale. These are important but not differentiating — they make the runtime *deployable* at enterprise scale.
+**Enterprise (E1–E5)**: Production-hardening for organizations running at scale. Includes multi-node clustering, cloud-native deployment, security, advanced AI patterns, and observability.
