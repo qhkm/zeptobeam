@@ -1585,6 +1585,237 @@ fn test_scheduler_spawn_creates_child() {
 
 // --- S4: register_name rejects duplicates ---
 
+// --- Runtime gaps: spawn notification + auto-link ---
+
+/// A behavior that spawns a child and wants to know
+/// the child PID via SpawnResult system message.
+struct SpawnAndTrackBehavior;
+
+struct SpawnAndTrackState {
+  child_pid: Option<AgentPid>,
+}
+
+impl AgentState for SpawnAndTrackState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for SpawnAndTrackBehavior {
+  fn init(
+    &self,
+    _args: serde_json::Value,
+  ) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(SpawnAndTrackState {
+      child_pid: None,
+    }))
+  }
+  fn handle_message(
+    &self,
+    msg: Message,
+    state: &mut dyn AgentState,
+  ) -> Action {
+    let s = state
+      .as_any_mut()
+      .downcast_mut::<SpawnAndTrackState>()
+      .unwrap();
+    match msg {
+      Message::System(SystemMsg::SpawnResult {
+        child_pid,
+      }) => {
+        s.child_pid = Some(AgentPid::from_raw(child_pid));
+        Action::Continue
+      }
+      Message::Text(_) => Action::Spawn {
+        behavior: Arc::new(EchoBehavior),
+        args: serde_json::Value::Null,
+      },
+      _ => Action::Continue,
+    }
+  }
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+  fn terminate(
+    &self,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) {
+  }
+}
+
+#[test]
+fn test_spawn_notifies_parent_with_child_pid() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(SpawnAndTrackBehavior);
+  let parent = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  // Send trigger to spawn a child
+  sched
+    .send(parent, Message::Text("spawn".into()))
+    .unwrap();
+  sched.enqueue(parent);
+
+  // First tick: processes Text, returns Spawn action,
+  // scheduler spawns child and delivers SpawnResult
+  sched.tick();
+
+  // Second tick: parent processes SpawnResult message
+  sched.enqueue(parent);
+  sched.tick();
+
+  // Verify parent received the child PID
+  let proc = sched.registry.lookup(&parent).unwrap();
+  let state = proc
+    .state
+    .as_ref()
+    .unwrap()
+    .as_any()
+    .downcast_ref::<SpawnAndTrackState>()
+    .unwrap();
+  assert!(
+    state.child_pid.is_some(),
+    "Parent should receive SpawnResult with child PID"
+  );
+
+  // Verify the child actually exists
+  let child_pid = state.child_pid.unwrap();
+  assert!(
+    sched.registry.lookup(&child_pid).is_some(),
+    "Spawned child should exist in registry"
+  );
+}
+
+#[test]
+fn test_spawn_auto_links_parent_to_child() {
+  let mut sched = AgentScheduler::new();
+  let behavior = Arc::new(SpawnBehavior);
+  let parent = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+
+  sched
+    .send(parent, Message::Text("spawn".into()))
+    .unwrap();
+  sched.enqueue(parent);
+  sched.tick();
+
+  // Find the child (the other process in registry)
+  let child_pid = sched
+    .registry
+    .pids()
+    .into_iter()
+    .find(|p| *p != parent)
+    .expect("Child should exist");
+
+  // Parent should be linked to child
+  let parent_proc =
+    sched.registry.lookup(&parent).unwrap();
+  assert!(
+    parent_proc.links.contains(&child_pid),
+    "Parent should have link to child after spawn"
+  );
+
+  // Child should be linked back to parent
+  let child_proc =
+    sched.registry.lookup(&child_pid).unwrap();
+  assert!(
+    child_proc.links.contains(&parent),
+    "Child should have link back to parent"
+  );
+}
+
+// --- Runtime gap: extensible IoOp ---
+
+#[test]
+fn test_custom_io_op_through_bridge() {
+  let (bridge_handle, _worker) =
+    crate::agent_rt::bridge::create_bridge();
+  let mut sched = AgentScheduler::new();
+  sched.set_bridge(bridge_handle);
+
+  // A behavior that issues a Custom IoOp
+  struct CustomIoBehavior;
+  struct CustomIoState;
+
+  impl AgentState for CustomIoState {
+    fn as_any(&self) -> &dyn std::any::Any {
+      self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+      self
+    }
+  }
+
+  impl AgentBehavior for CustomIoBehavior {
+    fn init(
+      &self,
+      _args: serde_json::Value,
+    ) -> Result<Box<dyn AgentState>, Reason> {
+      Ok(Box::new(CustomIoState))
+    }
+    fn handle_message(
+      &self,
+      _msg: Message,
+      _state: &mut dyn AgentState,
+    ) -> Action {
+      Action::IoRequest(IoOp::Custom {
+        kind: "llm_request".to_string(),
+        payload: serde_json::json!({
+          "model": "claude-3",
+          "prompt": "hello"
+        }),
+      })
+    }
+    fn handle_exit(
+      &self,
+      _from: AgentPid,
+      _reason: Reason,
+      _state: &mut dyn AgentState,
+    ) -> Action {
+      Action::Continue
+    }
+    fn terminate(
+      &self,
+      _reason: Reason,
+      _state: &mut dyn AgentState,
+    ) {
+    }
+  }
+
+  let behavior: Arc<dyn AgentBehavior> =
+    Arc::new(CustomIoBehavior);
+  let pid = sched
+    .registry
+    .spawn(behavior, serde_json::Value::Null)
+    .unwrap();
+  sched
+    .send(pid, Message::Text("go".into()))
+    .unwrap();
+  sched.enqueue(pid);
+  sched.tick();
+
+  // Process should be Waiting after Custom IoRequest
+  let proc = sched.registry.lookup(&pid).unwrap();
+  assert_eq!(
+    proc.status,
+    ProcessStatus::Waiting,
+    "Custom IoOp should set process to Waiting"
+  );
+}
+
 #[test]
 fn test_register_name_rejects_duplicate() {
   let mut reg = AgentRegistry::new();

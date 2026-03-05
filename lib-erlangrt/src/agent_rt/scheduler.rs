@@ -302,6 +302,25 @@ impl AgentScheduler {
       if let Ok(child_pid) =
         self.registry.spawn(behavior, args)
       {
+        // Auto-link parent <-> child
+        if let Some(parent_proc) =
+          self.registry.lookup_mut(&pid)
+        {
+          parent_proc.links.push(child_pid);
+        }
+        if let Some(child_proc) =
+          self.registry.lookup_mut(&child_pid)
+        {
+          child_proc.links.push(pid);
+        }
+
+        // Notify parent with SpawnResult
+        let spawn_msg =
+          Message::System(SystemMsg::SpawnResult {
+            child_pid: child_pid.raw(),
+          });
+        let _ = self.send(pid, spawn_msg);
+
         self.enqueue(child_pid);
       }
     }

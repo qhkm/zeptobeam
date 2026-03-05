@@ -40,11 +40,13 @@ pub enum Message {
   System(SystemMsg),
 }
 
-/// System-level messages (exit signals, I/O responses).
+/// System-level messages (exit signals, I/O responses,
+/// spawn notifications).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemMsg {
   Exit { from: u64, reason: Reason },
   IoResponse { correlation_id: u64, result: IoResult },
+  SpawnResult { child_pid: u64 },
 }
 
 /// Reason for process termination.
@@ -86,6 +88,10 @@ pub enum IoOp {
   },
   Timer {
     duration: Duration,
+  },
+  Custom {
+    kind: String,
+    payload: serde_json::Value,
   },
 }
 

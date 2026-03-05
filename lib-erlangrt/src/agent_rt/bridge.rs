@@ -166,5 +166,14 @@ async fn execute_io_op(op: &IoOp) -> IoResult {
         "status": "placeholder"
       }))
     }
+    IoOp::Custom { kind, payload } => {
+      // Custom ops return the payload as-is for now.
+      // Real implementations will be pluggable.
+      IoResult::Ok(serde_json::json!({
+        "kind": kind,
+        "payload": payload,
+        "status": "placeholder"
+      }))
+    }
   }
 }
