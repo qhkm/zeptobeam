@@ -1,0 +1,75 @@
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+use crate::agent_rt::types::*;
+
+pub struct AgentProcess {
+  pub pid: AgentPid,
+  pub behavior: Arc<dyn AgentBehavior>,
+  pub state: Option<Box<dyn AgentState>>,
+  pub mailbox: VecDeque<Message>,
+  pub reductions: u32,
+  pub status: ProcessStatus,
+  pub links: Vec<AgentPid>,
+  pub monitors: Vec<MonitorRef>,
+  pub supervisor: Option<AgentPid>,
+  pub trap_exit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessStatus {
+  Runnable,
+  Waiting,
+  Suspended,
+  Exiting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MonitorRef(u64);
+
+impl MonitorRef {
+  pub fn new(id: u64) -> Self {
+    Self(id)
+  }
+
+  pub fn raw(&self) -> u64 {
+    self.0
+  }
+}
+
+impl AgentProcess {
+  pub fn new(
+    behavior: Arc<dyn AgentBehavior>,
+    args: serde_json::Value,
+  ) -> Result<Self, Reason> {
+    let pid = AgentPid::new();
+    let state = behavior.init(args)?;
+    Ok(Self {
+      pid,
+      behavior,
+      state: Some(state),
+      mailbox: VecDeque::new(),
+      reductions: 0,
+      status: ProcessStatus::Runnable,
+      links: Vec::new(),
+      monitors: Vec::new(),
+      supervisor: None,
+      trap_exit: false,
+    })
+  }
+
+  pub fn deliver_message(&mut self, msg: Message) {
+    self.mailbox.push_back(msg);
+    if self.status == ProcessStatus::Waiting {
+      self.status = ProcessStatus::Runnable;
+    }
+  }
+
+  pub fn has_messages(&self) -> bool {
+    !self.mailbox.is_empty()
+  }
+
+  pub fn next_message(&mut self) -> Option<Message> {
+    self.mailbox.pop_front()
+  }
+}

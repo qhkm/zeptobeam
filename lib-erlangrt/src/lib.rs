@@ -10,6 +10,7 @@ extern crate lazy_static;
 #[macro_use]
 extern crate bitflags;
 
+pub mod agent_rt;
 mod beam;
 mod big;
 pub mod command_line_args;
