@@ -1,9 +1,13 @@
+<div align="center">
+
 # ZeptoBeam
 
-> **Orchestration layer for ZeptoClaw. Fault-tolerant multi-agent runtime built in Rust.**
+**Orchestration layer for ZeptoClaw. Fault-tolerant multi-agent runtime built in Rust.**
 
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://rust-lang.github.io/rustup/concepts/channels.html)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+</div>
 
 ---
 
