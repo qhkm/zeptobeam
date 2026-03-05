@@ -522,3 +522,224 @@ async fn test_bridge_roundtrip_timer() {
   drop(handle); // disconnect channels to stop worker
   let _ = worker_handle.await;
 }
+
+// --- Supervision tests ---
+
+use crate::agent_rt::supervision::*;
+
+#[test]
+fn test_supervisor_spec_creation() {
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![],
+  };
+  assert_eq!(spec.max_restarts, 5);
+}
+
+#[test]
+fn test_supervisor_starts_children() {
+  let behavior = Arc::new(EchoBehavior);
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![
+      ChildSpec {
+        id: "child1".into(),
+        behavior: behavior.clone(),
+        args: serde_json::Value::Null,
+        restart: ChildRestart::Permanent,
+        shutdown: ShutdownPolicy::Timeout(5000),
+        priority: Priority::Normal,
+      },
+      ChildSpec {
+        id: "child2".into(),
+        behavior,
+        args: serde_json::Value::Null,
+        restart: ChildRestart::Permanent,
+        shutdown: ShutdownPolicy::Timeout(5000),
+        priority: Priority::Normal,
+      },
+    ],
+  };
+  let mut sched = AgentScheduler::new();
+  let sup = Supervisor::start(&mut sched, spec)
+    .unwrap();
+  assert_eq!(sup.children.len(), 2);
+  assert_eq!(sched.registry.count(), 2);
+}
+
+#[test]
+fn test_one_for_one_restart() {
+  let behavior = Arc::new(EchoBehavior);
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![ChildSpec {
+      id: "child1".into(),
+      behavior,
+      args: serde_json::Value::Null,
+      restart: ChildRestart::Permanent,
+      shutdown: ShutdownPolicy::Timeout(5000),
+      priority: Priority::Normal,
+    }],
+  };
+  let mut sched = AgentScheduler::new();
+  let mut sup = Supervisor::start(&mut sched, spec)
+    .unwrap();
+  let old_pid = sup.children[0].pid;
+
+  // Simulate crash
+  sup.handle_child_exit(
+    &mut sched,
+    old_pid,
+    Reason::Custom("crash".into()),
+  );
+
+  assert_eq!(sup.children.len(), 1);
+  assert_ne!(sup.children[0].pid, old_pid);
+  assert!(!sup.is_shutdown());
+}
+
+#[test]
+fn test_transient_not_restarted_on_normal_exit() {
+  let behavior = Arc::new(EchoBehavior);
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![ChildSpec {
+      id: "child1".into(),
+      behavior,
+      args: serde_json::Value::Null,
+      restart: ChildRestart::Transient,
+      shutdown: ShutdownPolicy::Timeout(5000),
+      priority: Priority::Normal,
+    }],
+  };
+  let mut sched = AgentScheduler::new();
+  let mut sup = Supervisor::start(&mut sched, spec)
+    .unwrap();
+  let pid = sup.children[0].pid;
+
+  sup.handle_child_exit(
+    &mut sched,
+    pid,
+    Reason::Normal,
+  );
+  assert!(sup.children.is_empty());
+}
+
+#[test]
+fn test_temporary_never_restarted() {
+  let behavior = Arc::new(EchoBehavior);
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![ChildSpec {
+      id: "child1".into(),
+      behavior,
+      args: serde_json::Value::Null,
+      restart: ChildRestart::Temporary,
+      shutdown: ShutdownPolicy::Timeout(5000),
+      priority: Priority::Normal,
+    }],
+  };
+  let mut sched = AgentScheduler::new();
+  let mut sup = Supervisor::start(&mut sched, spec)
+    .unwrap();
+  let pid = sup.children[0].pid;
+
+  sup.handle_child_exit(
+    &mut sched,
+    pid,
+    Reason::Custom("crash".into()),
+  );
+  assert!(sup.children.is_empty());
+}
+
+#[test]
+fn test_max_restarts_exceeded() {
+  let behavior = Arc::new(EchoBehavior);
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForOne,
+    max_restarts: 2,
+    max_seconds: 60,
+    children: vec![ChildSpec {
+      id: "child1".into(),
+      behavior,
+      args: serde_json::Value::Null,
+      restart: ChildRestart::Permanent,
+      shutdown: ShutdownPolicy::Timeout(5000),
+      priority: Priority::Normal,
+    }],
+  };
+  let mut sched = AgentScheduler::new();
+  let mut sup = Supervisor::start(&mut sched, spec)
+    .unwrap();
+
+  // Crash 3 times — exceeds max_restarts of 2
+  for _ in 0..3 {
+    if let Some(child) = sup.children.first() {
+      let pid = child.pid;
+      sup.handle_child_exit(
+        &mut sched,
+        pid,
+        Reason::Custom("crash".into()),
+      );
+    }
+  }
+  assert!(sup.is_shutdown());
+}
+
+#[test]
+fn test_one_for_all_restarts_all() {
+  let behavior = Arc::new(EchoBehavior);
+  let spec = SupervisorSpec {
+    strategy: RestartStrategy::OneForAll,
+    max_restarts: 5,
+    max_seconds: 60,
+    children: vec![
+      ChildSpec {
+        id: "a".into(),
+        behavior: behavior.clone(),
+        args: serde_json::Value::Null,
+        restart: ChildRestart::Permanent,
+        shutdown: ShutdownPolicy::Timeout(5000),
+        priority: Priority::Normal,
+      },
+      ChildSpec {
+        id: "b".into(),
+        behavior,
+        args: serde_json::Value::Null,
+        restart: ChildRestart::Permanent,
+        shutdown: ShutdownPolicy::Timeout(5000),
+        priority: Priority::Normal,
+      },
+    ],
+  };
+  let mut sched = AgentScheduler::new();
+  let mut sup = Supervisor::start(&mut sched, spec)
+    .unwrap();
+  let old_pids: Vec<_> =
+    sup.children.iter().map(|c| c.pid).collect();
+
+  // Kill first child
+  sup.handle_child_exit(
+    &mut sched,
+    old_pids[0],
+    Reason::Custom("crash".into()),
+  );
+
+  // Both should be restarted with new PIDs
+  assert_eq!(sup.children.len(), 2);
+  let new_pids: Vec<_> =
+    sup.children.iter().map(|c| c.pid).collect();
+  assert!(
+    new_pids.iter().all(|p| !old_pids.contains(p))
+  );
+}
