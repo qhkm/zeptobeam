@@ -1123,6 +1123,55 @@ impl AgentBehavior for IoBehavior {
   fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
 }
 
+struct SingleTimerBehavior {
+  duration: std::time::Duration,
+}
+
+struct SingleTimerState {
+  requested: bool,
+}
+
+impl AgentState for SingleTimerState {
+  fn as_any(&self) -> &dyn std::any::Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+}
+
+impl AgentBehavior for SingleTimerBehavior {
+  fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+    Ok(Box::new(SingleTimerState { requested: false }))
+  }
+
+  fn handle_message(&self, _msg: Message, state: &mut dyn AgentState) -> Action {
+    let s = state
+      .as_any_mut()
+      .downcast_mut::<SingleTimerState>()
+      .unwrap();
+    if s.requested {
+      Action::Continue
+    } else {
+      s.requested = true;
+      Action::IoRequest(IoOp::Timer {
+        duration: self.duration,
+      })
+    }
+  }
+
+  fn handle_exit(
+    &self,
+    _from: AgentPid,
+    _reason: Reason,
+    _state: &mut dyn AgentState,
+  ) -> Action {
+    Action::Continue
+  }
+
+  fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+}
+
 #[test]
 fn test_scheduler_with_bridge_submits_io_request() {
   let (bridge_handle, _worker) = crate::agent_rt::bridge::create_bridge();
@@ -2999,6 +3048,78 @@ async fn test_bridge_records_io_metrics() {
     }
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
   }
+
+  drop(sched);
+  let _ = worker_handle.await;
+}
+
+#[tokio::test]
+async fn test_graceful_shutdown_drains_inflight_io_and_terminates_processes() {
+  let (bridge_handle, worker) = crate::agent_rt::bridge::create_bridge();
+  let mut sched = AgentScheduler::new();
+  sched.set_bridge(bridge_handle);
+  let worker_handle = tokio::spawn(async move { worker.run().await });
+
+  let pid = sched
+    .registry
+    .spawn(
+      Arc::new(SingleTimerBehavior {
+        duration: std::time::Duration::from_millis(80),
+      }),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  sched.send(pid, Message::Text("go".into())).unwrap();
+  sched.enqueue(pid);
+  sched.tick();
+  assert_eq!(
+    sched.registry.lookup(&pid).unwrap().status,
+    ProcessStatus::Waiting
+  );
+
+  let start = std::time::Instant::now();
+  sched.graceful_shutdown(std::time::Duration::from_secs(1));
+  let elapsed = start.elapsed();
+  assert!(
+    elapsed >= std::time::Duration::from_millis(30),
+    "shutdown should wait for in-flight io, elapsed {:?}",
+    elapsed
+  );
+  assert_eq!(sched.registry.count(), 0);
+
+  drop(sched);
+  let _ = worker_handle.await;
+}
+
+#[tokio::test]
+async fn test_graceful_shutdown_timeout_force_stops_bridge() {
+  let (bridge_handle, worker) = crate::agent_rt::bridge::create_bridge();
+  let mut sched = AgentScheduler::new();
+  sched.set_bridge(bridge_handle);
+  let worker_handle = tokio::spawn(async move { worker.run().await });
+
+  let pid = sched
+    .registry
+    .spawn(
+      Arc::new(SingleTimerBehavior {
+        duration: std::time::Duration::from_millis(500),
+      }),
+      serde_json::Value::Null,
+    )
+    .unwrap();
+  sched.send(pid, Message::Text("go".into())).unwrap();
+  sched.enqueue(pid);
+  sched.tick();
+
+  let start = std::time::Instant::now();
+  sched.graceful_shutdown(std::time::Duration::from_millis(20));
+  let elapsed = start.elapsed();
+  assert!(
+    elapsed < std::time::Duration::from_millis(300),
+    "shutdown should not block indefinitely, elapsed {:?}",
+    elapsed
+  );
+  assert_eq!(sched.registry.count(), 0);
 
   drop(sched);
   let _ = worker_handle.await;

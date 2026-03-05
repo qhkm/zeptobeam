@@ -2,7 +2,7 @@ use crate::agent_rt::{
   observability::RuntimeMetrics, rate_limiter::RateLimiter, types::*,
 };
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use std::{error::Error as StdError, sync::Arc};
+use std::{error::Error as StdError, sync::Arc, time::Duration};
 use tracing::{debug, warn};
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
@@ -51,10 +51,16 @@ pub struct IoResponse {
   pub result: IoResult,
 }
 
+#[derive(Debug)]
+enum WorkerRequest {
+  Io(IoRequest),
+  Shutdown { timeout: Duration, ack: Sender<()> },
+}
+
 /// Scheduler-side handle for submitting I/O operations
 /// and draining responses.
 pub struct BridgeHandle {
-  request_tx: Sender<IoRequest>,
+  request_tx: Sender<WorkerRequest>,
   response_rx: Receiver<IoResponse>,
   pub next_correlation_id: u64,
 }
@@ -62,7 +68,7 @@ pub struct BridgeHandle {
 /// Tokio-side worker that receives I/O requests
 /// and executes them asynchronously.
 pub struct BridgeWorker {
-  request_rx: Receiver<IoRequest>,
+  request_rx: Receiver<WorkerRequest>,
   response_tx: Sender<IoResponse>,
   rate_limiter: Option<RateLimiter>,
   metrics: Option<Arc<RuntimeMetrics>>,
@@ -108,7 +114,7 @@ impl BridgeHandle {
       source_pid: pid,
       op,
     };
-    match self.request_tx.try_send(req) {
+    match self.request_tx.try_send(WorkerRequest::Io(req)) {
       Ok(()) => {
         self.next_correlation_id += 1;
         Ok(cid)
@@ -116,6 +122,23 @@ impl BridgeHandle {
       Err(TrySendError::Full(_)) => Err("request queue full".into()),
       Err(TrySendError::Disconnected(_)) => Err("bridge worker disconnected".into()),
     }
+  }
+
+  /// Ask the bridge worker to stop accepting new I/O and
+  /// wait for in-flight operations to complete up to
+  /// `timeout`.
+  pub fn shutdown(&mut self, timeout: Duration) -> Result<(), String> {
+    let (ack_tx, ack_rx) = bounded(1);
+    self
+      .request_tx
+      .send(WorkerRequest::Shutdown {
+        timeout,
+        ack: ack_tx,
+      })
+      .map_err(|_| "bridge worker disconnected".to_string())?;
+    ack_rx
+      .recv_timeout(timeout)
+      .map_err(|_| "bridge shutdown timed out".to_string())
   }
 
   /// Non-blocking drain of all pending responses.
@@ -161,78 +184,100 @@ impl BridgeWorker {
   /// `spawn_blocking` so the blocking crossbeam recv
   /// does not starve the Tokio runtime.
   pub async fn run(self) {
+    let mut in_flight = tokio::task::JoinSet::new();
     let req_rx = self.request_rx;
     let resp_tx = self.response_tx;
     let rate_limiter = self.rate_limiter;
     let metrics = self.metrics;
     let llm_config = self.llm_config;
     loop {
+      while in_flight.try_join_next().is_some() {}
+
       let rx = req_rx.clone();
       let recv_result = tokio::task::spawn_blocking(move || rx.recv()).await;
-      let req = match recv_result {
+      let request = match recv_result {
         Ok(Ok(r)) => r,
         // Channel disconnected or join error: stop.
         _ => break,
       };
-      let tx = resp_tx.clone();
-      let rl = rate_limiter.clone();
-      let metrics = metrics.clone();
-      let llm_cfg = llm_config.clone();
-      tokio::spawn(async move {
-        let op_kind = io_op_kind(&req.op);
-        if let Some(ref m) = metrics {
-          m.record_io_request();
-        }
-        debug!(
-          pid = req.source_pid.raw(),
-          correlation_id = req.correlation_id,
-          op_kind = op_kind,
-          "bridge io start"
-        );
-        let start = std::time::Instant::now();
-        let result = execute_io_op_with_config(&req.op, rl.as_ref(), &llm_cfg).await;
-        let latency = start.elapsed();
-        if let Some(ref m) = metrics {
-          m.record_io_result(&result, latency);
-        }
-        match &result {
-          IoResult::Ok(_) => {
+      match request {
+        WorkerRequest::Io(req) => {
+          let tx = resp_tx.clone();
+          let rl = rate_limiter.clone();
+          let metrics = metrics.clone();
+          let llm_cfg = llm_config.clone();
+          in_flight.spawn(async move {
+            let op_kind = io_op_kind(&req.op);
+            if let Some(ref m) = metrics {
+              m.record_io_request();
+            }
             debug!(
               pid = req.source_pid.raw(),
               correlation_id = req.correlation_id,
               op_kind = op_kind,
-              latency_ms = latency.as_millis() as u64,
-              "bridge io success"
+              "bridge io start"
             );
-          }
-          IoResult::Timeout => {
-            warn!(
-              pid = req.source_pid.raw(),
-              correlation_id = req.correlation_id,
-              op_kind = op_kind,
-              latency_ms = latency.as_millis() as u64,
-              "bridge io timeout"
-            );
-          }
-          IoResult::Error(err) => {
-            warn!(
-              pid = req.source_pid.raw(),
-              correlation_id = req.correlation_id,
-              op_kind = op_kind,
-              latency_ms = latency.as_millis() as u64,
-              error = err,
-              "bridge io error"
-            );
-          }
+            let start = std::time::Instant::now();
+            let result = execute_io_op_with_config(&req.op, rl.as_ref(), &llm_cfg).await;
+            let latency = start.elapsed();
+            if let Some(ref m) = metrics {
+              m.record_io_result(&result, latency);
+            }
+            match &result {
+              IoResult::Ok(_) => {
+                debug!(
+                  pid = req.source_pid.raw(),
+                  correlation_id = req.correlation_id,
+                  op_kind = op_kind,
+                  latency_ms = latency.as_millis() as u64,
+                  "bridge io success"
+                );
+              }
+              IoResult::Timeout => {
+                warn!(
+                  pid = req.source_pid.raw(),
+                  correlation_id = req.correlation_id,
+                  op_kind = op_kind,
+                  latency_ms = latency.as_millis() as u64,
+                  "bridge io timeout"
+                );
+              }
+              IoResult::Error(err) => {
+                warn!(
+                  pid = req.source_pid.raw(),
+                  correlation_id = req.correlation_id,
+                  op_kind = op_kind,
+                  latency_ms = latency.as_millis() as u64,
+                  error = err,
+                  "bridge io error"
+                );
+              }
+            }
+            let resp = IoResponse {
+              correlation_id: req.correlation_id,
+              source_pid: req.source_pid,
+              result,
+            };
+            let _ = tx.send(resp);
+          });
         }
-        let resp = IoResponse {
-          correlation_id: req.correlation_id,
-          source_pid: req.source_pid,
-          result,
-        };
-        let _ = tx.send(resp);
-      });
+        WorkerRequest::Shutdown { timeout, ack } => {
+          let deadline = tokio::time::Instant::now() + timeout;
+          while !in_flight.is_empty() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+              in_flight.abort_all();
+              break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let _ = tokio::time::timeout(remaining, in_flight.join_next()).await;
+          }
+          let _ = ack.send(());
+          break;
+        }
+      }
     }
+    in_flight.abort_all();
   }
 }
 

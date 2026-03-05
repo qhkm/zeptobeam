@@ -7,7 +7,7 @@ use crate::agent_rt::{
   registry::AgentRegistry,
   types::*,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const DEFAULT_REDUCTIONS: u32 = 200;
 const NORMAL_ADVANTAGE: usize = 8;
@@ -72,6 +72,47 @@ impl AgentScheduler {
 
   pub fn set_bridge(&mut self, bridge: BridgeHandle) {
     self.bridge = bridge.into();
+  }
+
+  /// Shut down runtime resources in a bounded time.
+  /// This stops bridge intake, drains pending I/O
+  /// responses, then terminates all remaining
+  /// processes with Reason::Shutdown.
+  pub fn graceful_shutdown(&mut self, timeout: std::time::Duration) {
+    let started = std::time::Instant::now();
+    info!(
+      timeout_ms = timeout.as_millis() as u64,
+      "scheduler graceful shutdown start"
+    );
+
+    if let Some(bridge) = self.bridge.as_mut() {
+      if let Err(err) = bridge.shutdown(timeout) {
+        warn!(error = err, "bridge shutdown did not complete cleanly");
+      }
+
+      let responses = bridge.drain_responses();
+      for (pid, msg) in responses {
+        let _ = self.send(pid, msg);
+      }
+    }
+
+    let all_pids = self.registry.pids();
+    for pid in all_pids {
+      if self.registry.lookup(&pid).is_some() {
+        self.terminate_process(pid, Reason::Shutdown);
+      }
+    }
+
+    self.bridge = None;
+    self.queue_high.clear();
+    self.queue_normal.clear();
+    self.queue_low.clear();
+
+    info!(
+      elapsed_ms = started.elapsed().as_millis() as u64,
+      remaining_processes = self.registry.count() as u64,
+      "scheduler graceful shutdown complete"
+    );
   }
 
   /// Register an optional process-exit hook.
@@ -611,6 +652,17 @@ impl AgentScheduler {
 impl Default for AgentScheduler {
   fn default() -> Self {
     Self::new()
+  }
+}
+
+impl Drop for AgentScheduler {
+  fn drop(&mut self) {
+    if self.registry.count() == 0 && self.bridge.is_none() {
+      return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      self.graceful_shutdown(std::time::Duration::from_millis(50));
+    }));
   }
 }
 
