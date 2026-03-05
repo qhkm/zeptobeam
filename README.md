@@ -3,7 +3,7 @@
 > **Orchestration layer for ZeptoClaw. Fault-tolerant multi-agent runtime built in Rust.**
 
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://rust-lang.github.io/rustup/concepts/channels.html)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ---
 
@@ -130,4 +130,4 @@ cargo build --release -p zeptoclaw-rtd
 
 ## License
 
-Apache 2.0
+MIT
