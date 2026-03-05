@@ -98,7 +98,7 @@ All core phases complete. 343 tests passing.
 | 7 | MCP integration (server + client, JSON-RPC, tool discovery) | ✅ Done |
 | 9 | BEAM parity (ETS/DETS, durable mailbox, behaviors, hot code, releases) | ✅ Done |
 
-See [ROADMAP.md](docs/ROADMAP.md) for detailed phase descriptions and the enterprise track (E1–E6).
+See [ROADMAP.md](docs/ROADMAP.md) for detailed phase descriptions.
 
 ---
 
@@ -269,7 +269,7 @@ cargo +nightly test --lib -p erlangrt   # 343 tests
 ## Related
 
 - [ZeptoClaw](https://github.com/qhkm/zeptoclaw) — The agent framework ZeptoBeam orchestrates
-- [ROADMAP.md](docs/ROADMAP.md) — Detailed phase descriptions and enterprise track (E1–E6)
+- [ROADMAP.md](docs/ROADMAP.md) — Detailed phase descriptions
 - [The Zen of Erlang](https://ferd.ca/the-zen-of-erlang.html) — Fault-tolerance philosophy
 
 ---
