@@ -1,8 +1,13 @@
 use crate::agent_rt::{
-  observability::RuntimeMetrics, rate_limiter::RateLimiter, types::*,
+  bridge_metrics::BridgeMetrics,
+  observability::RuntimeMetrics,
+  rate_limiter::RateLimiter,
+  tool_factory::ToolFactory,
+  types::*,
 };
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use std::{
+  collections::HashMap,
   error::Error as StdError,
   sync::{
     atomic::{AtomicU64, Ordering},
@@ -10,7 +15,10 @@ use std::{
   },
   time::Duration,
 };
+use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, warn};
+use zeptoclaw::agent::ZeptoAgent;
+use zeptoclaw::providers::LLMProvider;
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
 const RESPONSE_QUEUE_SIZE: usize = 4096;
@@ -73,6 +81,16 @@ pub struct BridgeHandle {
   shutdown_enabled: bool,
 }
 
+struct NoopToolFactory;
+impl ToolFactory for NoopToolFactory {
+  fn build_tools(
+    &self,
+    _whitelist: Option<&[String]>,
+  ) -> Vec<Box<dyn zeptoclaw::tools::Tool>> {
+    vec![]
+  }
+}
+
 /// Tokio-side worker that receives I/O requests
 /// and executes them asynchronously.
 pub struct BridgeWorker {
@@ -81,6 +99,11 @@ pub struct BridgeWorker {
   rate_limiter: Option<RateLimiter>,
   metrics: Option<Arc<RuntimeMetrics>>,
   llm_config: LlmConfig,
+  // Agent-related fields
+  agent_registry: Arc<std::sync::Mutex<HashMap<AgentPid, Arc<TokioMutex<ZeptoAgent>>>>>,
+  agent_provider_registry: Arc<HashMap<String, Arc<dyn LLMProvider + Send + Sync>>>,
+  agent_tool_factory: Arc<dyn ToolFactory>,
+  agent_metrics: Arc<BridgeMetrics>,
 }
 
 impl Clone for BridgeHandle {
@@ -122,6 +145,10 @@ pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorke
       rate_limiter: None,
       metrics: None,
       llm_config: LlmConfig::from_env(),
+      agent_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
+      agent_provider_registry: Arc::new(HashMap::new()),
+      agent_tool_factory: Arc::new(NoopToolFactory),
+      agent_metrics: Arc::new(BridgeMetrics::new()),
     });
   }
   (handle, workers)
@@ -217,6 +244,43 @@ impl BridgeWorker {
     self.metrics = Some(metrics);
   }
 
+  pub fn set_agent_provider_registry(
+    &mut self,
+    registry: Arc<HashMap<String, Arc<dyn LLMProvider + Send + Sync>>>,
+  ) {
+    self.agent_provider_registry = registry;
+  }
+
+  pub fn set_agent_tool_factory(&mut self, factory: Arc<dyn ToolFactory>) {
+    self.agent_tool_factory = factory;
+  }
+
+  pub fn set_agent_metrics(&mut self, metrics: Arc<BridgeMetrics>) {
+    self.agent_metrics = metrics;
+  }
+
+  pub async fn execute_agent_chat(
+    &self,
+    pid: AgentPid,
+    op: &IoOp,
+  ) -> IoResult {
+    execute_agent_chat_standalone(
+      pid,
+      op,
+      self.agent_registry.clone(),
+      self.agent_provider_registry.clone(),
+      self.agent_tool_factory.clone(),
+      self.agent_metrics.clone(),
+    )
+    .await
+  }
+
+  pub fn execute_agent_destroy(&self, target_pid: &AgentPid) -> IoResult {
+    let mut registry = self.agent_registry.lock().unwrap();
+    let removed = registry.remove(target_pid).is_some();
+    IoResult::Ok(serde_json::json!({ "destroyed": removed }))
+  }
+
   /// Run the worker loop. Receives requests from the
   /// scheduler via crossbeam, spawns a Tokio task for
   /// each, and sends the result back. Uses
@@ -229,6 +293,10 @@ impl BridgeWorker {
     let rate_limiter = self.rate_limiter;
     let metrics = self.metrics;
     let llm_config = self.llm_config;
+    let agent_registry = self.agent_registry;
+    let agent_provider_registry = self.agent_provider_registry;
+    let agent_tool_factory = self.agent_tool_factory;
+    let agent_metrics = self.agent_metrics;
     loop {
       while in_flight.try_join_next().is_some() {}
 
@@ -245,6 +313,10 @@ impl BridgeWorker {
           let rl = rate_limiter.clone();
           let metrics = metrics.clone();
           let llm_cfg = llm_config.clone();
+          let agent_reg = agent_registry.clone();
+          let agent_prov = agent_provider_registry.clone();
+          let agent_tf = agent_tool_factory.clone();
+          let agent_met = agent_metrics.clone();
           in_flight.spawn(async move {
             let op_kind = io_op_kind(&req.op);
             if let Some(ref m) = metrics {
@@ -257,7 +329,28 @@ impl BridgeWorker {
               "bridge io start"
             );
             let start = std::time::Instant::now();
-            let result = execute_io_op_with_config(&req.op, rl.as_ref(), &llm_cfg).await;
+            let result = match &req.op {
+              IoOp::AgentChat { .. } => {
+                execute_agent_chat_standalone(
+                  req.source_pid,
+                  &req.op,
+                  agent_reg,
+                  agent_prov,
+                  agent_tf,
+                  agent_met,
+                )
+                .await
+              }
+              IoOp::AgentDestroy { target_pid } => {
+                let mut reg = agent_reg.lock().unwrap();
+                let removed = reg.remove(target_pid).is_some();
+                IoResult::Ok(serde_json::json!({ "destroyed": removed }))
+              }
+              _ => {
+                execute_io_op_with_config(&req.op, rl.as_ref(), &llm_cfg)
+                  .await
+              }
+            };
             let latency = start.elapsed();
             if let Some(ref m) = metrics {
               m.record_io_result(&result, latency);
@@ -328,6 +421,88 @@ fn io_op_kind(op: &IoOp) -> &'static str {
     IoOp::Custom { .. } => "Custom",
     IoOp::AgentChat { .. } => "AgentChat",
     IoOp::AgentDestroy { .. } => "AgentDestroy",
+  }
+}
+
+async fn execute_agent_chat_standalone(
+  pid: AgentPid,
+  op: &IoOp,
+  agent_registry: Arc<
+    std::sync::Mutex<HashMap<AgentPid, Arc<TokioMutex<ZeptoAgent>>>>,
+  >,
+  provider_registry: Arc<
+    HashMap<String, Arc<dyn LLMProvider + Send + Sync>>,
+  >,
+  tool_factory: Arc<dyn ToolFactory>,
+  _metrics: Arc<BridgeMetrics>,
+) -> IoResult {
+  let (
+    provider_name,
+    model,
+    system_prompt,
+    prompt,
+    tools_whitelist,
+    max_iterations,
+  ) = match op {
+    IoOp::AgentChat {
+      provider,
+      model,
+      system_prompt,
+      prompt,
+      tools,
+      max_iterations,
+      ..
+    } => (provider, model, system_prompt, prompt, tools, max_iterations),
+    _ => return IoResult::Error("not an AgentChat op".into()),
+  };
+
+  let agent_arc = {
+    let mut registry = agent_registry.lock().unwrap();
+    registry
+      .entry(pid)
+      .or_insert_with(|| {
+        let llm_provider = provider_registry
+          .get(provider_name)
+          .cloned()
+          .unwrap_or_else(|| {
+            provider_registry
+              .values()
+              .next()
+              .expect("at least one provider")
+              .clone()
+          });
+
+        let tools = tool_factory.build_tools(
+          tools_whitelist.as_ref().map(|v| v.as_slice()),
+        );
+
+        let mut builder = ZeptoAgent::builder()
+          .provider_arc(llm_provider)
+          .tools(tools);
+
+        if let Some(sp) = system_prompt {
+          builder = builder.system_prompt(sp);
+        }
+        if let Some(m) = model {
+          builder = builder.model(m);
+        }
+        if let Some(mi) = max_iterations {
+          builder = builder.max_iterations(*mi);
+        }
+
+        Arc::new(TokioMutex::new(
+          builder.build().expect("agent build"),
+        ))
+      })
+      .clone()
+  };
+
+  let agent = agent_arc.lock().await;
+  match agent.chat(prompt).await {
+    Ok(response) => {
+      IoResult::Ok(serde_json::json!({ "response": response }))
+    }
+    Err(e) => IoResult::Error(format!("agent chat error: {}", e)),
   }
 }
 

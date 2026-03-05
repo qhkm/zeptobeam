@@ -1,9 +1,14 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
+use crate::agent_rt::bridge::{create_bridge, BridgeWorker};
 use crate::agent_rt::bridge_metrics::BridgeMetrics;
 use crate::agent_rt::{
   process::*, registry::AgentRegistry, scheduler::AgentScheduler, types::*,
 };
+use zeptoclaw::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
+use zeptoclaw::session::Message as ZeptoMessage;
+use zeptoclaw::tools::Tool;
+use zeptoclaw::error::Result as ZeptoResult;
 
 struct EchoState {
   received: Vec<Message>,
@@ -87,6 +92,47 @@ impl AgentBehavior for ExitAwareBehavior {
   }
 
   fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+}
+
+// --- Mock types for agent integration tests ---
+
+struct MockLLMProvider;
+
+#[async_trait::async_trait]
+impl LLMProvider for MockLLMProvider {
+  async fn chat(
+    &self,
+    _messages: Vec<ZeptoMessage>,
+    _tools: Vec<ToolDefinition>,
+    _model: Option<&str>,
+    _options: ChatOptions,
+  ) -> ZeptoResult<LLMResponse> {
+    Ok(LLMResponse::text("Mock response"))
+  }
+  fn default_model(&self) -> &str {
+    "mock-model"
+  }
+  fn name(&self) -> &str {
+    "mock"
+  }
+}
+
+struct MockToolFactory;
+
+impl crate::agent_rt::tool_factory::ToolFactory for MockToolFactory {
+  fn build_tools(&self, _whitelist: Option<&[String]>) -> Vec<Box<dyn Tool>> {
+    vec![]
+  }
+}
+
+fn create_mock_provider_registry(
+) -> std::collections::HashMap<String, Arc<dyn LLMProvider + Send + Sync>> {
+  let mut m = std::collections::HashMap::new();
+  m.insert(
+    "mock".to_string(),
+    Arc::new(MockLLMProvider) as Arc<dyn LLMProvider + Send + Sync>,
+  );
+  m
 }
 
 #[test]
@@ -3179,4 +3225,41 @@ fn test_bridge_metrics_increment_and_read() {
   assert_eq!(m.agent_destroy_failures(), 2);
   assert_eq!(m.worker_busy_rejections(), 1);
   assert_eq!(m.agent_chat_panics(), 1);
+}
+
+#[tokio::test]
+async fn test_agent_chat_creates_agent_on_first_call() {
+  let (_handle, mut worker) = create_bridge();
+  let metrics = Arc::new(BridgeMetrics::new());
+  let provider_registry = Arc::new(create_mock_provider_registry());
+  let tool_factory: Arc<dyn crate::agent_rt::tool_factory::ToolFactory> =
+    Arc::new(MockToolFactory);
+
+  worker.set_agent_provider_registry(provider_registry);
+  worker.set_agent_tool_factory(tool_factory);
+  worker.set_agent_metrics(metrics);
+
+  let pid = AgentPid::from_raw(0x8000_A001);
+  let op = IoOp::AgentChat {
+    provider: "mock".to_string(),
+    model: None,
+    system_prompt: None,
+    prompt: "Hello".to_string(),
+    tools: None,
+    max_iterations: None,
+    timeout_ms: None,
+  };
+
+  let result = worker.execute_agent_chat(pid, &op).await;
+  match result {
+    IoResult::Ok(v) => {
+      assert!(
+        v.get("response").is_some(),
+        "expected response field in {:?}",
+        v
+      );
+    }
+    IoResult::Error(e) => panic!("expected Ok, got Error: {}", e),
+    _ => panic!("expected Ok"),
+  }
 }
