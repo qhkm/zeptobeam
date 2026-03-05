@@ -1,2 +1,7 @@
 # Visit the corresponding native function module
 # such as native_fun/erlang, native_fun/erts_internal, native_fun/lists etc.
+#
+# Manually registered BIFs (mod.rs handles actual registration):
+# erlang  /       2   nativefun_float_div_2
+# erlang  abs     1   nativefun_abs_1
+# erlang  float   1   nativefun_float_1

@@ -34,6 +34,10 @@ pub fn badarg<T>() -> RtResult<T> {
   generic_fail(gen_atoms::BADARG)
 }
 
+pub fn badarith<T>() -> RtResult<T> {
+  generic_fail(gen_atoms::BADARITH)
+}
+
 pub fn badarg_val<T>(val: Term, hp: &mut dyn THeap) -> RtResult<T> {
   generic_tuple2_fail(gen_atoms::BADARG, val, hp)
 }
