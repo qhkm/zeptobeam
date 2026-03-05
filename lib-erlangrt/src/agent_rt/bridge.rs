@@ -155,9 +155,11 @@ impl BridgeHandle {
   /// Submit an I/O operation. Returns the correlation ID
   /// on success, or an error string if the queue is full.
   pub fn submit(&mut self, pid: AgentPid, op: IoOp) -> Result<u64, String> {
-    self.reserve_cancellation_slot(pid);
     let is_agent_destroy = matches!(op, IoOp::AgentDestroy { .. });
     let is_agent_chat = matches!(op, IoOp::AgentChat { .. });
+    if !is_agent_destroy {
+      self.reserve_cancellation_slot(pid);
+    }
     let cid = self.next_correlation_id.fetch_add(1, Ordering::Relaxed);
     let req = IoRequest {
       correlation_id: cid,
@@ -167,7 +169,9 @@ impl BridgeHandle {
     match self.request_tx.try_send(WorkerRequest::Io(req)) {
       Ok(()) => Ok(cid),
       Err(TrySendError::Full(_)) => {
-        self.release_cancellation_slot(pid);
+        if !is_agent_destroy {
+          self.release_cancellation_slot(pid);
+        }
         if is_agent_destroy {
           self.agent_metrics.inc_destroy_failures();
         }
@@ -177,7 +181,9 @@ impl BridgeHandle {
         Err("request queue full".into())
       }
       Err(TrySendError::Disconnected(_)) => {
-        self.release_cancellation_slot(pid);
+        if !is_agent_destroy {
+          self.release_cancellation_slot(pid);
+        }
         if is_agent_destroy {
           self.agent_metrics.inc_destroy_failures();
         }
@@ -380,7 +386,9 @@ impl BridgeWorker {
                 _ => execute_io_op(&req.op, rl.as_ref()).await,
               }
             };
-            let result = if let Some(token) = token {
+            let result = if matches!(&req.op, IoOp::AgentDestroy { .. }) {
+              execute_op.await
+            } else if let Some(token) = token {
               tokio::select! {
                 result = execute_op => result,
                 _ = token.cancelled() => IoResult::Timeout,

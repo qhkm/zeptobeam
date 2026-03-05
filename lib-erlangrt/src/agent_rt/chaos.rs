@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for deterministic fault injection.
@@ -61,33 +62,35 @@ impl<S: crate::agent_rt::checkpoint::CheckpointStore> FaultyCheckpointStore<S> {
 }
 
 #[cfg(test)]
+use crate::agent_rt::error::AgentRtError;
+
 impl<S: crate::agent_rt::checkpoint::CheckpointStore> crate::agent_rt::checkpoint::CheckpointStore
   for FaultyCheckpointStore<S>
 {
-  fn save(&self, key: &str, checkpoint: &serde_json::Value) -> Result<(), String> {
+  fn save(&self, key: &str, checkpoint: &serde_json::Value) -> Result<(), AgentRtError> {
     let attempt = self.attempt.fetch_add(1, Ordering::Relaxed);
     if self.config.should_fail(attempt) {
-      return Err("chaos: injected save failure".into());
+      return Err(AgentRtError::Checkpoint("chaos: injected save failure".into()));
     }
     self.inner.save(key, checkpoint)
   }
 
-  fn load(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
+  fn load(&self, key: &str) -> Result<Option<serde_json::Value>, AgentRtError> {
     let attempt = self.attempt.fetch_add(1, Ordering::Relaxed);
     if self.config.should_fail(attempt) {
       let mode = self.config.pick_mode(attempt);
       if *mode == FaultMode::CorruptData {
         return Ok(Some(serde_json::json!({"corrupted": true})));
       }
-      return Err("chaos: injected load failure".into());
+      return Err(AgentRtError::Checkpoint("chaos: injected load failure".into()));
     }
     self.inner.load(key)
   }
 
-  fn delete(&self, key: &str) -> Result<(), String> {
+  fn delete(&self, key: &str) -> Result<(), AgentRtError> {
     let attempt = self.attempt.fetch_add(1, Ordering::Relaxed);
     if self.config.should_fail(attempt) {
-      return Err("chaos: injected delete failure".into());
+      return Err(AgentRtError::Checkpoint("chaos: injected delete failure".into()));
     }
     self.inner.delete(key)
   }
@@ -193,7 +196,7 @@ mod tests {
     );
     let result = store.save("key", &serde_json::json!({"v": 1}));
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("chaos"));
+    assert!(result.unwrap_err().to_string().contains("chaos"));
   }
 
   #[test]

@@ -3684,6 +3684,92 @@ async fn test_agent_chat_timeout_ms_enforced() {
   assert_eq!(metrics.agent_chat_panics(), 0);
 }
 
+#[tokio::test]
+async fn test_agent_destroy_not_blocked_by_pid_cancellation() {
+  let mut registry = std::collections::HashMap::new();
+  registry.insert(
+    "mock".to_string(),
+    Arc::new(MockLLMProvider) as Arc<dyn LLMProvider + Send + Sync>,
+  );
+  registry.insert(
+    "slow".to_string(),
+    Arc::new(SlowLLMProvider) as Arc<dyn LLMProvider + Send + Sync>,
+  );
+
+  let (mut handle, mut worker) = create_bridge();
+  let metrics = Arc::new(BridgeMetrics::new());
+  worker.set_agent_provider_registry(Arc::new(registry));
+  worker.set_agent_tool_factory(
+    Arc::new(MockToolFactory) as Arc<dyn crate::agent_rt::tool_factory::ToolFactory>
+  );
+  worker.set_agent_metrics(metrics);
+
+  let worker_handle = tokio::spawn(async move { worker.run().await });
+  let pid = AgentPid::from_raw(0x8000_F0AA);
+
+  // First chat creates the bridge-side agent state.
+  handle
+    .submit(
+      pid,
+      IoOp::AgentChat {
+        provider: "mock".to_string(),
+        model: None,
+        system_prompt: None,
+        prompt: "init".to_string(),
+        tools: None,
+        max_iterations: None,
+        timeout_ms: None,
+      },
+    )
+    .unwrap();
+  tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  let _ = handle.drain_responses();
+
+  // Submit a long-running chat, cancel PID, then submit destroy.
+  handle
+    .submit(
+      pid,
+      IoOp::AgentChat {
+        provider: "slow".to_string(),
+        model: None,
+        system_prompt: None,
+        prompt: "slow".to_string(),
+        tools: None,
+        max_iterations: None,
+        timeout_ms: Some(10_000),
+      },
+    )
+    .unwrap();
+  assert!(handle.cancel(pid), "pid should have cancellable in-flight ops");
+  handle
+    .submit(pid, IoOp::AgentDestroy { target_pid: pid })
+    .unwrap();
+
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+  let mut saw_destroyed_true = false;
+  while tokio::time::Instant::now() < deadline && !saw_destroyed_true {
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    for (_, msg) in handle.drain_responses() {
+      if let Message::System(SystemMsg::IoResponse { result, .. }) = msg {
+        if let IoResult::Ok(v) = result {
+          if v.get("destroyed").and_then(|b| b.as_bool()) == Some(true) {
+            saw_destroyed_true = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  assert!(
+    saw_destroyed_true,
+    "AgentDestroy should still run even after PID cancellation"
+  );
+
+  drop(handle);
+  let _ = worker_handle.await;
+}
+
 #[test]
 fn test_bridge_agent_chat_applies_default_timeout() {
   use crate::agent_rt::bridge::DEFAULT_AGENT_CHAT_TIMEOUT_MS;

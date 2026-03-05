@@ -4,6 +4,7 @@ pub mod chaos;
 pub mod checkpoint;
 pub mod checkpoint_sqlite;
 pub mod cluster;
+pub mod config;
 pub mod dead_letter;
 pub mod error;
 pub mod observability;

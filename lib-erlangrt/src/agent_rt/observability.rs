@@ -3,13 +3,15 @@ use std::{
   time::{Duration, Instant},
 };
 
+use serde::Serialize;
+
 use crate::agent_rt::{
   process::{Priority, ProcessStatus},
   types::IoResult,
 };
 
 /// Point-in-time process metadata for runtime introspection.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProcessSnapshot {
   pub pid: u64,
   pub status: ProcessStatus,
@@ -22,7 +24,7 @@ pub struct ProcessSnapshot {
 }
 
 /// Point-in-time runtime metrics.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RuntimeMetricsSnapshot {
   pub uptime_secs: u64,
   pub active_processes: u64,
