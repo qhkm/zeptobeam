@@ -13,6 +13,10 @@ pub struct AppConfig {
   pub logging: LogConfig,
   pub orchestration: OrchestrationConfig,
   pub mcp: McpConfig,
+  pub ets: EtsConfig,
+  pub durable_mailbox: DurableMailboxConfig,
+  pub hot_code: HotCodeConfig,
+  pub release: ReleaseConfig,
 }
 
 /// MCP configuration section.
@@ -95,6 +99,78 @@ pub struct LogConfig {
   pub format: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct EtsConfig {
+  pub max_tables: usize,
+  pub max_entries_per_table: usize,
+}
+
+impl Default for EtsConfig {
+  fn default() -> Self {
+    Self {
+      max_tables: 256,
+      max_entries_per_table: 100_000,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DurableMailboxConfig {
+  pub enabled: bool,
+  pub wal_dir: String,
+  pub flush_strategy: String,
+  pub orphan_ttl_secs: u64,
+  pub cleanup_interval_secs: u64,
+}
+
+impl Default for DurableMailboxConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      wal_dir: "./data/wal".into(),
+      flush_strategy: "every_message".into(),
+      orphan_ttl_secs: 86400,
+      cleanup_interval_secs: 3600,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct HotCodeConfig {
+  pub quiesce_timeout_ms: u64,
+  pub quiesce_timeout_policy: String,
+  pub stale_policy: String,
+}
+
+impl Default for HotCodeConfig {
+  fn default() -> Self {
+    Self {
+      quiesce_timeout_ms: 30000,
+      quiesce_timeout_policy: "abort".into(),
+      stale_policy: "force_upgrade".into(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ReleaseConfig {
+  pub manifest_dir: String,
+  pub max_history: usize,
+}
+
+impl Default for ReleaseConfig {
+  fn default() -> Self {
+    Self {
+      manifest_dir: "./releases".into(),
+      max_history: 10,
+    }
+  }
+}
+
 impl Default for AppConfig {
   fn default() -> Self {
     Self {
@@ -104,6 +180,10 @@ impl Default for AppConfig {
       logging: LogConfig::default(),
       orchestration: OrchestrationConfig::default(),
       mcp: McpConfig::default(),
+      ets: EtsConfig::default(),
+      durable_mailbox: DurableMailboxConfig::default(),
+      hot_code: HotCodeConfig::default(),
+      release: ReleaseConfig::default(),
     }
   }
 }
@@ -429,5 +509,71 @@ ROOT_PATH = "/tmp"
     assert!(fs.env.is_some());
     let env = fs.env.as_ref().unwrap();
     assert_eq!(env.get("ROOT_PATH"), Some(&"/tmp".to_string()));
+  }
+
+  #[test]
+  fn test_ets_config_defaults() {
+    let config = AppConfig::default();
+    assert_eq!(config.ets.max_tables, 256);
+    assert_eq!(config.ets.max_entries_per_table, 100_000);
+  }
+
+  #[test]
+  fn test_durable_mailbox_config_defaults() {
+    let config = AppConfig::default();
+    assert!(!config.durable_mailbox.enabled);
+    assert_eq!(config.durable_mailbox.wal_dir, "./data/wal");
+    assert_eq!(config.durable_mailbox.flush_strategy, "every_message");
+    assert_eq!(config.durable_mailbox.orphan_ttl_secs, 86400);
+    assert_eq!(config.durable_mailbox.cleanup_interval_secs, 3600);
+  }
+
+  #[test]
+  fn test_hot_code_config_defaults() {
+    let config = AppConfig::default();
+    assert_eq!(config.hot_code.quiesce_timeout_ms, 30000);
+    assert_eq!(config.hot_code.quiesce_timeout_policy, "abort");
+    assert_eq!(config.hot_code.stale_policy, "force_upgrade");
+  }
+
+  #[test]
+  fn test_release_config_defaults() {
+    let config = AppConfig::default();
+    assert_eq!(config.release.manifest_dir, "./releases");
+    assert_eq!(config.release.max_history, 10);
+  }
+
+  #[test]
+  fn test_parse_phase9_toml() {
+    let toml_str = r#"
+[ets]
+max_tables = 128
+max_entries_per_table = 50000
+
+[durable_mailbox]
+enabled = false
+wal_dir = "/tmp/wal"
+flush_strategy = "every_n:10"
+
+[hot_code]
+quiesce_timeout_ms = 5000
+quiesce_timeout_policy = "force_swap"
+stale_policy = "terminate"
+
+[release]
+manifest_dir = "/opt/releases"
+max_history = 5
+"#;
+    let config = load_config_from_str(toml_str).unwrap();
+    assert_eq!(config.ets.max_tables, 128);
+    assert_eq!(config.ets.max_entries_per_table, 50000);
+    assert!(!config.durable_mailbox.enabled);
+    assert_eq!(config.durable_mailbox.wal_dir, "/tmp/wal");
+    assert_eq!(config.durable_mailbox.flush_strategy, "every_n:10");
+    assert_eq!(config.hot_code.quiesce_timeout_ms, 5000);
+    assert_eq!(config.hot_code.quiesce_timeout_policy, "force_swap");
+    assert_eq!(config.hot_code.stale_policy, "terminate");
+    assert_eq!(config.release.manifest_dir, "/opt/releases");
+    assert_eq!(config.release.max_history, 5);
   }
 }

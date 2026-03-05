@@ -146,21 +146,21 @@ Distribute agents across multiple runtime nodes.
 | 6 | Advanced Orchestration | Done | 48 |
 | 7 | MCP Integration | Planned | — |
 | 8 | Multi-Node Clustering | Planned | — |
-| 9 | BEAM Parity | Planned | — |
+| 9 | BEAM Parity | Done | ~63 |
 
 ---
 
-## Phase 9: BEAM Parity [PLANNED]
+## Phase 9: BEAM Parity [DONE]
 
 True Erlang/BEAM-inspired features that make the runtime uniquely powerful.
 
-- **Hot Code Upgrades**: Upgrade running agent behaviors without stopping processes. Version coexistence, `code_change` callbacks, atomic switchover
-- **Persistent Message Queues**: Disk-backed mailboxes for durability across restarts. Replay from checkpoint on recovery
-- **ETS/DETS Tables**: In-memory term storage (ETS) with match specifications, disk-backed version (DETS) for persistence
-- **Behaviors Framework**: Formal `gen_server`, `gen_fsm`, `gen_event` patterns. Standardized callbacks, supervision integration
-- **Release Handling**: `.rel` files, appup/appdown scripts, distributed upgrades
+- **ETS/DETS Tables**: In-memory key-value with access control (Public/Protected/Private), prefix scan, predicate filter. Disk-backed DETS with append-log + compaction. Owner death cleanup with heir transfer
+- **Persistent Message Queues**: Opt-in WAL-backed durable mailboxes with at-least-once delivery, strict fsync protocol, ack-based truncation, stable process identity
+- **Behaviors Framework**: GenAgent (call/cast/info), StateMachine (state transitions), EventManager (pub/sub) — adapted for AI agents, wrapping AgentBehavior
+- **Hot Code Upgrades**: Behavior version registry, per-process and per-type upgrades, rollback with version history, stale version detection
+- **Release Handling**: JSON manifest-based releases with transactional apply, compensating rollback, crash recovery via persisted in-progress state
 
-**Prerequisite:** Phase 5 (production daemon), Phase 8 (clustering for distributed upgrades)
+**12 tasks, ~63 tests:** `4a7580d` through `81d25cb`
 
 ---
 

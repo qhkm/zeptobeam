@@ -21,6 +21,18 @@ pub enum AgentRtError {
 
   #[error("shutdown: {0}")]
   Shutdown(String),
+
+  #[error("ets: {0}")]
+  Ets(String),
+
+  #[error("durable mailbox: {0}")]
+  DurableMailbox(String),
+
+  #[error("hot code: {0}")]
+  HotCode(String),
+
+  #[error("release: {0}")]
+  Release(String),
 }
 
 /// Convert rusqlite errors (separate impl to avoid orphan rule conflicts).
