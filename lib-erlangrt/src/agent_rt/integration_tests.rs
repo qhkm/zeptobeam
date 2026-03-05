@@ -198,6 +198,141 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn test_orchestrator_agent_chat_roundtrip() {
+    use crate::agent_rt::bridge::create_bridge;
+    use crate::agent_rt::bridge_metrics::BridgeMetrics;
+    use crate::agent_rt::orchestration::OrchestratorBehavior;
+    use crate::agent_rt::tool_factory::ToolFactory;
+    use zeptoclaw::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
+    use zeptoclaw::session::Message as ZeptoMessage;
+    use zeptoclaw::tools::Tool;
+    use zeptoclaw::error::Result as ZeptoResult;
+    use std::collections::HashMap;
+
+    // Mock provider that returns predictable responses
+    struct RoundtripMockProvider;
+
+    #[async_trait::async_trait]
+    impl LLMProvider for RoundtripMockProvider {
+      async fn chat(
+        &self,
+        _messages: Vec<ZeptoMessage>,
+        _tools: Vec<ToolDefinition>,
+        _model: Option<&str>,
+        _options: ChatOptions,
+      ) -> ZeptoResult<LLMResponse> {
+        Ok(LLMResponse::text("roundtrip complete"))
+      }
+      fn default_model(&self) -> &str {
+        "mock"
+      }
+      fn name(&self) -> &str {
+        "mock"
+      }
+    }
+
+    struct NoopFactory;
+    impl ToolFactory for NoopFactory {
+      fn build_tools(&self, _whitelist: Option<&[String]>) -> Vec<Box<dyn Tool>> {
+        vec![]
+      }
+    }
+
+    // Create bridge with mock provider
+    let (handle, mut worker) = create_bridge();
+    let mut providers = HashMap::new();
+    providers.insert(
+      "openai".to_string(),
+      Arc::new(RoundtripMockProvider) as Arc<dyn LLMProvider + Send + Sync>,
+    );
+    // Also add "default" as an alias so the worker's AgentChat
+    // provider lookup succeeds regardless of key used.
+    providers.insert(
+      "default".to_string(),
+      Arc::new(RoundtripMockProvider) as Arc<dyn LLMProvider + Send + Sync>,
+    );
+    worker.set_agent_provider_registry(Arc::new(providers));
+    worker.set_agent_tool_factory(Arc::new(NoopFactory) as Arc<dyn ToolFactory>);
+    worker.set_agent_metrics(Arc::new(BridgeMetrics::new()));
+
+    // Spawn bridge worker in background
+    let bridge_handle = tokio::spawn(async move {
+      worker.run().await;
+    });
+
+    // Create scheduler with bridge
+    let mut sched = AgentScheduler::new();
+    sched.set_bridge(handle);
+
+    // Spawn orchestrator
+    let orch_behavior = OrchestratorBehavior {
+      max_concurrency: 1,
+      checkpoint_store: None,
+    };
+    let orch_pid = sched
+      .registry
+      .spawn(
+        Arc::new(orch_behavior),
+        serde_json::json!({
+          "self_pid": null,
+        }),
+      )
+      .unwrap();
+    sched.enqueue(orch_pid);
+
+    // Send goal to orchestrator, including self_pid so
+    // the orchestrator knows its own pid for spawning
+    // workers that can send results back.
+    sched
+      .send(
+        orch_pid,
+        Message::Json(serde_json::json!({
+          "goal": "test roundtrip",
+          "requester_pid": null,
+          "self_pid": orch_pid.raw(),
+        })),
+      )
+      .unwrap();
+
+    // Tick through the flow:
+    // 1. Orchestrator receives goal, emits Custom(decompose_goal)
+    // 2. Bridge returns placeholder response
+    // 3. Orchestrator receives IoResponse, extract_tasks fallback
+    //    creates a single task, spawns a WorkerBehavior
+    // 4. Worker receives run_task, emits AgentChat
+    // 5. Bridge processes AgentChat with mock provider
+    // 6. Worker receives IoResponse, sends worker_result to orch
+    // 7. Orchestrator receives result, sends shutdown_worker
+    // 8. Worker receives shutdown, stops (Normal)
+    // 9. Orchestrator receives DOWN, detects completion, stops
+    let mut completed = false;
+    for _ in 0..200 {
+      sched.tick();
+      // Small delay to let bridge process async ops
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+      // Check if orchestrator completed
+      if sched.registry.lookup(&orch_pid).is_none() {
+        completed = true;
+        break;
+      }
+    }
+
+    assert!(
+      completed,
+      "orchestrator should have completed the roundtrip within 200 ticks"
+    );
+
+    // Clean up
+    drop(sched);
+    let _ = tokio::time::timeout(
+      std::time::Duration::from_secs(2),
+      bridge_handle,
+    )
+    .await;
+  }
+
   #[test]
   fn test_linked_processes_cascade_through_supervisor() {
     let behavior: Arc<dyn AgentBehavior> = Arc::new(CounterBehavior { stop_at: 1000 });
