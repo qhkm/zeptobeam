@@ -2319,7 +2319,7 @@ async fn test_bridge_http_get_success() {
     body: None,
     timeout_ms: Some(10_000),
   };
-  let result = execute_io_op(&op).await;
+  let result = execute_io_op(&op, None).await;
   match &result {
     IoResult::Ok(val) => {
       assert_eq!(val["status"], 200);
@@ -2341,7 +2341,7 @@ async fn test_bridge_http_timeout() {
     body: None,
     timeout_ms: Some(500),
   };
-  let result = execute_io_op(&op).await;
+  let result = execute_io_op(&op, None).await;
   assert!(
     matches!(result, IoResult::Timeout),
     "Expected IoResult::Timeout for slow endpoint, got {:?}",
@@ -2361,7 +2361,7 @@ async fn test_bridge_http_non_2xx() {
     body: None,
     timeout_ms: Some(10_000),
   };
-  let result = execute_io_op(&op).await;
+  let result = execute_io_op(&op, None).await;
   match &result {
     IoResult::Ok(val) => {
       assert_eq!(val["status"], 404);
@@ -2385,7 +2385,7 @@ async fn test_bridge_http_post_with_body() {
     body: Some(b"{\"key\":\"value\"}".to_vec()),
     timeout_ms: Some(10_000),
   };
-  let result = execute_io_op(&op).await;
+  let result = execute_io_op(&op, None).await;
   match &result {
     IoResult::Ok(val) => {
       assert_eq!(val["status"], 200);
@@ -2407,7 +2407,7 @@ async fn test_bridge_http_connection_error() {
     body: None,
     timeout_ms: Some(2_000),
   };
-  let result = execute_io_op(&op).await;
+  let result = execute_io_op(&op, None).await;
   assert!(
     matches!(result, IoResult::Error(_) | IoResult::Timeout),
     "Connection to unreachable host should error or timeout, got {:?}",
@@ -2467,4 +2467,48 @@ async fn test_scheduler_bridge_http_roundtrip() {
 
   drop(sched);
   let _ = worker_handle.await;
+}
+
+#[test]
+fn test_extract_provider_from_url() {
+  use crate::agent_rt::bridge::extract_provider;
+
+  assert_eq!(extract_provider("https://api.openai.com/v1/chat"), "api.openai.com");
+  assert_eq!(extract_provider("https://api.anthropic.com/v1/messages"), "api.anthropic.com");
+  assert_eq!(extract_provider("http://localhost:8080/api"), "localhost");
+  assert_eq!(extract_provider("https://example.com"), "example.com");
+}
+
+#[tokio::test]
+async fn test_bridge_rate_limiter_throttles_requests() {
+  use crate::agent_rt::bridge::execute_io_op;
+  use crate::agent_rt::rate_limiter::RateLimiter;
+  use std::collections::HashMap;
+
+  let rl = RateLimiter::new();
+  // Allow 1 request per 200ms to httpbin.org
+  rl.set_limit("httpbin.org", 1, std::time::Duration::from_millis(200));
+
+  let op = IoOp::HttpRequest {
+    method: "GET".into(),
+    url: "https://httpbin.org/get".into(),
+    headers: HashMap::new(),
+    body: None,
+    timeout_ms: Some(10_000),
+  };
+
+  // First request should complete quickly
+  let start = std::time::Instant::now();
+  let r1 = execute_io_op(&op, Some(&rl)).await;
+  assert!(matches!(r1, IoResult::Ok(_)));
+
+  // Second request should be delayed by ~200ms
+  let r2 = execute_io_op(&op, Some(&rl)).await;
+  assert!(matches!(r2, IoResult::Ok(_)));
+  let elapsed = start.elapsed();
+  assert!(
+    elapsed >= std::time::Duration::from_millis(150),
+    "Second request should have been rate-limited, total elapsed {:?}",
+    elapsed
+  );
 }

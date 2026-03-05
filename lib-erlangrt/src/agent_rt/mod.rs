@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod orchestration;
 pub mod process;
+pub mod rate_limiter;
 pub mod registry;
 pub mod scheduler;
 pub mod supervision;

@@ -1,4 +1,4 @@
-use crate::agent_rt::types::*;
+use crate::agent_rt::{rate_limiter::RateLimiter, types::*};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use std::error::Error as StdError;
 
@@ -36,6 +36,7 @@ pub struct BridgeHandle {
 pub struct BridgeWorker {
   request_rx: Receiver<IoRequest>,
   response_tx: Sender<IoResponse>,
+  rate_limiter: Option<RateLimiter>,
 }
 
 /// Create a bridge pair: one handle for the scheduler
@@ -52,6 +53,7 @@ pub fn create_bridge() -> (BridgeHandle, BridgeWorker) {
     BridgeWorker {
       request_rx: req_rx,
       response_tx: resp_tx,
+      rate_limiter: None,
     },
   )
 }
@@ -98,6 +100,11 @@ impl BridgeHandle {
 }
 
 impl BridgeWorker {
+  /// Attach a rate limiter. Must be called before `run`.
+  pub fn set_rate_limiter(&mut self, rl: RateLimiter) {
+    self.rate_limiter = Some(rl);
+  }
+
   /// Run the worker loop. Receives requests from the
   /// scheduler via crossbeam, spawns a Tokio task for
   /// each, and sends the result back. Uses
@@ -106,6 +113,7 @@ impl BridgeWorker {
   pub async fn run(self) {
     let req_rx = self.request_rx;
     let resp_tx = self.response_tx;
+    let rate_limiter = self.rate_limiter;
     loop {
       let rx = req_rx.clone();
       let recv_result = tokio::task::spawn_blocking(move || rx.recv()).await;
@@ -115,8 +123,9 @@ impl BridgeWorker {
         _ => break,
       };
       let tx = resp_tx.clone();
+      let rl = rate_limiter.clone();
       tokio::spawn(async move {
-        let result = execute_io_op(&req.op).await;
+        let result = execute_io_op(&req.op, rl.as_ref()).await;
         let resp = IoResponse {
           correlation_id: req.correlation_id,
           source_pid: req.source_pid,
@@ -129,7 +138,7 @@ impl BridgeWorker {
 }
 
 /// Execute an I/O operation asynchronously.
-pub(crate) async fn execute_io_op(op: &IoOp) -> IoResult {
+pub(crate) async fn execute_io_op(op: &IoOp, rate_limiter: Option<&RateLimiter>) -> IoResult {
   match op {
     IoOp::Timer { duration } => {
       tokio::time::sleep(*duration).await;
@@ -150,7 +159,12 @@ pub(crate) async fn execute_io_op(op: &IoOp) -> IoResult {
       let headers = headers.clone();
       let body = body.clone();
       let timeout_ms = *timeout_ms;
+      let rl = rate_limiter.cloned();
       match tokio::task::spawn_blocking(move || {
+        if let Some(ref rl) = rl {
+          let provider = extract_provider(&url);
+          rl.acquire_blocking(&provider);
+        }
         execute_http_blocking(&method, &url, &headers, body.as_deref(), timeout_ms)
       })
       .await
@@ -244,4 +258,20 @@ fn is_timeout_error(t: &ureq::Transport) -> bool {
     }
   }
   false
+}
+
+/// Extract a provider key from a URL for rate limiting.
+/// Uses the hostname (e.g., "api.openai.com").
+pub(crate) fn extract_provider(url: &str) -> String {
+  url
+    .split("://")
+    .nth(1)
+    .unwrap_or(url)
+    .split('/')
+    .next()
+    .unwrap_or(url)
+    .split(':')
+    .next()
+    .unwrap_or(url)
+    .to_string()
 }
