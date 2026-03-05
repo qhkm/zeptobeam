@@ -1,5 +1,5 @@
-use erlangrt::{command_line_args::ErlStartArgs, lib_main::start_emulator};
-use std::env;
+use erlangrt::{command_line_args::ErlStartArgs, lib_main::run_emulator};
+use std::{env, process};
 
 fn read_path_list(var_name: &str) -> Vec<String> {
   let Ok(raw) = env::var(var_name) else {
@@ -38,6 +38,9 @@ fn main() {
   args.search_path = default_search_path();
 
   // Get going now
-  start_emulator(&mut args);
+  if let Err(err) = run_emulator(&mut args) {
+    eprintln!("erlexec: {:?}", err);
+    process::exit(1);
+  }
   println!("erlexec: Finished.");
 }
