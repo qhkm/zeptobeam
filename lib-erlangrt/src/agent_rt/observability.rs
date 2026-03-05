@@ -28,6 +28,7 @@ pub struct RuntimeMetricsSnapshot {
   pub active_processes: u64,
   pub messages_sent_total: u64,
   pub messages_processed_total: u64,
+  pub mailbox_rejections_total: u64,
   pub messages_per_sec_avg: f64,
   pub io_requests_total: u64,
   pub io_responses_total: u64,
@@ -47,6 +48,7 @@ pub struct RuntimeMetrics {
   started_at: Instant,
   messages_sent_total: AtomicU64,
   messages_processed_total: AtomicU64,
+  mailbox_rejections_total: AtomicU64,
   io_requests_total: AtomicU64,
   io_responses_total: AtomicU64,
   io_errors_total: AtomicU64,
@@ -65,6 +67,7 @@ impl RuntimeMetrics {
       started_at: Instant::now(),
       messages_sent_total: AtomicU64::new(0),
       messages_processed_total: AtomicU64::new(0),
+      mailbox_rejections_total: AtomicU64::new(0),
       io_requests_total: AtomicU64::new(0),
       io_responses_total: AtomicU64::new(0),
       io_errors_total: AtomicU64::new(0),
@@ -85,6 +88,12 @@ impl RuntimeMetrics {
   pub fn record_message_processed(&self) {
     self
       .messages_processed_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_mailbox_rejection(&self) {
+    self
+      .mailbox_rejections_total
       .fetch_add(1, Ordering::Relaxed);
   }
 
@@ -145,6 +154,7 @@ impl RuntimeMetrics {
       active_processes: active_processes as u64,
       messages_sent_total,
       messages_processed_total,
+      mailbox_rejections_total: self.mailbox_rejections_total.load(Ordering::Relaxed),
       messages_per_sec_avg: messages_processed_total as f64 / uptime_secs_nonzero,
       io_requests_total: self.io_requests_total.load(Ordering::Relaxed),
       io_responses_total: self.io_responses_total.load(Ordering::Relaxed),

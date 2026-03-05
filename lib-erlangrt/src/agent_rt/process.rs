@@ -2,6 +2,12 @@ use std::{collections::VecDeque, sync::Arc};
 
 use crate::agent_rt::types::*;
 
+pub const DEFAULT_MAILBOX_CAPACITY: usize = 1024;
+
+/// Error returned when a process mailbox is at capacity.
+#[derive(Debug, Clone)]
+pub struct MailboxFull;
+
 /// A running agent process with its own mailbox,
 /// state, and scheduling metadata.
 pub struct AgentProcess {
@@ -9,6 +15,7 @@ pub struct AgentProcess {
   pub behavior: Arc<dyn AgentBehavior>,
   pub state: Option<Box<dyn AgentState>>,
   pub mailbox: VecDeque<Message>,
+  pub mailbox_capacity: usize,
   pub reductions: u32,
   pub status: ProcessStatus,
   pub priority: Priority,
@@ -48,6 +55,14 @@ impl AgentProcess {
     behavior: Arc<dyn AgentBehavior>,
     args: serde_json::Value,
   ) -> Result<Self, Reason> {
+    Self::new_with_mailbox_capacity(behavior, args, DEFAULT_MAILBOX_CAPACITY)
+  }
+
+  pub fn new_with_mailbox_capacity(
+    behavior: Arc<dyn AgentBehavior>,
+    args: serde_json::Value,
+    capacity: usize,
+  ) -> Result<Self, Reason> {
     let pid = AgentPid::new();
     let state = behavior.init(args)?;
     Ok(Self {
@@ -55,6 +70,7 @@ impl AgentProcess {
       behavior,
       state: Some(state),
       mailbox: VecDeque::new(),
+      mailbox_capacity: capacity,
       reductions: 0,
       status: ProcessStatus::Runnable,
       priority: Priority::Normal,
@@ -67,12 +83,16 @@ impl AgentProcess {
     })
   }
 
-  pub fn deliver_message(&mut self, msg: Message) {
+  pub fn deliver_message(&mut self, msg: Message) -> Result<(), MailboxFull> {
+    if self.mailbox.len() >= self.mailbox_capacity {
+      return Err(MailboxFull);
+    }
     self.mailbox.push_back(msg);
     self.receive_timeout = None;
     if self.status == ProcessStatus::Waiting {
       self.status = ProcessStatus::Runnable;
     }
+    Ok(())
   }
 
   pub fn has_messages(&self) -> bool {
