@@ -2,7 +2,14 @@ use crate::agent_rt::{
   observability::RuntimeMetrics, rate_limiter::RateLimiter, types::*,
 };
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use std::{error::Error as StdError, sync::Arc, time::Duration};
+use std::{
+  error::Error as StdError,
+  sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+  },
+  time::Duration,
+};
 use tracing::{debug, warn};
 
 const REQUEST_QUEUE_SIZE: usize = 1024;
@@ -62,7 +69,8 @@ enum WorkerRequest {
 pub struct BridgeHandle {
   request_tx: Sender<WorkerRequest>,
   response_rx: Receiver<IoResponse>,
-  pub next_correlation_id: u64,
+  next_correlation_id: Arc<AtomicU64>,
+  shutdown_enabled: bool,
 }
 
 /// Tokio-side worker that receives I/O requests
@@ -75,25 +83,48 @@ pub struct BridgeWorker {
   llm_config: LlmConfig,
 }
 
+impl Clone for BridgeHandle {
+  fn clone(&self) -> Self {
+    Self {
+      request_tx: self.request_tx.clone(),
+      response_rx: self.response_rx.clone(),
+      next_correlation_id: self.next_correlation_id.clone(),
+      shutdown_enabled: self.shutdown_enabled,
+    }
+  }
+}
+
 /// Create a bridge pair: one handle for the scheduler
 /// thread and one worker for the Tokio runtime.
 pub fn create_bridge() -> (BridgeHandle, BridgeWorker) {
+  let (handle, mut workers) = create_bridge_pool(1);
+  (handle, workers.pop().expect("bridge pool with 1 worker"))
+}
+
+/// Create a shared bridge handle and a worker pool.
+/// The returned handle can be cloned and shared across
+/// schedulers; workers consume from one request queue.
+pub fn create_bridge_pool(worker_count: usize) -> (BridgeHandle, Vec<BridgeWorker>) {
+  let worker_count = worker_count.max(1);
   let (req_tx, req_rx) = bounded(REQUEST_QUEUE_SIZE);
   let (resp_tx, resp_rx) = bounded(RESPONSE_QUEUE_SIZE);
-  (
-    BridgeHandle {
-      request_tx: req_tx,
-      response_rx: resp_rx,
-      next_correlation_id: 0,
-    },
-    BridgeWorker {
-      request_rx: req_rx,
-      response_tx: resp_tx,
+  let handle = BridgeHandle {
+    request_tx: req_tx,
+    response_rx: resp_rx,
+    next_correlation_id: Arc::new(AtomicU64::new(0)),
+    shutdown_enabled: true,
+  };
+  let mut workers = Vec::with_capacity(worker_count);
+  for _ in 0..worker_count {
+    workers.push(BridgeWorker {
+      request_rx: req_rx.clone(),
+      response_tx: resp_tx.clone(),
       rate_limiter: None,
       metrics: None,
       llm_config: LlmConfig::from_env(),
-    },
-  )
+    });
+  }
+  (handle, workers)
 }
 
 pub fn create_bridge_with_metrics(
@@ -105,20 +136,25 @@ pub fn create_bridge_with_metrics(
 }
 
 impl BridgeHandle {
+  /// Disable shutdown signaling on this handle clone.
+  /// Useful when multiple scheduler handles share one
+  /// worker pool and shutdown is coordinated elsewhere.
+  pub fn with_shutdown_disabled(mut self) -> Self {
+    self.shutdown_enabled = false;
+    self
+  }
+
   /// Submit an I/O operation. Returns the correlation ID
   /// on success, or an error string if the queue is full.
   pub fn submit(&mut self, pid: AgentPid, op: IoOp) -> Result<u64, String> {
-    let cid = self.next_correlation_id;
+    let cid = self.next_correlation_id.fetch_add(1, Ordering::Relaxed);
     let req = IoRequest {
       correlation_id: cid,
       source_pid: pid,
       op,
     };
     match self.request_tx.try_send(WorkerRequest::Io(req)) {
-      Ok(()) => {
-        self.next_correlation_id += 1;
-        Ok(cid)
-      }
+      Ok(()) => Ok(cid),
       Err(TrySendError::Full(_)) => Err("request queue full".into()),
       Err(TrySendError::Disconnected(_)) => Err("bridge worker disconnected".into()),
     }
@@ -128,6 +164,9 @@ impl BridgeHandle {
   /// wait for in-flight operations to complete up to
   /// `timeout`.
   pub fn shutdown(&mut self, timeout: Duration) -> Result<(), String> {
+    if !self.shutdown_enabled {
+      return Ok(());
+    }
     let (ack_tx, ack_rx) = bounded(1);
     self
       .request_tx

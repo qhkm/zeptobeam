@@ -78,6 +78,11 @@ impl AgentScheduler {
     self.bridge = bridge.into();
   }
 
+  /// Detach the I/O bridge from this scheduler.
+  pub fn clear_bridge(&mut self) {
+    self.bridge = None;
+  }
+
   /// Enable or disable external routing mode.
   /// When enabled, messages addressed to unknown local
   /// PIDs are queued for external delivery instead of

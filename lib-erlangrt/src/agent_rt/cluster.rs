@@ -4,7 +4,11 @@ use std::{
   time::Duration,
 };
 
-use crate::agent_rt::{scheduler::AgentScheduler, types::*};
+use crate::agent_rt::{
+  bridge::{create_bridge_pool, BridgeHandle, BridgeWorker},
+  scheduler::AgentScheduler,
+  types::*,
+};
 use tracing::warn;
 
 /// Multi-scheduler runtime with round-robin process
@@ -14,6 +18,8 @@ pub struct SchedulerCluster {
   pid_owner: HashMap<AgentPid, usize>,
   next_spawn_partition: usize,
   next_tick_partition: usize,
+  shared_bridge_shutdown_handle: Option<BridgeHandle>,
+  shared_bridge_workers: usize,
 }
 
 impl SchedulerCluster {
@@ -30,6 +36,8 @@ impl SchedulerCluster {
       pid_owner: HashMap::new(),
       next_spawn_partition: 0,
       next_tick_partition: 0,
+      shared_bridge_shutdown_handle: None,
+      shared_bridge_workers: 0,
     }
   }
 
@@ -43,6 +51,29 @@ impl SchedulerCluster {
 
   pub fn scheduler_mut(&mut self, index: usize) -> Option<&mut AgentScheduler> {
     self.schedulers.get_mut(index)
+  }
+
+  /// Attach one shared bridge handle to all partitions.
+  /// Scheduler-local clones have shutdown disabled so
+  /// pool shutdown is coordinated at cluster level.
+  pub fn attach_shared_bridge(&mut self, bridge: BridgeHandle) {
+    self.shared_bridge_shutdown_handle = Some(bridge.clone());
+    if self.shared_bridge_workers == 0 {
+      self.shared_bridge_workers = 1;
+    }
+    for scheduler in &mut self.schedulers {
+      scheduler.set_bridge(bridge.clone().with_shutdown_disabled());
+    }
+  }
+
+  /// Create and attach a shared bridge worker pool used
+  /// by all partitions. Returns workers to run on Tokio.
+  pub fn create_shared_bridge_pool(&mut self, worker_count: usize) -> Vec<BridgeWorker> {
+    let worker_count = worker_count.max(1);
+    let (handle, workers) = create_bridge_pool(worker_count);
+    self.shared_bridge_workers = workers.len();
+    self.attach_shared_bridge(handle);
+    workers
   }
 
   pub fn owner_of(&self, pid: AgentPid) -> Option<usize> {
@@ -115,6 +146,19 @@ impl SchedulerCluster {
   }
 
   pub fn graceful_shutdown(&mut self, timeout: Duration) {
+    if let Some(mut bridge) = self.shared_bridge_shutdown_handle.take() {
+      let rounds = self.shared_bridge_workers.max(1);
+      for _ in 0..rounds {
+        if bridge.shutdown(timeout).is_err() {
+          break;
+        }
+      }
+      for scheduler in &mut self.schedulers {
+        scheduler.clear_bridge();
+      }
+      self.shared_bridge_workers = 0;
+    }
+
     for scheduler in &mut self.schedulers {
       scheduler.graceful_shutdown(timeout);
     }
@@ -152,7 +196,7 @@ impl SchedulerCluster {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::agent_rt::types::{Action, AgentState, Message, Reason};
+  use crate::agent_rt::types::{Action, AgentState, IoOp, Message, Reason, SystemMsg};
 
   struct EmptyState;
 
@@ -230,6 +274,61 @@ mod tests {
     fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
   }
 
+  struct TimerOnceState {
+    requested: bool,
+    completed: bool,
+  }
+
+  impl AgentState for TimerOnceState {
+    fn as_any(&self) -> &dyn std::any::Any {
+      self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+      self
+    }
+  }
+
+  struct TimerOnceBehavior {
+    duration: Duration,
+  }
+
+  impl AgentBehavior for TimerOnceBehavior {
+    fn init(&self, _args: serde_json::Value) -> Result<Box<dyn AgentState>, Reason> {
+      Ok(Box::new(TimerOnceState {
+        requested: false,
+        completed: false,
+      }))
+    }
+
+    fn handle_message(&self, msg: Message, state: &mut dyn AgentState) -> Action {
+      let s = state.as_any_mut().downcast_mut::<TimerOnceState>().unwrap();
+      match msg {
+        Message::Text(_) if !s.requested => {
+          s.requested = true;
+          Action::IoRequest(IoOp::Timer {
+            duration: self.duration,
+          })
+        }
+        Message::System(SystemMsg::IoResponse { .. }) => {
+          s.completed = true;
+          Action::Continue
+        }
+        _ => Action::Continue,
+      }
+    }
+
+    fn handle_exit(
+      &self,
+      _from: AgentPid,
+      _reason: Reason,
+      _state: &mut dyn AgentState,
+    ) -> Action {
+      Action::Continue
+    }
+
+    fn terminate(&self, _reason: Reason, _state: &mut dyn AgentState) {}
+  }
+
   #[test]
   fn test_cluster_spawn_round_robin_across_partitions() {
     let mut cluster = SchedulerCluster::new(2);
@@ -278,5 +377,74 @@ mod tests {
       receiver_proc.mailbox.front(),
       Some(Message::Text(text)) if text == "cross-partition"
     ));
+  }
+
+  #[tokio::test]
+  async fn test_cluster_shared_bridge_pool_handles_io_across_partitions() {
+    let mut cluster = SchedulerCluster::new(2);
+    let workers = cluster.create_shared_bridge_pool(2);
+    let mut worker_handles = Vec::new();
+    for worker in workers {
+      worker_handles.push(tokio::spawn(async move {
+        worker.run().await;
+      }));
+    }
+
+    let p1 = cluster
+      .spawn(
+        Arc::new(TimerOnceBehavior {
+          duration: Duration::from_millis(15),
+        }),
+        serde_json::Value::Null,
+      )
+      .unwrap();
+    let p2 = cluster
+      .spawn(
+        Arc::new(TimerOnceBehavior {
+          duration: Duration::from_millis(15),
+        }),
+        serde_json::Value::Null,
+      )
+      .unwrap();
+
+    cluster.send(p1, Message::Text("go".into())).unwrap();
+    cluster.send(p2, Message::Text("go".into())).unwrap();
+    cluster.enqueue(p1).unwrap();
+    cluster.enqueue(p2).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+      cluster.tick();
+      if timer_completed(&cluster, p1) && timer_completed(&cluster, p2) {
+        break;
+      }
+      if std::time::Instant::now() >= deadline {
+        panic!("timed out waiting for shared bridge pool io responses");
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    cluster.graceful_shutdown(Duration::from_millis(200));
+    for handle in worker_handles {
+      let _ = handle.await;
+    }
+  }
+
+  fn timer_completed(cluster: &SchedulerCluster, pid: AgentPid) -> bool {
+    let Some(partition) = cluster.owner_of(pid) else {
+      return false;
+    };
+    let Some(proc) = cluster
+      .scheduler(partition)
+      .and_then(|s| s.registry.lookup(&pid))
+    else {
+      return false;
+    };
+    proc
+      .state
+      .as_ref()
+      .and_then(|s| s.as_any().downcast_ref::<TimerOnceState>())
+      .map(|s| s.completed)
+      .unwrap_or(false)
   }
 }
