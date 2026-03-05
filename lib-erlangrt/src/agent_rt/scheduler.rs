@@ -103,15 +103,22 @@ impl AgentScheduler {
   /// Set a receive timeout on a process. If the process
   /// is Waiting and the deadline expires, the scheduler
   /// delivers a ReceiveTimeout message and wakes it.
+  /// Returns an error if the PID is unknown or the
+  /// duration overflows Instant.
   pub fn set_receive_timeout(
     &mut self,
     pid: AgentPid,
     duration: std::time::Duration,
-  ) {
-    if let Some(proc) = self.registry.lookup_mut(&pid) {
-      proc.receive_timeout =
-        Some(std::time::Instant::now() + duration);
-    }
+  ) -> Result<(), String> {
+    let proc = self
+      .registry
+      .lookup_mut(&pid)
+      .ok_or_else(|| format!("Process {:?} not found", pid))?;
+    let deadline = std::time::Instant::now()
+      .checked_add(duration)
+      .ok_or_else(|| "timeout duration overflow".to_string())?;
+    proc.receive_timeout = Some(deadline);
+    Ok(())
   }
 
   /// Add a process to the appropriate priority queue

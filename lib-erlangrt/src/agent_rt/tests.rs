@@ -2142,7 +2142,9 @@ fn test_receive_timeout_wakes_waiting_process() {
   );
 
   // Set an already-expired timeout (duration 0)
-  sched.set_receive_timeout(pid, std::time::Duration::from_millis(0));
+  sched
+    .set_receive_timeout(pid, std::time::Duration::from_millis(0))
+    .unwrap();
 
   // Next tick: detect expired timeout, deliver ReceiveTimeout,
   // wake process, dispatch the message
@@ -2182,7 +2184,9 @@ fn test_receive_timeout_canceled_by_real_message() {
   );
 
   // Set timeout (won't expire yet — 10 seconds)
-  sched.set_receive_timeout(pid, std::time::Duration::from_secs(10));
+  sched
+    .set_receive_timeout(pid, std::time::Duration::from_secs(10))
+    .unwrap();
 
   // Deliver a real message — should cancel the timeout
   sched.send(pid, Message::Text("hello".into())).unwrap();
@@ -2207,7 +2211,9 @@ fn test_receive_timeout_only_fires_when_waiting() {
   sched.send(pid, Message::Text("keep busy".into())).unwrap();
 
   // Set an expired timeout on a Runnable process
-  sched.set_receive_timeout(pid, std::time::Duration::from_millis(0));
+  sched
+    .set_receive_timeout(pid, std::time::Duration::from_millis(0))
+    .unwrap();
 
   // tick dispatches "keep busy", process goes Waiting (mailbox empty)
   sched.enqueue(pid);
@@ -2226,4 +2232,24 @@ fn test_receive_timeout_only_fires_when_waiting() {
   // Only "keep busy" was processed, no ReceiveTimeout
   assert_eq!(state.received.len(), 1);
   assert!(matches!(&state.received[0], Message::Text(_)));
+}
+
+#[test]
+fn test_set_receive_timeout_errors_on_missing_pid() {
+  let mut sched = AgentScheduler::new();
+  let fake_pid = AgentPid::from_raw(0xDEAD);
+  let result =
+    sched.set_receive_timeout(fake_pid, std::time::Duration::from_secs(1));
+  assert!(result.is_err(), "Should error for unknown PID");
+}
+
+#[test]
+fn test_set_receive_timeout_errors_on_overflow() {
+  let mut sched = AgentScheduler::new();
+  let pid = sched
+    .registry
+    .spawn(Arc::new(EchoBehavior), serde_json::Value::Null)
+    .unwrap();
+  let result = sched.set_receive_timeout(pid, std::time::Duration::MAX);
+  assert!(result.is_err(), "Should error on duration overflow");
 }
