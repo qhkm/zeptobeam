@@ -74,7 +74,7 @@ async fn test_agent_adapter_lifecycle() {
     timeout_ms: Some(10000),
   };
   let adapter = create_agent_adapter(config);
-  let (_pid, handle, join) = spawn_process(adapter, 64, None, None);
+  let (_pid, handle, join) = spawn_process(adapter, 64, None, None, None);
 
   // Send a few text messages
   handle.send_user(Message::text("hello")).await.unwrap();
@@ -113,7 +113,7 @@ async fn test_config_resolve_and_spawn() {
 
   // Spawn the resolved agent as a zeptovm process
   let adapter = create_agent_adapter(resolved.agents[0].clone());
-  let (_pid, handle, join) = spawn_process(adapter, 64, None, None);
+  let (_pid, handle, join) = spawn_process(adapter, 64, None, None, None);
 
   handle.send_user(Message::text("hi from config")).await.unwrap();
   handle.send_user(stop_message()).await.unwrap();
@@ -195,7 +195,7 @@ async fn test_checkpoint_roundtrip_through_adapter() {
   let config = test_adapter_config("checkpoint-agent");
   let adapter = create_agent_adapter(config);
   let (pid, handle, join) =
-    spawn_process(adapter, 64, None, Some(store.clone()));
+    spawn_process(adapter, 64, None, Some(store.clone()), None);
 
   // Send 10 text messages to trigger should_checkpoint (every 10 messages)
   for i in 0..10 {

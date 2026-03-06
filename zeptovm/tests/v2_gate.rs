@@ -76,7 +76,7 @@ async fn gate_v2_checkpoint_save_and_recover() {
     counter: 0,
     observable: observable.clone(),
   };
-  let (pid1, handle1, join1) = spawn_process(behavior, 16, None, Some(store.clone()));
+  let (pid1, handle1, join1) = spawn_process(behavior, 16, None, Some(store.clone()), None);
 
   for _ in 0..5 {
     handle1.send_user(Message::text("inc")).await.unwrap();
@@ -118,6 +118,7 @@ async fn gate_v2_checkpoint_save_and_recover() {
     16,
     Some(state_bytes.to_vec()),
     Some(store.clone()),
+    None,
   );
 
   // Give init time to run
@@ -266,7 +267,7 @@ async fn gate_v2_full_lifecycle_checkpoint_kill_recover() {
     msg_count: 0,
     observable: observable1.clone(),
   };
-  let (pid1, handle1, join1) = spawn_process(behavior1, 16, None, Some(store.clone()));
+  let (pid1, handle1, join1) = spawn_process(behavior1, 16, None, Some(store.clone()), None);
 
   for label in &["a", "b", "c", "d", "e"] {
     handle1.send_user(Message::text(*label)).await.unwrap();
@@ -322,6 +323,7 @@ async fn gate_v2_full_lifecycle_checkpoint_kill_recover() {
     16,
     Some(state_bytes.to_vec()),
     Some(store.clone()),
+    None,
   );
 
   // Give init time to restore state

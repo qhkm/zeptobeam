@@ -665,7 +665,7 @@ async fn run_daemon_v2(
       llm_bridge.clone(),
     );
     let (pid, handle, join) =
-      spawn_process(adapter, 64, None, Some(checkpoint_store.clone()));
+      spawn_process(adapter, 64, None, Some(checkpoint_store.clone()), None);
     info!(agent = %name, pid = %pid, "spawned agent process");
     runtime_ops.register(name.clone(), pid, handle.clone());
     handles.push((name.clone(), handle));

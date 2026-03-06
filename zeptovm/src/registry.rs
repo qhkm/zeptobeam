@@ -31,7 +31,7 @@ impl ProcessRegistry {
     checkpoint: Option<Vec<u8>>,
   ) -> (Pid, JoinHandle<ProcessExit>) {
     let (pid, handle, join) =
-      spawn_process(behavior, user_mailbox_capacity, checkpoint, None);
+      spawn_process(behavior, user_mailbox_capacity, checkpoint, None, None);
     self.handles.insert(pid, handle);
     (pid, join)
   }
