@@ -68,6 +68,13 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Describes how to undo/compensate a completed effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompensationSpec {
+  pub undo_kind: EffectKind,
+  pub undo_input: serde_json::Value,
+}
+
 /// A process emits this to request a side effect.
 /// This is what gets journaled, policy-checked, and dispatched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +85,7 @@ pub struct EffectRequest {
     pub timeout: Duration,
     pub retry: RetryPolicy,
     pub idempotency_key: Option<String>,
+    pub compensation: Option<CompensationSpec>,
 }
 
 impl EffectRequest {
@@ -89,6 +97,7 @@ impl EffectRequest {
             timeout: Duration::from_secs(60),
             retry: RetryPolicy::default(),
             idempotency_key: None,
+            compensation: None,
         }
     }
 
@@ -99,6 +108,14 @@ impl EffectRequest {
 
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
+        self
+    }
+
+    pub fn with_compensation(
+        mut self,
+        spec: CompensationSpec,
+    ) -> Self {
+        self.compensation = Some(spec);
         self
     }
 }

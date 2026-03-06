@@ -1,3 +1,4 @@
+pub mod compensation;
 pub mod mailbox;
 pub mod metrics;
 pub mod process_table;

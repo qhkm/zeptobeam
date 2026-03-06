@@ -22,6 +22,7 @@ pub enum TurnIntent {
   PatchState(Vec<u8>),
   ScheduleTimer(crate::core::timer::TimerSpec),
   CancelTimer(crate::core::timer::TimerId),
+  Rollback,
   // Phase 2: SpawnProcess, Link, Monitor, DebitBudget
 }
 
@@ -76,6 +77,12 @@ impl TurnContext {
     id: crate::core::timer::TimerId,
   ) {
     self.intents.push(TurnIntent::CancelTimer(id));
+  }
+
+  /// Request saga-style rollback of completed compensatable
+  /// effects.
+  pub fn rollback(&mut self) {
+    self.intents.push(TurnIntent::Rollback);
   }
 
   /// Take all collected intents (consumed by turn executor).

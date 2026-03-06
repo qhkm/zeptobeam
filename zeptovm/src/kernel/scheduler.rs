@@ -187,6 +187,9 @@ impl SchedulerEngine {
           TurnIntent::CancelTimer(id) => {
             self.timer_wheel.cancel(id);
           }
+          TurnIntent::Rollback => {
+            // Phase 2: wire into CompensationLog
+          }
         }
       }
 
