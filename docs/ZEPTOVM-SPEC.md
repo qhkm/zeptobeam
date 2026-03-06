@@ -16,7 +16,7 @@
 5. [Message Model](#5-message-model)
 6. [Mailbox Engine](#6-mailbox-engine)
 7. [Turn Model](#7-turn-model)
-8. [Deterministic Shell / Nondeterministic Effects](#8-deterministic-shell--nondeterministic-effects)
+8. [Replay-Safe Shell / Nondeterministic Effects](#8-replay-safe-shell--nondeterministic-effects)
 9. [Behavior Trait](#9-behavior-trait)
 10. [Effect System](#10-effect-system)
 11. [Journal Model](#11-journal-model)
@@ -76,7 +76,7 @@ The runtime optimizes for:
 3. **Durable waiting** — effects, timers, human approvals survive restarts
 4. **Failure containment** — crashes are isolated and supervised
 5. **Explicit side effects** — all I/O goes through the effect system
-6. **Replayability** — deterministic shell + recorded effect results
+6. **Replayability** — replay-safe shell + recorded effect results (see Handler Conventions)
 7. **Budget awareness** — token/cost/quota limits checked before dispatch
 8. **Policy enforcement** — capabilities gated before execution
 9. **Distributed placement** — processes placed by affinity, load, locality
@@ -332,11 +332,11 @@ Turns give: fairness, durability boundaries, replayability, inspectability, easi
 
 ---
 
-## 8. Deterministic Shell / Nondeterministic Effects
+## 8. Replay-Safe Shell / Nondeterministic Effects
 
-This is the central design principle.
+This is the central design principle. The orchestration layer is **intended to be replay-safe**, not strictly deterministic — Rust `handle()` implementations can technically read wall clock, generate randomness, or access environment variables. Replay safety is a convention enforced by handler discipline, not by the runtime. See `docs/HANDLER-CONVENTIONS.md` for guidelines.
 
-### 8.1 Deterministic Orchestration Layer (replayable)
+### 8.1 Replay-Safe Orchestration Layer
 
 Handles: mailbox progression, state transitions, timers, retries, spawn decisions, supervisor semantics, budget counters, policy checks, commit boundaries.
 
@@ -348,7 +348,7 @@ Execution flow:
 
 ```text
 message arrives
-  -> deterministic turn executes
+  -> replay-safe turn executes
   -> emits EffectRequest
   -> effect runs externally on reactor
   -> result recorded durably
