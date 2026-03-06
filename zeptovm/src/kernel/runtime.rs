@@ -11,7 +11,11 @@ use crate::{
     },
     message::Envelope,
   },
-  durability::{journal::Journal, snapshot::SnapshotStore},
+  durability::{
+    idempotency::IdempotencyStore,
+    journal::Journal,
+    snapshot::SnapshotStore,
+  },
   error::Reason,
   kernel::{
     compensation::{CompensationEntry, CompensationLog},
@@ -57,6 +61,7 @@ pub struct SchedulerRuntime {
   compensation_log: CompensationLog,
   pending_compensations:
     HashMap<u64, (Pid, CompensationSpec)>,
+  idempotency_store: Option<IdempotencyStore>,
   budget: BudgetState,
   budget_violations: Vec<BudgetViolation>,
   budget_enabled: bool,
@@ -72,6 +77,7 @@ impl SchedulerRuntime {
       turn_executor: None,
       compensation_log: CompensationLog::new(),
       pending_compensations: HashMap::new(),
+      idempotency_store: None,
       budget: BudgetState::default(),
       budget_violations: Vec::new(),
       budget_enabled: false,
@@ -94,6 +100,9 @@ impl SchedulerRuntime {
       turn_executor: Some(turn_executor),
       compensation_log: CompensationLog::new(),
       pending_compensations: HashMap::new(),
+      idempotency_store: Some(
+        IdempotencyStore::open_in_memory().unwrap(),
+      ),
       budget: BudgetState::default(),
       budget_violations: Vec::new(),
       budget_enabled: false,
@@ -177,6 +186,30 @@ impl SchedulerRuntime {
             );
           }
         }
+        // Record in idempotency store
+        if let Some(ref store) =
+          self.idempotency_store
+        {
+          let _ = store.record(
+            &completion.result.effect_id,
+            &completion.result,
+          );
+        }
+
+        // Track effect completion metrics
+        match completion.result.status {
+          EffectStatus::Succeeded => {
+            self.metrics.inc("effects.completed");
+          }
+          EffectStatus::Failed => {
+            self.metrics.inc("effects.failed");
+          }
+          EffectStatus::TimedOut => {
+            self.metrics.inc("effects.timed_out");
+          }
+          EffectStatus::Cancelled => {}
+        }
+
         self.engine
           .deliver_effect_result(completion.result);
       }
@@ -289,6 +322,20 @@ impl SchedulerRuntime {
 
     // 7. Process outbound effects (budget gate -> reactor)
     for (pid, req) in effects {
+      // Check idempotency store before dispatch
+      if let Some(ref store) = self.idempotency_store {
+        if req.idempotency_key.is_some() {
+          if let Ok(Some(cached)) =
+            store.check(&req.effect_id)
+          {
+            self
+              .engine
+              .deliver_effect_result(cached);
+            continue;
+          }
+        }
+      }
+
       if self.budget_enabled
         && self.should_block_effect(&req)
       {
@@ -445,6 +492,43 @@ impl SchedulerRuntime {
   /// Get a reference to the metrics.
   pub fn metrics(&self) -> &Metrics {
     &self.metrics
+  }
+
+  /// Recover a process from durable storage
+  /// (journal + snapshot).
+  pub fn recover_process(
+    &mut self,
+    pid: Pid,
+    factory: &dyn Fn() -> Box<dyn StepBehavior>,
+  ) -> Result<(), String> {
+    let executor = self
+      .turn_executor
+      .as_ref()
+      .ok_or("no turn executor configured")?;
+
+    let coord =
+      crate::kernel::recovery::RecoveryCoordinator::new(
+        executor.journal(),
+        executor.snapshot_store(),
+      );
+
+    let recovered = coord.recover_process(pid, factory)?;
+
+    // Re-insert recovered process into scheduler
+    self.engine.insert_process(recovered.entry);
+
+    // Re-schedule recovered timers
+    for timer in recovered.timers {
+      self.engine.schedule_timer(timer);
+    }
+
+    self.metrics.inc("processes.spawned");
+    self.metrics.gauge_set(
+      "processes.active",
+      self.engine.process_count() as i64,
+    );
+
+    Ok(())
   }
 }
 
@@ -792,6 +876,26 @@ mod tests {
   }
 
   #[test]
+  fn test_runtime_idempotency_records() {
+    // Verify that completed effects are recorded
+    // in the idempotency store
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick(); // Suspends with LlmCall
+
+    // Wait for reactor completion
+    std::thread::sleep(
+      std::time::Duration::from_millis(200),
+    );
+    rt.tick(); // Delivers result
+
+    // Process should be done
+    let completed = rt.take_completed();
+    assert_eq!(completed.len(), 1);
+  }
+
+  #[test]
   fn test_runtime_compensation_rollback() {
     use crate::core::effect::{
       CompensationSpec, EffectKind, EffectRequest,
@@ -860,6 +964,24 @@ mod tests {
       rt.metrics().counter("compensation.triggered")
         > 0,
       "compensation should have been triggered"
+    );
+  }
+
+  #[test]
+  fn test_runtime_metrics_effects_completed() {
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick(); // Suspends
+
+    std::thread::sleep(
+      std::time::Duration::from_millis(200),
+    );
+    rt.tick(); // Delivers result
+
+    assert!(
+      rt.metrics().counter("effects.completed") > 0,
+      "effects.completed should be incremented"
     );
   }
 }
