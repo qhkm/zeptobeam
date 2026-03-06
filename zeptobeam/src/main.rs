@@ -203,6 +203,15 @@ enum Commands {
     #[arg(short, long, default_value = "text")]
     format: String,
   },
+  /// Start the daemon using the new zeptovm runtime
+  DaemonV2 {
+    /// Override worker count
+    #[arg(short, long)]
+    workers: Option<usize>,
+    /// Override server bind address
+    #[arg(short, long)]
+    bind: Option<String>,
+  },
   /// Run an orchestrated multi-agent workflow
   Orchestrate {
     /// Goal to decompose and execute
@@ -579,6 +588,121 @@ async fn run_daemon(
   info!("zeptobeam stopped");
 }
 
+async fn run_daemon_v2(
+  config_path: String,
+  log_level: Option<String>,
+  _workers: Option<usize>,
+  _bind: Option<String>,
+) {
+  use std::sync::Arc;
+  use zeptovm::durability::SqliteCheckpointStore as ZeptoCheckpointStore;
+  use zeptovm::process::spawn_process;
+
+  // Load config (same pattern as legacy daemon)
+  let config = match load_config(&config_path) {
+    Ok(c) => {
+      eprintln!("Loaded config from {}", config_path);
+      c
+    }
+    Err(_) => {
+      eprintln!("Config file '{}' not found, using defaults", config_path);
+      AppConfig::default()
+    }
+  };
+
+  // Init tracing
+  init_tracing(&config, log_level.as_deref());
+
+  info!("zeptobeam v2 starting (zeptovm runtime)");
+
+  // Resolve agents from config
+  let resolved = match config_loader::resolve_agents_from_config(&config) {
+    Ok(r) => r,
+    Err(errors) => {
+      for e in &errors {
+        tracing::error!(agent = %e.agent_name, error = %e.message, "config validation failed");
+      }
+      eprintln!("Aborting: {} agent config error(s)", errors.len());
+      std::process::exit(1);
+    }
+  };
+
+  info!(
+    agent_count = resolved.agents.len(),
+    config_hash = resolved.config_hash,
+    "resolved agents from config"
+  );
+
+  // Create checkpoint store
+  let checkpoint_store = Arc::new(
+    ZeptoCheckpointStore::new(&config.checkpoint.path)
+      .expect("failed to open zeptovm checkpoint store"),
+  );
+
+  // Spawn a zeptovm process for each resolved agent
+  let mut handles: Vec<(String, zeptovm::mailbox::ProcessHandle)> = Vec::new();
+  let mut joins: Vec<(String, tokio::task::JoinHandle<zeptovm::process::ProcessExit>)> =
+    Vec::new();
+
+  for agent_cfg in resolved.agents {
+    let name = agent_cfg.name.clone();
+    let adapter = agent_adapter::create_agent_adapter(agent_cfg);
+    let (pid, handle, join) =
+      spawn_process(adapter, 64, None, Some(checkpoint_store.clone()));
+    info!(agent = %name, pid = %pid, "spawned agent process");
+    handles.push((name.clone(), handle));
+    joins.push((name, join));
+  }
+
+  info!(
+    process_count = handles.len(),
+    "all agents spawned, waiting for shutdown signal"
+  );
+
+  // Wait for shutdown signal (SIGINT / SIGTERM)
+  let shutdown = async {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+      let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+          .expect("register SIGTERM");
+      tokio::select! {
+        _ = ctrl_c => info!("received SIGINT"),
+        _ = sigterm.recv() => info!("received SIGTERM"),
+      }
+    }
+    #[cfg(not(unix))]
+    {
+      ctrl_c.await.ok();
+      info!("received SIGINT");
+    }
+  };
+  shutdown.await;
+
+  info!("shutting down gracefully...");
+
+  // Kill all processes
+  for (name, handle) in &handles {
+    handle.kill();
+    info!(agent = %name, "sent kill to agent");
+  }
+
+  // Wait for all join handles
+  for (name, join) in joins {
+    match join.await {
+      Ok(exit) => {
+        info!(agent = %name, reason = %exit.reason, "agent exited");
+      }
+      Err(e) => {
+        warn!(agent = %name, error = %e, "agent join failed");
+      }
+    }
+  }
+
+  info!("zeptobeam v2 stopped");
+}
+
 #[tokio::main]
 async fn main() {
   let cli = Cli::parse();
@@ -606,6 +730,9 @@ async fn main() {
     }
     Some(Commands::Daemon { workers, bind }) => {
       run_daemon(cli.config, cli.log_level, workers, bind).await;
+    }
+    Some(Commands::DaemonV2 { workers, bind }) => {
+      run_daemon_v2(cli.config, cli.log_level, workers, bind).await;
     }
     None => {
       run_daemon(cli.config, cli.log_level, None, None).await;
