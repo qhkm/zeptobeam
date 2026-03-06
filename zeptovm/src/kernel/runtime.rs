@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use tracing::{debug, warn};
 
 use crate::{
@@ -13,7 +15,7 @@ use crate::{
     process_table::ProcessRuntimeState,
     reactor::Reactor,
     scheduler::SchedulerEngine,
-    turn_executor::TurnExecutor,
+    turn_executor::{TurnCommit, TurnExecutor},
   },
   pid::Pid,
 };
@@ -47,7 +49,6 @@ pub struct BudgetViolation {
 pub struct SchedulerRuntime {
   engine: SchedulerEngine,
   reactor: Option<Reactor>,
-  #[allow(dead_code)]
   turn_executor: Option<TurnExecutor>,
   budget: BudgetState,
   budget_violations: Vec<BudgetViolation>,
@@ -130,15 +131,17 @@ impl SchedulerRuntime {
   /// Run one tick of the runtime:
   /// 1. Drain reactor completions -> deliver to scheduler
   /// 2. Tick the scheduler engine
-  /// 3. Process outbound effects (budget gate -> reactor
-  ///    dispatch)
-  /// 4. Process completed processes
+  /// 3. Take outbound effects and messages
+  /// 4. Journal before dispatch (if turn_executor present)
+  /// 5. Deliver messages (after journaling)
+  /// 6. Process outbound effects (budget gate -> reactor)
   pub fn tick(&mut self) -> usize {
     // 1. Drain reactor completions
     if let Some(ref reactor) = self.reactor {
       let completions = reactor.drain_completions();
       for completion in completions {
-        self.engine.deliver_effect_result(completion.result);
+        self.engine
+          .deliver_effect_result(completion.result);
       }
     }
 
@@ -147,19 +150,81 @@ impl SchedulerRuntime {
     debug!(stepped, "runtime tick complete");
     self.metrics.inc("scheduler.ticks");
 
-    // Take and re-deliver outbound messages
-    // (runtime owns delivery now)
+    // 3. Take outbound effects and messages
+    let effects = self.engine.take_outbound_effects();
     let messages = self.engine.take_outbound_messages();
+
+    // 4. Journal before dispatch (if turn_executor present)
+    if let Some(ref mut executor) = self.turn_executor {
+      // Group effects by pid
+      let mut effects_by_pid: HashMap<
+        Pid,
+        Vec<(Pid, EffectRequest)>,
+      > = HashMap::new();
+      for (pid, req) in &effects {
+        effects_by_pid
+          .entry(*pid)
+          .or_default()
+          .push((*pid, req.clone()));
+      }
+
+      // Group messages by sender
+      let mut messages_by_sender: HashMap<
+        Pid,
+        Vec<Envelope>,
+      > = HashMap::new();
+      for msg in &messages {
+        let sender = msg.from.unwrap_or(msg.to);
+        messages_by_sender
+          .entry(sender)
+          .or_default()
+          .push(msg.clone());
+      }
+
+      // All pids that produced output
+      let mut pids: HashSet<Pid> = HashSet::new();
+      pids.extend(effects_by_pid.keys());
+      pids.extend(messages_by_sender.keys());
+
+      // Build and commit TurnCommit per pid
+      for pid in pids {
+        let turn = TurnCommit {
+          pid,
+          turn_id:
+            crate::core::turn_context::next_turn_id(),
+          journal_entries: vec![],
+          outbound_messages: messages_by_sender
+            .remove(&pid)
+            .unwrap_or_default(),
+          effect_requests: effects_by_pid
+            .remove(&pid)
+            .unwrap_or_default(),
+          state_snapshot: self
+            .engine
+            .snapshot_for(pid),
+        };
+        if let Err(e) = executor.commit(&turn) {
+          warn!(
+            pid = %pid,
+            error = %e,
+            "turn commit failed"
+          );
+        } else {
+          self.metrics.inc("turns.committed");
+        }
+      }
+    }
+
+    // 5. Deliver messages (after journaling)
     for msg in messages {
       self.engine.send(msg);
     }
 
-    // 3. Process outbound effects
-    let effects = self.engine.take_outbound_effects();
+    // 6. Process outbound effects (budget gate -> reactor)
     for (pid, req) in effects {
-      if self.budget_enabled && self.should_block_effect(&req)
+      if self.budget_enabled
+        && self.should_block_effect(&req)
       {
-        // Budget exceeded -- deliver failure result
         warn!(
           pid = %pid,
           kind = ?req.kind,
@@ -172,14 +237,12 @@ impl SchedulerRuntime {
           reason: "budget exceeded".to_string(),
         };
         self.budget_violations.push(violation);
-
         let result = EffectResult::failure(
           req.effect_id,
           "budget exceeded",
         );
         self.engine.deliver_effect_result(result);
       } else {
-        // Dispatch to reactor
         self.metrics.inc("effects.dispatched");
         if let Some(ref reactor) = self.reactor {
           reactor.dispatch(pid, req);
@@ -561,6 +624,23 @@ mod tests {
     assert_eq!(
       rt.metrics().counter("processes.exited"),
       1
+    );
+  }
+
+  #[test]
+  fn test_runtime_journals_before_dispatch() {
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+
+    assert!(
+      rt.metrics().counter("turns.committed") > 0,
+      "turn should have been committed to journal"
+    );
+    assert!(
+      rt.metrics().counter("effects.dispatched") > 0,
+      "effect should have been dispatched"
     );
   }
 }
