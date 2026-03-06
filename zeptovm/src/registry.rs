@@ -35,13 +35,16 @@ impl ProcessRegistry {
   }
 
   pub async fn send(&self, pid: &Pid, msg: Message) -> Result<(), String> {
-    match self.handles.get(pid) {
-      Some(handle) => handle
-        .send_user(msg)
-        .await
-        .map_err(|_| format!("process {pid} mailbox closed")),
-      None => Err(format!("process {pid} not found")),
-    }
+    // Clone handle to release the DashMap guard before awaiting
+    let handle = self
+      .handles
+      .get(pid)
+      .map(|r| r.value().clone())
+      .ok_or_else(|| format!("process {pid} not found"))?;
+    handle
+      .send_user(msg)
+      .await
+      .map_err(|_| format!("process {pid} mailbox closed"))
   }
 
   pub fn kill(&self, pid: &Pid) {
