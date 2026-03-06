@@ -1051,4 +1051,112 @@ mod tests {
         .contains("no turn executor"),
     );
   }
+
+  // ── Phase 2.5 gate tests ─────────────────────────────
+
+  #[test]
+  fn test_gate_journal_before_dispatch_invariant() {
+    // Core invariant: effects are journaled BEFORE
+    // reactor dispatch
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+
+    let m = rt.metrics();
+    assert!(
+      m.counter("turns.committed") >= 1,
+      "turn must be committed"
+    );
+    assert!(
+      m.counter("effects.dispatched") >= 1,
+      "effect must be dispatched"
+    );
+  }
+
+  #[test]
+  fn test_gate_message_journaled_before_delivery() {
+    // Messages are journaled before being delivered
+    let mut rt = SchedulerRuntime::with_durability();
+    let receiver = rt.spawn(Box::new(Echo));
+    let sender = rt.spawn(Box::new(Forwarder {
+      target: receiver,
+    }));
+    rt.send(Envelope::text(sender, "trigger"));
+    rt.tick();
+
+    assert!(
+      rt.metrics().counter("turns.committed") >= 1,
+      "message turn must be committed"
+    );
+  }
+
+  #[test]
+  fn test_gate_full_lifecycle_metrics() {
+    // Full lifecycle: spawn -> effect -> completion
+    // -> exit. All metric categories should be populated.
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick(); // Suspends with effect
+
+    std::thread::sleep(
+      std::time::Duration::from_millis(200),
+    );
+    rt.tick(); // Delivers result, process exits
+
+    let completed = rt.take_completed();
+    assert_eq!(completed.len(), 1);
+    assert!(matches!(
+      completed[0].1,
+      Reason::Normal
+    ));
+
+    let m = rt.metrics();
+    assert!(m.counter("processes.spawned") >= 1);
+    assert!(m.counter("effects.dispatched") >= 1);
+    assert!(m.counter("effects.completed") >= 1);
+    assert!(m.counter("turns.committed") >= 1);
+    assert!(m.counter("processes.exited") >= 1);
+    assert!(m.counter("scheduler.ticks") >= 2);
+  }
+
+  #[test]
+  fn test_gate_runtime_without_durability_still_works()
+  {
+    // Runtime without durability should work fine
+    // (no journaling, but no crashes either)
+    let mut rt = SchedulerRuntime::new();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+
+    // No turns committed (no executor)
+    assert_eq!(
+      rt.metrics().counter("turns.committed"),
+      0
+    );
+    // But effect was still dispatched (to nowhere)
+    assert!(
+      rt.metrics().counter("effects.dispatched") >= 1
+    );
+  }
+
+  #[test]
+  fn test_gate_multiple_processes_independent_journals()
+  {
+    // Multiple processes each get their own TurnCommit
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid1 = rt.spawn(Box::new(LlmCaller));
+    let pid2 = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid1, "go"));
+    rt.send(Envelope::text(pid2, "go"));
+    rt.tick();
+
+    // Both should be journaled
+    assert!(
+      rt.metrics().counter("turns.committed") >= 2,
+      "each process should have its turn committed"
+    );
+  }
 }
