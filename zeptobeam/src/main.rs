@@ -1,3 +1,5 @@
+mod agent_adapter;
+
 use std::{
   sync::{
     atomic::{AtomicUsize, Ordering},
