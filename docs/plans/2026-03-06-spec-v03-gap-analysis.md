@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-06
 **Source:** `docs/internal/ZEPTOVM-SPEC-v03-review.md` (Codex design review)
-**Compared against:** Current implementation (297 tests, 48 files, ~12k LOC)
+**Compared against:** Current implementation (331 tests, 50+ files, ~13k LOC)
 
 ---
 
@@ -10,10 +10,10 @@
 
 | # | Critique | Status | Details |
 |---|----------|--------|---------|
-| C1 | Soften "deterministic shell" claim | NOT DONE | Spec says "handler is deterministic". Need reword + conventions doc |
-| C2 | Turn atomicity — explicit commit protocol | PARTIAL | TurnExecutor::commit() exists but journal + snapshot + effects are sequential writes, not one SQLite transaction |
+| C1 | Soften "deterministic shell" claim | DONE | Reworded to "replay-safe shell" + HANDLER-CONVENTIONS.md |
+| C2 | Turn atomicity — explicit commit protocol | DONE | TurnExecutor::open_in_memory() uses shared SQLite connection for atomic journal+snapshot commits |
 | C3 | Separate scheduling fairness from economic fairness | DONE | Reduction counter separate from BudgetGate |
-| C4 | Single-threaded scheduler — handler discipline | NOT DONE | No watchdog, no max wall-clock per turn, no overrun detection |
+| C4 | Single-threaded scheduler — handler discipline | DONE | Watchdog: max_turn_wall_clock + turn_overrun_flag + tracing::warn on overrun |
 | C5 | Collapse two behavior traits to one | DONE | Only StepBehavior exists |
 
 ## Things to Add Now
@@ -21,9 +21,9 @@
 | # | Addition | Status | Details |
 |---|----------|--------|---------|
 | A1 | ObjectRef type | NOT DONE | EffectKind variants exist, no ObjectRef struct or store |
-| A2 | Behavior version in process metadata | NOT DONE | No behavior_module, behavior_version, behavior_checksum |
+| A2 | Behavior version in process metadata | DONE | BehaviorMeta struct + meta() trait method on StepBehavior |
 | A3 | Effect state classification for recovery | PARTIAL | RecoveryCoordinator exists but no explicit state machine |
-| A4 | Watchdog for handler overruns | NOT DONE | No max wall-clock, no burst rate limit, no overrun signal |
+| A4 | Watchdog for handler overruns | DONE | Implemented with C4 — wall-clock timing in ProcessEntry::step() |
 
 ## Acknowledged Gaps (not yet needed per review)
 
