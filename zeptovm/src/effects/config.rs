@@ -1,10 +1,33 @@
 /// Configuration for LLM and HTTP effect providers.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderConfig {
   pub openai_api_key: Option<String>,
   pub openai_base_url: String,
   pub anthropic_api_key: Option<String>,
   pub anthropic_base_url: String,
+}
+
+impl std::fmt::Debug for ProviderConfig {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    f.debug_struct("ProviderConfig")
+      .field(
+        "openai_api_key",
+        &self.openai_api_key.as_ref().map(|_| "***"),
+      )
+      .field("openai_base_url", &self.openai_base_url)
+      .field(
+        "anthropic_api_key",
+        &self.anthropic_api_key.as_ref().map(|_| "***"),
+      )
+      .field(
+        "anthropic_base_url",
+        &self.anthropic_base_url,
+      )
+      .finish()
+  }
 }
 
 impl Default for ProviderConfig {

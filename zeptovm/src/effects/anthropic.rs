@@ -12,9 +12,9 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Anthropic Messages API client with streaming support.
 pub struct AnthropicClient {
-  pub client: Client,
-  pub api_key: String,
-  pub base_url: String,
+  client: Client,
+  api_key: String,
+  base_url: String,
 }
 
 impl AnthropicClient {
@@ -302,8 +302,11 @@ mod tests {
       "sk-ant-test".into(),
       "https://api.anthropic.com/v1".into(),
     );
-    assert_eq!(client.api_key, "sk-ant-test");
-    assert_eq!(client.base_url, "https://api.anthropic.com/v1");
+    // Fields are private; verify endpoint uses base_url
+    assert_eq!(
+      client.endpoint(),
+      "https://api.anthropic.com/v1/messages"
+    );
   }
 
   #[test]
