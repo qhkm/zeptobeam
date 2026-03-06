@@ -279,24 +279,71 @@ impl StepBehavior for SupervisorBehavior {
             StepResult::Continue
           }
           SupervisionStrategy::RestForOne => {
-            // Placeholder: behave like OneForOne
-            // until Task 6
-            let delay = self
-              .spec
-              .backoff
-              .delay_ms(child.restart_count - 1);
-            let deadline = self.clock_ms + delay;
-            let timer = TimerSpec::new(
-              ctx.pid,
-              TimerKind::RetryBackoff,
-              deadline,
-            )
-            .with_payload(serde_json::json!({
-              "action": "restart_child",
-              "child_id": child.id,
-              "child_pid": child_pid.raw(),
-            }));
-            ctx.schedule_timer(timer);
+            let failed_id = child.id.clone();
+
+            // Find the failed child's index in child_order
+            let failed_idx = self
+              .child_order
+              .iter()
+              .position(|id| id == &failed_id)
+              .unwrap_or(0);
+
+            // Collect children whose index is AFTER
+            // the failed child's index (the "rest")
+            let rest_ids: Vec<String> = self
+              .child_order[failed_idx + 1..]
+              .to_vec();
+
+            // Send Shutdown to the "rest" children
+            let mut pending = HashSet::new();
+            for rest_id in &rest_ids {
+              if let Some(&pid) =
+                self.id_to_pid.get(rest_id)
+              {
+                ctx.send(Envelope::signal(
+                  pid,
+                  Signal::Shutdown,
+                ));
+                pending.insert(pid);
+              }
+            }
+
+            // Remove the failed child
+            self.children.remove(&child_pid);
+            self.id_to_pid.remove(&failed_id);
+
+            // children_to_restart = failed + rest
+            let mut children_to_restart =
+              vec![failed_id];
+            children_to_restart.extend(rest_ids);
+
+            if pending.is_empty() {
+              // No children after the failed one —
+              // restart just the failed child
+              // immediately (like OneForOne)
+              for child_id in &children_to_restart {
+                let delay =
+                  self.spec.backoff.delay_ms(0);
+                let deadline =
+                  self.clock_ms + delay;
+                let timer = TimerSpec::new(
+                  ctx.pid,
+                  TimerKind::RetryBackoff,
+                  deadline,
+                )
+                .with_payload(serde_json::json!({
+                  "action": "restart_child",
+                  "child_id": child_id,
+                }));
+                ctx.schedule_timer(timer);
+              }
+            } else {
+              self.phase =
+                SupervisorPhase::ShuttingDown {
+                  pending_exits: pending,
+                  children_to_restart,
+                };
+            }
 
             StepResult::Continue
           }
@@ -683,5 +730,215 @@ mod tests {
       })
       .count();
     assert_eq!(timer_count, 1, "restart immediately");
+  }
+
+  #[test]
+  fn test_rest_for_one_only_affects_later_children() {
+    let mut sup =
+      SupervisorBehavior::new(SupervisorSpec {
+        max_restarts: 5,
+        restart_window_ms: 10000,
+        backoff: BackoffPolicy::Immediate,
+        strategy: SupervisionStrategy::RestForOne,
+      });
+    let sup_pid = Pid::from_raw(1);
+    let c1 = Pid::from_raw(10);
+    let c2 = Pid::from_raw(11);
+    let c3 = Pid::from_raw(12);
+    sup.register_child(
+      "w1".into(),
+      c1,
+      RestartStrategy::Permanent,
+    );
+    sup.register_child(
+      "w2".into(),
+      c2,
+      RestartStrategy::Permanent,
+    );
+    sup.register_child(
+      "w3".into(),
+      c3,
+      RestartStrategy::Permanent,
+    );
+    sup.init(None);
+
+    // c2 dies -> only c3 should get Shutdown signal
+    let mut ctx = TurnContext::new(sup_pid);
+    let msg = Envelope::signal(
+      sup_pid,
+      Signal::ChildExited {
+        child_pid: c2,
+        reason: Reason::Custom("crash".into()),
+      },
+    );
+    let result = sup.handle(msg, &mut ctx);
+    assert!(matches!(result, StepResult::Continue));
+
+    let intents = ctx.take_intents();
+    let shutdown_targets: Vec<Pid> = intents
+      .iter()
+      .filter_map(|i| match i {
+        TurnIntent::SendMessage(env) => {
+          if let EnvelopePayload::Signal(
+            Signal::Shutdown,
+          ) = &env.payload
+          {
+            Some(env.to)
+          } else {
+            None
+          }
+        }
+        _ => None,
+      })
+      .collect();
+
+    // Only c3 should get shutdown, NOT c1
+    assert_eq!(shutdown_targets.len(), 1);
+    assert_eq!(shutdown_targets[0], c3);
+    assert!(sup.is_shutting_down());
+  }
+
+  #[test]
+  fn test_rest_for_one_first_child_shuts_all() {
+    let mut sup =
+      SupervisorBehavior::new(SupervisorSpec {
+        max_restarts: 5,
+        restart_window_ms: 10000,
+        backoff: BackoffPolicy::Immediate,
+        strategy: SupervisionStrategy::RestForOne,
+      });
+    let sup_pid = Pid::from_raw(1);
+    let c1 = Pid::from_raw(10);
+    let c2 = Pid::from_raw(11);
+    let c3 = Pid::from_raw(12);
+    sup.register_child(
+      "w1".into(),
+      c1,
+      RestartStrategy::Permanent,
+    );
+    sup.register_child(
+      "w2".into(),
+      c2,
+      RestartStrategy::Permanent,
+    );
+    sup.register_child(
+      "w3".into(),
+      c3,
+      RestartStrategy::Permanent,
+    );
+    sup.init(None);
+
+    // c1 dies -> c2 AND c3 should get Shutdown
+    let mut ctx = TurnContext::new(sup_pid);
+    let msg = Envelope::signal(
+      sup_pid,
+      Signal::ChildExited {
+        child_pid: c1,
+        reason: Reason::Custom("crash".into()),
+      },
+    );
+    let result = sup.handle(msg, &mut ctx);
+    assert!(matches!(result, StepResult::Continue));
+
+    let intents = ctx.take_intents();
+    let shutdown_targets: Vec<Pid> = intents
+      .iter()
+      .filter_map(|i| match i {
+        TurnIntent::SendMessage(env) => {
+          if let EnvelopePayload::Signal(
+            Signal::Shutdown,
+          ) = &env.payload
+          {
+            Some(env.to)
+          } else {
+            None
+          }
+        }
+        _ => None,
+      })
+      .collect();
+
+    // c2 and c3 should both get shutdown signals
+    assert_eq!(shutdown_targets.len(), 2);
+    assert!(shutdown_targets.contains(&c2));
+    assert!(shutdown_targets.contains(&c3));
+    assert!(sup.is_shutting_down());
+  }
+
+  #[test]
+  fn test_rest_for_one_last_child_restarts_like_one_for_one()
+  {
+    let mut sup =
+      SupervisorBehavior::new(SupervisorSpec {
+        max_restarts: 5,
+        restart_window_ms: 10000,
+        backoff: BackoffPolicy::Immediate,
+        strategy: SupervisionStrategy::RestForOne,
+      });
+    let sup_pid = Pid::from_raw(1);
+    let c1 = Pid::from_raw(10);
+    let c2 = Pid::from_raw(11);
+    let c3 = Pid::from_raw(12);
+    sup.register_child(
+      "w1".into(),
+      c1,
+      RestartStrategy::Permanent,
+    );
+    sup.register_child(
+      "w2".into(),
+      c2,
+      RestartStrategy::Permanent,
+    );
+    sup.register_child(
+      "w3".into(),
+      c3,
+      RestartStrategy::Permanent,
+    );
+    sup.init(None);
+
+    // c3 dies (last child) -> NO shutdown signals
+    let mut ctx = TurnContext::new(sup_pid);
+    let msg = Envelope::signal(
+      sup_pid,
+      Signal::ChildExited {
+        child_pid: c3,
+        reason: Reason::Custom("crash".into()),
+      },
+    );
+    let result = sup.handle(msg, &mut ctx);
+    assert!(matches!(result, StepResult::Continue));
+
+    let intents = ctx.take_intents();
+    let shutdown_count = intents
+      .iter()
+      .filter(|i| {
+        if let TurnIntent::SendMessage(env) = i {
+          matches!(
+            &env.payload,
+            EnvelopePayload::Signal(
+              Signal::Shutdown
+            )
+          )
+        } else {
+          false
+        }
+      })
+      .count();
+
+    // No shutdown signals — no children after c3
+    assert_eq!(shutdown_count, 0);
+    // Should NOT enter ShuttingDown phase
+    assert!(!sup.is_shutting_down());
+    // Should schedule a restart timer
+    let timer_count = intents
+      .iter()
+      .filter(|i| {
+        matches!(i, TurnIntent::ScheduleTimer(_))
+      })
+      .count();
+    assert_eq!(
+      timer_count, 1,
+      "should restart just the last child"
+    );
   }
 }
