@@ -144,6 +144,10 @@ impl LoaderState {
             if arg.is_small() {
               let line_num = arg.get_small_unsigned();
               let offset = self.code.len();
+              debug_assert!(
+                self.line_table.last().map_or(true, |&(prev, _)| prev <= offset),
+                "line_table must be appended in non-decreasing offset order"
+              );
               self.line_table.push((offset, line_num));
             }
           }
