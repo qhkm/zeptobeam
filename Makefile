@@ -1,4 +1,4 @@
-.PHONY: build codegen ct submodule otp test test-rust test-beam test-all test-parity
+.PHONY: build codegen ct submodule otp test test-rust test-beam test-all test-parity ci-parity coverage-report
 
 build: codegen
 	cargo +nightly build
@@ -100,6 +100,16 @@ test-parity: build build_tests
 	echo ""; \
 	echo "Parity tests: $$passed passed, $$failed failed"; \
 	test $$failed -eq 0
+
+# CI: run all tests and parity checks, fail on any regression
+.PHONY: ci-parity
+ci-parity: test-rust test-beam test-parity
+	@echo "All parity checks passed."
+
+# Opcode and BIF coverage report
+.PHONY: coverage-report
+coverage-report:
+	@bash scripts/coverage_report.sh
 
 otp:
 	git submodule init && git submodule update && cd otp && MAKE_FLAGS=-j8 ./otp_build setup
