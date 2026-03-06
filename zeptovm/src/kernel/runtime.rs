@@ -147,6 +147,13 @@ impl SchedulerRuntime {
     debug!(stepped, "runtime tick complete");
     self.metrics.inc("scheduler.ticks");
 
+    // Take and re-deliver outbound messages
+    // (runtime owns delivery now)
+    let messages = self.engine.take_outbound_messages();
+    for msg in messages {
+      self.engine.send(msg);
+    }
+
     // 3. Process outbound effects
     let effects = self.engine.take_outbound_effects();
     for (pid, req) in effects {

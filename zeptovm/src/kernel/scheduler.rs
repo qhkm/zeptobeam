@@ -132,13 +132,6 @@ impl SchedulerEngine {
       self.step_process(pid);
     }
 
-    // Deliver outbound messages within the same engine
-    let messages: Vec<Envelope> =
-      self.outbound_messages.drain(..).collect();
-    for msg in messages {
-      self.send(msg);
-    }
-
     stepped
   }
 
@@ -367,6 +360,14 @@ impl SchedulerEngine {
     std::mem::take(&mut self.outbound_effects)
   }
 
+  /// Take outbound messages (for runtime-level delivery
+  /// and journaling).
+  pub fn take_outbound_messages(
+    &mut self,
+  ) -> Vec<Envelope> {
+    std::mem::take(&mut self.outbound_messages)
+  }
+
   /// Take completed processes (for supervisor notification).
   pub fn take_completed(&mut self) -> Vec<(Pid, Reason)> {
     std::mem::take(&mut self.completed)
@@ -414,6 +415,14 @@ impl SchedulerEngine {
       self.processes.remove(pid);
     }
     dead
+  }
+
+  /// Get a snapshot of a process's behavior state.
+  pub fn snapshot_for(
+    &self,
+    pid: Pid,
+  ) -> Option<Vec<u8>> {
+    self.processes.get(&pid).and_then(|p| p.snapshot())
   }
 
   /// Advance the logical clock and deliver fired timers.
@@ -862,5 +871,51 @@ mod tests {
     // Parent should have ChildExited in mailbox
     engine.tick();
     assert!(engine.has_process(parent));
+  }
+
+  #[test]
+  fn test_scheduler_take_outbound_messages() {
+    let mut engine = SchedulerEngine::new();
+    let receiver = engine.spawn(Box::new(Echo));
+    let sender =
+      engine.spawn(Box::new(Forwarder { target: receiver }));
+    engine.send(Envelope::text(sender, "trigger"));
+    engine.tick();
+    let messages = engine.take_outbound_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].to, receiver);
+  }
+
+  #[test]
+  fn test_scheduler_snapshot_for() {
+    struct Snapshotted;
+    impl StepBehavior for Snapshotted {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _: Envelope,
+        _: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _: &Reason) {}
+      fn snapshot(&self) -> Option<Vec<u8>> {
+        Some(b"my-state".to_vec())
+      }
+    }
+
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Snapshotted));
+    let snap = engine.snapshot_for(pid);
+    assert_eq!(snap, Some(b"my-state".to_vec()));
+
+    // Non-existent pid returns None
+    let missing = Pid::from_raw(99999);
+    assert_eq!(engine.snapshot_for(missing), None);
   }
 }
