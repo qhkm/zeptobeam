@@ -591,15 +591,16 @@ async fn run_daemon_v2(
   config_path: String,
   log_level: Option<String>,
   _workers: Option<usize>,
-  _bind: Option<String>,
+  bind: Option<String>,
 ) {
   use std::sync::Arc;
   use zeptobeam::llm_bridge::LlmBridge;
+  use zeptobeam::runtime_ops::ZeptovmRuntimeOps;
   use zeptovm::durability::SqliteCheckpointStore as ZeptoCheckpointStore;
   use zeptovm::process::spawn_process;
 
   // Load config (same pattern as legacy daemon)
-  let config = match load_config(&config_path) {
+  let mut config = match load_config(&config_path) {
     Ok(c) => {
       eprintln!("Loaded config from {}", config_path);
       c
@@ -609,6 +610,11 @@ async fn run_daemon_v2(
       AppConfig::default()
     }
   };
+
+  // Apply CLI overrides
+  if let Some(ref bind) = bind {
+    config.server.bind = bind.clone();
+  }
 
   // Init tracing
   init_tracing(&config, log_level.as_deref());
@@ -647,6 +653,7 @@ async fn run_daemon_v2(
   );
 
   // Spawn a zeptovm process for each resolved agent
+  let runtime_ops = Arc::new(ZeptovmRuntimeOps::new());
   let mut handles: Vec<(String, zeptovm::mailbox::ProcessHandle)> = Vec::new();
   let mut joins: Vec<(String, tokio::task::JoinHandle<zeptovm::process::ProcessExit>)> =
     Vec::new();
@@ -660,14 +667,64 @@ async fn run_daemon_v2(
     let (pid, handle, join) =
       spawn_process(adapter, 64, None, Some(checkpoint_store.clone()));
     info!(agent = %name, pid = %pid, "spawned agent process");
+    runtime_ops.register(name.clone(), pid, handle.clone());
     handles.push((name.clone(), handle));
     joins.push((name, join));
   }
 
   info!(
     process_count = handles.len(),
-    "all agents spawned, waiting for shutdown signal"
+    "all agents spawned"
   );
+
+  // Start HTTP/MCP server
+  let metrics = Arc::new(RuntimeMetrics::new());
+  let process_count = Arc::new(AtomicUsize::new(handles.len()));
+  let http_enabled = config.server.enabled || config.mcp.server.enabled;
+  let server = if http_enabled {
+    let state = ServerState {
+      metrics: metrics.clone(),
+      process_count: process_count.clone(),
+      approval_registry: None,
+    };
+
+    let mcp_auth_token = if config.mcp.server.enabled {
+      config.mcp.server.auth_token_env.as_ref().and_then(
+        |env_name| match std::env::var(env_name) {
+          Ok(value) if !value.trim().is_empty() => Some(value),
+          Ok(_) | Err(_) => None,
+        },
+      )
+    } else {
+      None
+    };
+
+    let mcp_state = McpServerStateExt::with_timeout(
+      state,
+      mcp_auth_token,
+      config.mcp.server.enabled,
+      config.mcp.server.session_timeout_secs,
+    );
+    let mcp_state = mcp_state
+      .with_runtime_ops(runtime_ops.clone() as Arc<dyn McpRuntimeOps>);
+
+    match HealthServer::start_with_mcp(&config.server.bind, mcp_state)
+      .await
+    {
+      Ok(s) => {
+        info!(bind = %config.server.bind, "health + MCP server started (v2)");
+        Some(s)
+      }
+      Err(e) => {
+        warn!("Failed to start health server: {}", e);
+        None
+      }
+    }
+  } else {
+    None
+  };
+
+  info!("waiting for shutdown signal");
 
   // Wait for shutdown signal (SIGINT / SIGTERM)
   let shutdown = async {
@@ -691,6 +748,12 @@ async fn run_daemon_v2(
   shutdown.await;
 
   info!("shutting down gracefully...");
+
+  // Shutdown HTTP server first
+  if let Some(s) = server {
+    s.shutdown().await;
+    info!("health server stopped");
+  }
 
   // Kill all processes
   for (name, handle) in &handles {
