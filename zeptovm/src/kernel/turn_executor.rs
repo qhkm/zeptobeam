@@ -102,7 +102,7 @@ impl TurnExecutor {
     entries.extend(turn.journal_entries.clone());
 
     // Persist journal entries atomically
-    self
+    let batch_ids = self
       .journal
       .append_batch(&entries)
       .map_err(|e| format!("journal commit failed: {e}"))?;
@@ -125,6 +125,20 @@ impl TurnExecutor {
           .snapshot_store
           .save(&snapshot)
           .map_err(|e| format!("snapshot save failed: {e}"))?;
+
+        // Compact journal: entries before this batch are
+        // redundant now that the snapshot captures the state.
+        if let Some(&first_id) = batch_ids.first() {
+          if let Err(e) =
+            self.journal.truncate_before(turn.pid, first_id)
+          {
+            tracing::warn!(
+              pid = turn.pid.raw(),
+              error = %e,
+              "journal compaction failed (non-fatal)"
+            );
+          }
+        }
       }
     }
 
@@ -364,5 +378,123 @@ mod tests {
     let entries =
       executor.journal().replay(pid, 0).unwrap();
     assert_eq!(entries.len(), 5);
+  }
+
+  #[test]
+  fn test_journal_compaction_after_snapshot() {
+    let mut executor =
+      make_executor().with_snapshot_interval(3);
+    let pid = Pid::from_raw(1);
+
+    // Commit 6 turns with state (snapshots at turns 3 and 6)
+    for i in 1..=6 {
+      let turn = TurnCommit {
+        pid,
+        turn_id: i,
+        journal_entries: vec![],
+        outbound_messages: vec![],
+        effect_requests: vec![],
+        state_snapshot: Some(
+          format!("state-v{i}").into_bytes(),
+        ),
+      };
+      executor.commit(&turn).unwrap();
+    }
+
+    // After 6 turns with compaction, journal should be
+    // shorter than 6 TurnStarted entries (some were
+    // truncated at snapshot boundaries).
+    let entries =
+      executor.journal().replay(pid, 0).unwrap();
+    assert!(
+      entries.len() < 6,
+      "journal should have been compacted, got {} entries",
+      entries.len()
+    );
+
+    // But we should still have a valid latest snapshot
+    let snap = executor
+      .snapshot_store()
+      .load_latest(pid)
+      .unwrap();
+    assert!(snap.is_some());
+    assert_eq!(snap.unwrap().state_blob, b"state-v6");
+  }
+
+  #[test]
+  fn test_journal_compaction_preserves_current_batch() {
+    let mut executor =
+      make_executor().with_snapshot_interval(2);
+    let pid = Pid::from_raw(1);
+
+    // Commit 2 turns — snapshot + compaction at turn 2
+    for i in 1..=2 {
+      let turn = TurnCommit {
+        pid,
+        turn_id: i,
+        journal_entries: vec![],
+        outbound_messages: vec![],
+        effect_requests: vec![],
+        state_snapshot: Some(
+          format!("state-v{i}").into_bytes(),
+        ),
+      };
+      executor.commit(&turn).unwrap();
+    }
+
+    // After compaction at turn 2, the entry from turn 1
+    // should be gone, but the entry from turn 2 should
+    // remain (it was written in the same batch as the
+    // snapshot).
+    let entries =
+      executor.journal().replay(pid, 0).unwrap();
+    assert_eq!(
+      entries.len(),
+      1,
+      "only the current batch entry should remain"
+    );
+  }
+
+  #[test]
+  fn test_journal_compaction_isolates_pids() {
+    let mut executor =
+      make_executor().with_snapshot_interval(2);
+    let pid1 = Pid::from_raw(1);
+    let pid2 = Pid::from_raw(2);
+
+    // Commit 3 turns for pid1 (snapshot at turn 2)
+    for i in 1..=3 {
+      let turn = TurnCommit {
+        pid: pid1,
+        turn_id: i,
+        journal_entries: vec![],
+        outbound_messages: vec![],
+        effect_requests: vec![],
+        state_snapshot: Some(
+          format!("state-v{i}").into_bytes(),
+        ),
+      };
+      executor.commit(&turn).unwrap();
+    }
+
+    // Commit 1 turn for pid2 (no snapshot yet)
+    let turn = TurnCommit {
+      pid: pid2,
+      turn_id: 1,
+      journal_entries: vec![],
+      outbound_messages: vec![],
+      effect_requests: vec![],
+      state_snapshot: Some(b"pid2-state".to_vec()),
+    };
+    executor.commit(&turn).unwrap();
+
+    // pid2's journal should be untouched (1 entry)
+    let entries2 =
+      executor.journal().replay(pid2, 0).unwrap();
+    assert_eq!(
+      entries2.len(),
+      1,
+      "pid2 journal should be untouched"
+    );
   }
 }
