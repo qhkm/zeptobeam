@@ -1182,4 +1182,42 @@ mod tests {
       "each process should have its turn committed"
     );
   }
+
+  #[test]
+  fn test_runtime_debit_budget_intent() {
+    struct BudgetDebiter;
+    impl StepBehavior for BudgetDebiter {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _: Envelope,
+        ctx: &mut TurnContext,
+      ) -> StepResult {
+        ctx.debit_budget(1000, 500_000); // 1000 tokens, $0.50
+        StepResult::Done(Reason::Normal)
+      }
+      fn terminate(&mut self, _: &Reason) {}
+    }
+
+    let budget = BudgetState {
+      usd_remaining: 10.0,
+      token_remaining: 100_000,
+    };
+    let mut rt =
+      SchedulerRuntime::new().with_budget(budget);
+    let pid = rt.spawn(Box::new(BudgetDebiter));
+    rt.send(Envelope::text(pid, "debit"));
+    rt.tick();
+
+    assert_eq!(rt.budget().token_remaining, 99_000);
+    // 10.0 - 0.50 = 9.50
+    assert!(
+      (rt.budget().usd_remaining - 9.5).abs() < 0.01
+    );
+  }
 }
