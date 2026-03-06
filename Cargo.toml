@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
 
-members = ["lib-erlangrt", "erlexec", "ct_run", "zeptobeam"]
+members = ["lib-erlangrt", "erlexec", "ct_run", "zeptobeam", "zeptovm"]
