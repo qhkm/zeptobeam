@@ -471,6 +471,25 @@ impl SchedulerEngine {
   pub fn clock_ms(&self) -> u64 {
     self.clock_ms
   }
+
+  /// Insert a pre-built process entry (for recovery).
+  pub fn insert_process(
+    &mut self,
+    mut entry: ProcessEntry,
+  ) {
+    let pid = entry.pid;
+    entry.state = ProcessRuntimeState::Ready;
+    self.processes.insert(pid, entry);
+    self.ready_queue.push(pid);
+  }
+
+  /// Schedule a timer directly (for recovery).
+  pub fn schedule_timer(
+    &mut self,
+    spec: crate::core::timer::TimerSpec,
+  ) {
+    self.timer_wheel.schedule(spec);
+  }
 }
 
 #[cfg(test)]
