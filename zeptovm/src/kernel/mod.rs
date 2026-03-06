@@ -1,4 +1,5 @@
 pub mod mailbox;
+pub mod metrics;
 pub mod process_table;
 pub mod reactor;
 pub mod recovery;
