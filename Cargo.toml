@@ -1,4 +1,7 @@
 [workspace]
 resolver = "2"
 
-members = ["lib-erlangrt", "erlexec", "ct_run", "zeptobeam", "zeptovm"]
+members = ["zeptovm"]
+# Other workspace members excluded — they depend on external paths
+# not available in this worktree. Only zeptovm is needed for Phase 1.
+# members = ["lib-erlangrt", "erlexec", "ct_run", "zeptobeam", "zeptovm"]
