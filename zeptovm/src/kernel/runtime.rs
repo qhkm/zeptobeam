@@ -130,11 +130,12 @@ impl SchedulerRuntime {
 
   /// Run one tick of the runtime:
   /// 1. Drain reactor completions -> deliver to scheduler
-  /// 2. Tick the scheduler engine
-  /// 3. Take outbound effects and messages
-  /// 4. Journal before dispatch (if turn_executor present)
-  /// 5. Deliver messages (after journaling)
-  /// 6. Process outbound effects (budget gate -> reactor)
+  /// 2. Advance logical clock (fires timers)
+  /// 3. Tick the scheduler engine
+  /// 4. Take outbound effects and messages
+  /// 5. Journal before dispatch (if turn_executor present)
+  /// 6. Deliver messages (after journaling)
+  /// 7. Process outbound effects (budget gate -> reactor)
   pub fn tick(&mut self) -> usize {
     // 1. Drain reactor completions
     if let Some(ref reactor) = self.reactor {
@@ -145,16 +146,23 @@ impl SchedulerRuntime {
       }
     }
 
-    // 2. Tick scheduler
+    // 2. Advance logical clock (fires timers)
+    let now_ms = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap_or_default()
+      .as_millis() as u64;
+    self.engine.advance_clock(now_ms);
+
+    // 3. Tick scheduler
     let stepped = self.engine.tick();
     debug!(stepped, "runtime tick complete");
     self.metrics.inc("scheduler.ticks");
 
-    // 3. Take outbound effects and messages
+    // 4. Take outbound effects and messages
     let effects = self.engine.take_outbound_effects();
     let messages = self.engine.take_outbound_messages();
 
-    // 4. Journal before dispatch (if turn_executor present)
+    // 5. Journal before dispatch (if turn_executor present)
     if let Some(ref mut executor) = self.turn_executor {
       // Group effects by pid
       let mut effects_by_pid: HashMap<
@@ -215,12 +223,12 @@ impl SchedulerRuntime {
       }
     }
 
-    // 5. Deliver messages (after journaling)
+    // 6. Deliver messages (after journaling)
     for msg in messages {
       self.engine.send(msg);
     }
 
-    // 6. Process outbound effects (budget gate -> reactor)
+    // 7. Process outbound effects (budget gate -> reactor)
     for (pid, req) in effects {
       if self.budget_enabled
         && self.should_block_effect(&req)
@@ -642,5 +650,64 @@ mod tests {
       rt.metrics().counter("effects.dispatched") > 0,
       "effect should have been dispatched"
     );
+  }
+
+  #[test]
+  fn test_runtime_advances_clock() {
+    use crate::core::message::Signal;
+    use crate::core::timer::{TimerKind, TimerSpec};
+
+    struct TimerBehavior;
+    impl StepBehavior for TimerBehavior {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        msg: Envelope,
+        ctx: &mut TurnContext,
+      ) -> StepResult {
+        match &msg.payload {
+          EnvelopePayload::Signal(
+            Signal::TimerFired(_),
+          ) => StepResult::Done(Reason::Normal),
+          _ => {
+            let spec = TimerSpec::new(
+              ctx.pid,
+              TimerKind::Timeout,
+              1, // 1ms — fires on next tick
+            );
+            ctx.schedule_timer(spec);
+            StepResult::Continue
+          }
+        }
+      }
+      fn terminate(&mut self, _: &Reason) {}
+    }
+
+    let mut rt = SchedulerRuntime::new();
+    let pid = rt.spawn(Box::new(TimerBehavior));
+    rt.send(Envelope::text(pid, "schedule"));
+    rt.tick(); // Schedules 1ms timer
+
+    // Wait for clock to advance past deadline
+    std::thread::sleep(
+      std::time::Duration::from_millis(10),
+    );
+    rt.tick(); // Clock advances, timer fires, process exits
+
+    let completed = rt.take_completed();
+    assert_eq!(
+      completed.len(),
+      1,
+      "timer should have fired"
+    );
+    assert!(matches!(
+      completed[0].1,
+      Reason::Normal
+    ));
   }
 }
