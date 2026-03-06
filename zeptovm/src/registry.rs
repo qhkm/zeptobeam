@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
@@ -13,14 +13,14 @@ use crate::{
 
 pub struct ProcessRegistry {
   handles: DashMap<Pid, ProcessHandle>,
-  links: Mutex<LinkTable>,
+  links: RwLock<LinkTable>,
 }
 
 impl ProcessRegistry {
   pub fn new() -> Self {
     Self {
       handles: DashMap::new(),
-      links: Mutex::new(LinkTable::new()),
+      links: RwLock::new(LinkTable::new()),
     }
   }
 
@@ -68,42 +68,52 @@ impl ProcessRegistry {
 
   /// Create a bidirectional link between two processes.
   pub fn link(&self, a: Pid, b: Pid) {
-    self.links.lock().unwrap().link(a, b);
+    self.links.write().unwrap().link(a, b);
   }
 
   /// Remove a bidirectional link between two processes.
   pub fn unlink(&self, a: Pid, b: Pid) {
-    self.links.lock().unwrap().unlink(a, b);
+    self.links.write().unwrap().unlink(a, b);
   }
 
   /// Create a unidirectional monitor: watcher monitors target.
   pub fn monitor(&self, watcher: Pid, target: Pid) -> MonitorRef {
-    self.links.lock().unwrap().monitor(watcher, target)
+    self.links.write().unwrap().monitor(watcher, target)
   }
 
   /// Remove a monitor.
   pub fn demonitor(&self, mref: MonitorRef) {
-    self.links.lock().unwrap().demonitor(mref);
+    self.links.write().unwrap().demonitor(mref);
   }
 
   /// Propagate exit signals to linked and monitoring processes.
+  /// Per Erlang semantics, `Kill` is converted to `Killed` to prevent
+  /// infinite kill propagation through link chains.
   pub fn notify_exit(&self, pid: &Pid, reason: &Reason) {
     let (linked, monitors) = {
-      let mut lt = self.links.lock().unwrap();
+      let mut lt = self.links.write().unwrap();
       let linked = lt.remove_all(pid);
       let monitors = lt.remove_monitors_of(pid);
       (linked, monitors)
     };
 
+    // Convert Kill → Killed for propagation (Erlang semantics)
+    let propagated_reason = match reason {
+      Reason::Kill => Reason::Custom("killed".into()),
+      other => other.clone(),
+    };
+
     for linked_pid in linked {
       if let Some(handle) = self.handles.get(&linked_pid) {
-        let _ = handle.try_send_control(SystemMsg::ExitLinked(*pid, reason.clone()));
+        let _ =
+          handle.try_send_control(SystemMsg::ExitLinked(*pid, propagated_reason.clone()));
       }
     }
 
     for (_mref, watcher_pid) in monitors {
       if let Some(handle) = self.handles.get(&watcher_pid) {
-        let _ = handle.try_send_control(SystemMsg::MonitorDown(*pid, reason.clone()));
+        let _ =
+          handle.try_send_control(SystemMsg::MonitorDown(*pid, propagated_reason.clone()));
       }
     }
   }
