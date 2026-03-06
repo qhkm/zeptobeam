@@ -1,9 +1,21 @@
 use crate::{
   beam::disp_result::DispatchResult,
   defs::exc_type::ExceptionType,
-  emulator::{gen_atoms, heap::THeapOwner, process::Process, runtime_ctx::*},
+  emulator::{
+    gen_atoms,
+    heap::THeapOwner,
+    process::Process,
+    runtime_ctx::*,
+    vm::VM,
+  },
   fail::{self, RtErr, RtResult},
-  term::{term_builder::tuple_builder::tuple2, Term},
+  term::{
+    term_builder::{
+      list_builder::ListBuilder,
+      tuple_builder::{tuple2, tuple4},
+    },
+    Term,
+  },
 };
 
 // Set up a try-catch stack frame for possible stack unwinding. Label points
@@ -188,19 +200,41 @@ impl OpcodeRawRaise {
 
 // Builds a stacktrace term from the raw stacktrace in x(0).
 // Replaces x(0) with an Erlang stacktrace list.
-// For now, returns an empty list as a stub (real stacktrace needs line info).
 // Structure: build_stacktrace()
-define_opcode!(_vm, ctx, _curr_p,
+define_opcode!(vm, ctx, curr_p,
   name: OpcodeBuildStacktrace, arity: 0,
-  run: { Self::build_stacktrace(ctx) },
+  run: { Self::build_stacktrace(vm, ctx, curr_p) },
   args:
 );
 
 impl OpcodeBuildStacktrace {
   #[inline]
-  pub fn build_stacktrace(ctx: &mut RuntimeContext) -> RtResult<DispatchResult> {
-    // Stub: replace x(0) with an empty stacktrace list
-    ctx.set_x(0, Term::nil());
+  pub fn build_stacktrace(
+    vm: &mut VM,
+    ctx: &mut RuntimeContext,
+    curr_p: &mut Process,
+  ) -> RtResult<DispatchResult> {
+    // Build a simple stacktrace from the current CP.
+    // Erlang stacktrace format: [{M, F, A, Info} | ...]
+    // where Info is a proplist like [{file, File}, {line, Line}]
+    let mut trace = Term::nil();
+
+    if !ctx.cp.is_null() {
+      if let Some(mfa) = vm.code_server.code_reverse_lookup(ctx.cp) {
+        let hp = curr_p.get_heap_mut();
+        let arity_term = Term::make_small_unsigned(mfa.arity);
+        let info = Term::nil(); // empty info list for now
+        let entry = tuple4(hp, mfa.m, mfa.f, arity_term, info)?;
+        // Build list: [entry]
+        unsafe {
+          let mut lb = ListBuilder::new()?;
+          lb.append(entry, hp)?;
+          trace = lb.make_term();
+        }
+      }
+    }
+
+    ctx.set_x(0, trace);
     Ok(DispatchResult::Normal)
   }
 }
