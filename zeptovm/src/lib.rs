@@ -5,5 +5,6 @@ pub mod mailbox;
 pub mod pid;
 pub mod process;
 pub mod registry;
+pub mod supervisor;
 
 pub use behavior::Behavior;
