@@ -15,7 +15,6 @@ pub fn next_turn_id() -> TurnId {
 /// An intent emitted by a behavior handler during a turn.
 /// Collected by TurnContext, committed atomically by the turn
 /// executor.
-#[derive(Debug)]
 pub enum TurnIntent {
   SendMessage(Envelope),
   RequestEffect(EffectRequest),
@@ -27,7 +26,55 @@ pub enum TurnIntent {
   Unlink(Pid),
   Monitor(Pid),
   Demonitor(crate::link::MonitorRef),
-  // Phase 2: SpawnProcess, DebitBudget
+  SpawnProcess(
+    Box<dyn crate::core::behavior::StepBehavior>,
+  ),
+  // Phase 2: DebitBudget
+}
+
+impl std::fmt::Debug for TurnIntent {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    match self {
+      TurnIntent::SendMessage(env) => {
+        f.debug_tuple("SendMessage").field(env).finish()
+      }
+      TurnIntent::RequestEffect(req) => {
+        f.debug_tuple("RequestEffect")
+          .field(req)
+          .finish()
+      }
+      TurnIntent::PatchState(data) => {
+        f.debug_tuple("PatchState").field(data).finish()
+      }
+      TurnIntent::ScheduleTimer(spec) => {
+        f.debug_tuple("ScheduleTimer")
+          .field(spec)
+          .finish()
+      }
+      TurnIntent::CancelTimer(id) => {
+        f.debug_tuple("CancelTimer").field(id).finish()
+      }
+      TurnIntent::Rollback => write!(f, "Rollback"),
+      TurnIntent::Link(pid) => {
+        f.debug_tuple("Link").field(pid).finish()
+      }
+      TurnIntent::Unlink(pid) => {
+        f.debug_tuple("Unlink").field(pid).finish()
+      }
+      TurnIntent::Monitor(pid) => {
+        f.debug_tuple("Monitor").field(pid).finish()
+      }
+      TurnIntent::Demonitor(mref) => {
+        f.debug_tuple("Demonitor").field(mref).finish()
+      }
+      TurnIntent::SpawnProcess(_) => {
+        write!(f, "SpawnProcess(...)")
+      }
+    }
+  }
 }
 
 /// Context passed to behavior.handle(). Handlers emit intents
@@ -48,7 +95,8 @@ impl TurnContext {
   }
 
   /// Emit a message to another process.
-  pub fn send(&mut self, msg: Envelope) {
+  pub fn send(&mut self, mut msg: Envelope) {
+    msg.from = Some(self.pid);
     self.intents.push(TurnIntent::SendMessage(msg));
   }
 
@@ -109,6 +157,16 @@ impl TurnContext {
     self.intents.push(TurnIntent::Demonitor(mref));
   }
 
+  /// Spawn a new child process with the given behavior.
+  pub fn spawn(
+    &mut self,
+    behavior: Box<
+      dyn crate::core::behavior::StepBehavior,
+    >,
+  ) {
+    self.intents.push(TurnIntent::SpawnProcess(behavior));
+  }
+
   /// Take all collected intents (consumed by turn executor).
   pub fn take_intents(&mut self) -> Vec<TurnIntent> {
     std::mem::take(&mut self.intents)
@@ -153,6 +211,20 @@ mod tests {
     let intents = ctx.take_intents();
     assert_eq!(intents.len(), 2);
     assert_eq!(ctx.intent_count(), 0);
+  }
+
+  #[test]
+  fn test_turn_context_send_sets_from() {
+    let pid = Pid::from_raw(10);
+    let mut ctx = TurnContext::new(pid);
+    ctx.send_text(Pid::from_raw(20), "hello");
+    let intents = ctx.take_intents();
+    assert_eq!(intents.len(), 1);
+    if let TurnIntent::SendMessage(ref env) = intents[0] {
+      assert_eq!(env.from, Some(pid));
+    } else {
+      panic!("expected SendMessage intent");
+    }
   }
 
   #[test]
