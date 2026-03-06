@@ -245,6 +245,7 @@ impl SchedulerRuntime {
             self.metrics.inc("effects.timed_out");
           }
           EffectStatus::Cancelled => {}
+          EffectStatus::Streaming => {}
         }
 
         self.engine

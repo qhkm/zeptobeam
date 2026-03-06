@@ -164,6 +164,7 @@ pub enum EffectStatus {
     Failed,
     TimedOut,
     Cancelled,
+    Streaming,
 }
 
 /// Result returned by the effect worker plane.
@@ -191,6 +192,15 @@ impl EffectResult {
             status: EffectStatus::Failed,
             output: None,
             error: Some(error.into()),
+        }
+    }
+
+    pub fn streaming(effect_id: EffectId, delta: serde_json::Value) -> Self {
+        Self {
+            effect_id,
+            status: EffectStatus::Streaming,
+            output: Some(delta),
+            error: None,
         }
     }
 }
@@ -292,6 +302,14 @@ mod tests {
         let p = RetryPolicy::default();
         assert_eq!(p.max_attempts, 3);
         assert!(p.retry_on.is_empty());
+    }
+
+    #[test]
+    fn test_effect_result_streaming() {
+        let id = EffectId::new();
+        let result = EffectResult::streaming(id, serde_json::json!({"delta": "hello"}));
+        assert_eq!(result.status, EffectStatus::Streaming);
+        assert!(result.output.is_some());
     }
 
     #[test]
