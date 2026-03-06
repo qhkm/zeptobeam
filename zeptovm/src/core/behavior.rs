@@ -29,6 +29,11 @@ pub trait StepBehavior: Send + 'static {
   fn snapshot(&self) -> Option<Vec<u8>> {
     None
   }
+
+  /// Opt-in: restore state from a snapshot blob.
+  fn restore(&mut self, _state: &[u8]) -> Result<(), String> {
+    Ok(())
+  }
 }
 
 #[cfg(test)]
