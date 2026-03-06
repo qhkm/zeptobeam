@@ -35,6 +35,8 @@ pub struct SchedulerEngine {
   pending_effects: HashMap<u64, PendingEffect>,
   outbound_effects: Vec<(Pid, EffectRequest)>,
   outbound_messages: Vec<Envelope>,
+  state_patches: Vec<(Pid, Vec<u8>)>,
+  rollback_pids: Vec<Pid>,
   max_reductions: u32,
   completed: Vec<(Pid, Reason)>,
   timer_wheel: TimerWheel,
@@ -51,6 +53,8 @@ impl SchedulerEngine {
       pending_effects: HashMap::new(),
       outbound_effects: Vec::new(),
       outbound_messages: Vec::new(),
+      state_patches: Vec::new(),
+      rollback_pids: Vec::new(),
       max_reductions: 200,
       completed: Vec::new(),
       timer_wheel: TimerWheel::new(),
@@ -186,8 +190,8 @@ impl SchedulerEngine {
           TurnIntent::RequestEffect(req) => {
             self.outbound_effects.push((pid, req));
           }
-          TurnIntent::PatchState(_data) => {
-            // Phase 2: persist state patch
+          TurnIntent::PatchState(data) => {
+            self.state_patches.push((pid, data));
           }
           TurnIntent::ScheduleTimer(spec) => {
             self.timer_wheel.schedule(spec);
@@ -196,7 +200,7 @@ impl SchedulerEngine {
             self.timer_wheel.cancel(id);
           }
           TurnIntent::Rollback => {
-            // Phase 2: wire into CompensationLog
+            self.rollback_pids.push(pid);
           }
           TurnIntent::Link(target) => {
             self.link_table.link(pid, target);
@@ -371,6 +375,20 @@ impl SchedulerEngine {
   /// Take completed processes (for supervisor notification).
   pub fn take_completed(&mut self) -> Vec<(Pid, Reason)> {
     std::mem::take(&mut self.completed)
+  }
+
+  /// Take state patches emitted during this tick.
+  pub fn take_state_patches(
+    &mut self,
+  ) -> Vec<(Pid, Vec<u8>)> {
+    std::mem::take(&mut self.state_patches)
+  }
+
+  /// Take rollback requests from this tick.
+  pub fn take_rollback_requests(
+    &mut self,
+  ) -> Vec<Pid> {
+    std::mem::take(&mut self.rollback_pids)
   }
 
   /// Kill a process.
@@ -917,5 +935,36 @@ mod tests {
     // Non-existent pid returns None
     let missing = Pid::from_raw(99999);
     assert_eq!(engine.snapshot_for(missing), None);
+  }
+
+  #[test]
+  fn test_scheduler_patch_state_captured() {
+    struct StatePatcher;
+    impl StepBehavior for StatePatcher {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _: Envelope,
+        ctx: &mut TurnContext,
+      ) -> StepResult {
+        ctx.set_state(b"new-state".to_vec());
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _: &Reason) {}
+    }
+
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(StatePatcher));
+    engine.send(Envelope::text(pid, "patch"));
+    engine.tick();
+    let patches = engine.take_state_patches();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].0, pid);
+    assert_eq!(patches[0].1, b"new-state");
   }
 }

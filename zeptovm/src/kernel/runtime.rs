@@ -5,12 +5,16 @@ use tracing::{debug, warn};
 use crate::{
   core::{
     behavior::StepBehavior,
-    effect::{EffectKind, EffectRequest, EffectResult},
+    effect::{
+      CompensationSpec, EffectKind, EffectRequest,
+      EffectResult,
+    },
     message::Envelope,
   },
   durability::{journal::Journal, snapshot::SnapshotStore},
   error::Reason,
   kernel::{
+    compensation::{CompensationEntry, CompensationLog},
     metrics::Metrics,
     process_table::ProcessRuntimeState,
     reactor::Reactor,
@@ -50,6 +54,9 @@ pub struct SchedulerRuntime {
   engine: SchedulerEngine,
   reactor: Option<Reactor>,
   turn_executor: Option<TurnExecutor>,
+  compensation_log: CompensationLog,
+  pending_compensations:
+    HashMap<u64, (Pid, CompensationSpec)>,
   budget: BudgetState,
   budget_violations: Vec<BudgetViolation>,
   budget_enabled: bool,
@@ -63,6 +70,8 @@ impl SchedulerRuntime {
       engine: SchedulerEngine::new(),
       reactor: None,
       turn_executor: None,
+      compensation_log: CompensationLog::new(),
+      pending_compensations: HashMap::new(),
       budget: BudgetState::default(),
       budget_violations: Vec::new(),
       budget_enabled: false,
@@ -83,6 +92,8 @@ impl SchedulerRuntime {
       engine: SchedulerEngine::new(),
       reactor: Some(reactor),
       turn_executor: Some(turn_executor),
+      compensation_log: CompensationLog::new(),
+      pending_compensations: HashMap::new(),
       budget: BudgetState::default(),
       budget_violations: Vec::new(),
       budget_enabled: false,
@@ -139,8 +150,33 @@ impl SchedulerRuntime {
   pub fn tick(&mut self) -> usize {
     // 1. Drain reactor completions
     if let Some(ref reactor) = self.reactor {
+      use crate::core::effect::EffectStatus;
+
       let completions = reactor.drain_completions();
       for completion in completions {
+        // Record compensation if effect succeeded
+        if completion.result.status
+          == EffectStatus::Succeeded
+        {
+          if let Some((pid, spec)) = self
+            .pending_compensations
+            .remove(&completion.result.effect_id.raw())
+          {
+            self.compensation_log.record(
+              pid,
+              CompensationEntry {
+                effect_id: completion.result.effect_id,
+                spec,
+                completed_at_ms: std::time::SystemTime::now()
+                  .duration_since(
+                    std::time::UNIX_EPOCH,
+                  )
+                  .unwrap_or_default()
+                  .as_millis() as u64,
+              },
+            );
+          }
+        }
         self.engine
           .deliver_effect_result(completion.result);
       }
@@ -158,9 +194,10 @@ impl SchedulerRuntime {
     debug!(stepped, "runtime tick complete");
     self.metrics.inc("scheduler.ticks");
 
-    // 4. Take outbound effects and messages
+    // 4. Take outbound effects, messages, and patches
     let effects = self.engine.take_outbound_effects();
     let messages = self.engine.take_outbound_messages();
+    let patches = self.engine.take_state_patches();
 
     // 5. Journal before dispatch (if turn_executor present)
     if let Some(ref mut executor) = self.turn_executor {
@@ -189,18 +226,40 @@ impl SchedulerRuntime {
           .push(msg.clone());
       }
 
+      // Group patches by pid
+      let mut patches_by_pid: HashMap<Pid, Vec<u8>> =
+        HashMap::new();
+      for (pid, data) in patches {
+        patches_by_pid.insert(pid, data);
+      }
+
       // All pids that produced output
       let mut pids: HashSet<Pid> = HashSet::new();
       pids.extend(effects_by_pid.keys());
       pids.extend(messages_by_sender.keys());
+      pids.extend(patches_by_pid.keys().copied());
 
       // Build and commit TurnCommit per pid
       for pid in pids {
+        let mut journal_entries = Vec::new();
+        if let Some(state_data) =
+          patches_by_pid.remove(&pid)
+        {
+          use crate::durability::journal::{
+            JournalEntry, JournalEntryType,
+          };
+          journal_entries.push(JournalEntry::new(
+            pid,
+            JournalEntryType::StatePatched,
+            Some(state_data),
+          ));
+        }
+
         let turn = TurnCommit {
           pid,
           turn_id:
             crate::core::turn_context::next_turn_id(),
-          journal_entries: vec![],
+          journal_entries,
           outbound_messages: messages_by_sender
             .remove(&pid)
             .unwrap_or_default(),
@@ -251,7 +310,28 @@ impl SchedulerRuntime {
         );
         self.engine.deliver_effect_result(result);
       } else {
+        // Track compensatable effects
+        if let Some(ref comp) = req.compensation {
+          self.pending_compensations.insert(
+            req.effect_id.raw(),
+            (pid, comp.clone()),
+          );
+        }
         self.metrics.inc("effects.dispatched");
+        if let Some(ref reactor) = self.reactor {
+          reactor.dispatch(pid, req);
+        }
+      }
+    }
+
+    // 8. Process rollback requests
+    let rollback_pids =
+      self.engine.take_rollback_requests();
+    for pid in rollback_pids {
+      let undo_effects =
+        self.compensation_log.rollback_all(pid);
+      for req in undo_effects {
+        self.metrics.inc("compensation.triggered");
         if let Some(ref reactor) = self.reactor {
           reactor.dispatch(pid, req);
         }
@@ -709,5 +789,77 @@ mod tests {
       completed[0].1,
       Reason::Normal
     ));
+  }
+
+  #[test]
+  fn test_runtime_compensation_rollback() {
+    use crate::core::effect::{
+      CompensationSpec, EffectKind, EffectRequest,
+    };
+
+    struct CompensatingAgent {
+      phase: u8,
+    }
+    impl StepBehavior for CompensatingAgent {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        ctx: &mut TurnContext,
+      ) -> StepResult {
+        match self.phase {
+          0 => {
+            self.phase = 1;
+            StepResult::Suspend(
+              EffectRequest::new(
+                EffectKind::Http,
+                serde_json::json!({
+                  "action": "charge"
+                }),
+              )
+              .with_compensation(CompensationSpec {
+                undo_kind: EffectKind::Http,
+                undo_input: serde_json::json!({
+                  "action": "refund"
+                }),
+              }),
+            )
+          }
+          1 => {
+            // Effect result received; trigger rollback
+            self.phase = 2;
+            ctx.rollback();
+            StepResult::Done(Reason::Normal)
+          }
+          _ => StepResult::Continue,
+        }
+      }
+      fn terminate(&mut self, _: &Reason) {}
+    }
+
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid = rt.spawn(Box::new(
+      CompensatingAgent { phase: 0 },
+    ));
+    rt.send(Envelope::text(pid, "start"));
+    rt.tick(); // Suspends with compensatable effect
+
+    // Wait for reactor
+    std::thread::sleep(
+      std::time::Duration::from_millis(200),
+    );
+    // Delivers result, process rollbacks + exits
+    rt.tick();
+
+    assert!(
+      rt.metrics().counter("compensation.triggered")
+        > 0,
+      "compensation should have been triggered"
+    );
   }
 }
