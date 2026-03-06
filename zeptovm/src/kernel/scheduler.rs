@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tracing::{debug, info_span};
+use tracing::info_span;
 
 use crate::{
   core::{
