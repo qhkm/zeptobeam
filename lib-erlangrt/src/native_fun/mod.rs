@@ -16,6 +16,7 @@ pub mod macros;
 pub mod erlang;
 pub mod erts_internal;
 pub mod lists;
+pub mod maps;
 
 /// A BIF function which runs under some process, takes some args (encoded in
 /// its name and hardcoded in its code), and returns an `Term`.

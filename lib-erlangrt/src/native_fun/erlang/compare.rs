@@ -94,6 +94,36 @@ pub fn nativefun_greaterequal_2(
   shared_eq(args, Ordering::Less, true, false)
 }
 
+/// Return the larger of two terms (erlang:max/2).
+pub fn nativefun_max_2(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}erlang:max/2 takes 2 args", module());
+  let cmp = cmp_terms(args[0], args[1], false)?;
+  if cmp == Ordering::Less {
+    Ok(args[1])
+  } else {
+    Ok(args[0])
+  }
+}
+
+/// Return the smaller of two terms (erlang:min/2).
+pub fn nativefun_min_2(
+  _vm: &mut VM,
+  _cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}erlang:min/2 takes 2 args", module());
+  let cmp = cmp_terms(args[0], args[1], false)?;
+  if cmp == Ordering::Greater {
+    Ok(args[1])
+  } else {
+    Ok(args[0])
+  }
+}
+
 /// Shared compare routine which expects a specific `ordering` to return true.
 ///
 /// * Arg: `invert`: The result can be inverted.

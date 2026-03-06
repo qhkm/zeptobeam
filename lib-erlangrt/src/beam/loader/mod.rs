@@ -91,6 +91,10 @@ struct LoaderState {
   imports: Vec<Term>,
 
   lambdas: Vec<FunEntry>,
+
+  /// Line info: maps code offsets to line numbers for stacktraces.
+  /// Each entry is (code_offset, line_number).
+  line_table: Vec<(usize, usize)>,
 }
 
 impl LoaderState {
@@ -108,6 +112,7 @@ impl LoaderState {
       funs: BTreeMap::new(),
       imports: Vec::new(),
       lambdas: Vec::new(),
+      line_table: Vec::new(),
       // exports: BTreeMap::new(),
     }
   }
@@ -143,6 +148,7 @@ impl LoaderState {
       mem::swap(&mut self.code, &mut newmod.code);
       mem::swap(&mut self.beam_file.lit_heap, &mut newmod.lit_heap);
       mem::swap(&mut self.lambdas, &mut newmod.lambdas);
+      mem::swap(&mut self.line_table, &mut newmod.line_table);
     }
 
     Ok(newmod)

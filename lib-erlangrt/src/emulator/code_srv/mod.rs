@@ -194,6 +194,22 @@ impl CodeServer {
     None
   }
 
+  /// Given a code address, find the module, MFA, and line number.
+  // TODO: Also search old_modp for processes running old module generations
+  pub fn code_reverse_lookup_with_line(
+    &self,
+    ip: CodePtr,
+  ) -> Option<(ModFunArity, usize)> {
+    for val in self.mods.values() {
+      let modp = &val.curr_modp;
+      if let Some(mfa) = modp.code_reverse_lookup(ip) {
+        let line = modp.lookup_line_for_ip(ip);
+        return Some((mfa, line));
+      }
+    }
+    None
+  }
+
   pub fn next_module_version(&mut self, _m: Term) -> usize {
     let ver = self.mod_version;
     self.mod_version += 1;

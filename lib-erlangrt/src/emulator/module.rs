@@ -45,6 +45,10 @@ pub struct Module {
   // TODO: lit table
   pub code: Code,
   pub lit_heap: Heap, // set by module loader
+
+  /// Line info: maps code offsets to line numbers for stacktraces.
+  /// Each entry is (code_offset, line_number), sorted by code_offset.
+  pub line_table: Vec<(usize, usize)>,
 }
 
 impl Module {
@@ -56,6 +60,7 @@ impl Module {
       lit_heap: Heap::new(Designation::TransientDestructible),
       versioned_name: *name,
       lambdas: Vec::new(),
+      line_table: Vec::new(),
     }
   }
 
@@ -123,5 +128,32 @@ impl Module {
 
     let mfa = ModFunArity::new_from_funarity(self.versioned_name.module, &fa);
     Some(mfa)
+  }
+
+  /// Look up the line number for a given code offset by finding the
+  /// closest line entry at or before the offset.
+  /// Assumes line_table is sorted by code offset (enforced at load time).
+  pub fn lookup_line(&self, offset: usize) -> usize {
+    let mut line = 0;
+    for &(entry_offset, entry_line) in &self.line_table {
+      if entry_offset <= offset {
+        line = entry_line;
+      } else {
+        break;
+      }
+    }
+    line
+  }
+
+  /// Look up the line number for a given IP (code pointer).
+  /// Returns 0 if the IP does not belong to this module or no line info found.
+  pub fn lookup_line_for_ip(&self, ip: CodePtr) -> usize {
+    if !ip.belongs_to(&self.code) || self.code.is_empty() {
+      return 0;
+    }
+    let code_begin = &self.code[0] as *const Word;
+    let ip_ptr = ip.get_pointer();
+    let offset = (ip_ptr as usize - code_begin as usize) / WORD_BYTES;
+    self.lookup_line(offset)
   }
 }

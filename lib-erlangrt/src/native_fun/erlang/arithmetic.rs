@@ -189,13 +189,13 @@ pub fn nativefun_div_2(
 ) -> RtResult<Term> {
   assert_eq!(args.len(), 2, "{}div/2 takes 2 args", module());
   let (Some(a), Some(b)) = (small_i(args[0]), small_i(args[1])) else {
-    return fail::create::badarg();
+    return fail::create::badarith();
   };
   if b == 0 {
-    return fail::create::badarg();
+    return fail::create::badarith();
   }
   let Some(v) = a.checked_div(b) else {
-    return fail::create::badarg();
+    return fail::create::badarith();
   };
   if Term::small_fits(v) {
     Ok(Term::make_small_signed(v))
@@ -211,15 +211,108 @@ pub fn nativefun_rem_2(
 ) -> RtResult<Term> {
   assert_eq!(args.len(), 2, "{}rem/2 takes 2 args", module());
   let (Some(a), Some(b)) = (small_i(args[0]), small_i(args[1])) else {
-    return fail::create::badarg();
+    return fail::create::badarith();
   };
   if b == 0 {
-    return fail::create::badarg();
+    return fail::create::badarith();
   }
   let Some(v) = a.checked_rem(b) else {
-    return fail::create::badarg();
+    return fail::create::badarith();
   };
   Ok(Term::make_small_signed(v))
+}
+
+/// Float division (`erlang:'/'/2`). Always returns a float.
+/// Both arguments can be integer or float. Division by zero raises badarith.
+pub fn nativefun_float_div_2(
+  _vm: &mut VM,
+  cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 2, "{}'/'/2 takes 2 args", module());
+  let a = args[0];
+  let b = args[1];
+
+  let fa = term_to_f64_opt(a);
+  let fb = term_to_f64_opt(b);
+
+  match (fa, fb) {
+    (Some(av), Some(bv)) => {
+      if bv == 0.0 {
+        return fail::create::badarith();
+      }
+      let hp = cur_proc.get_heap_mut();
+      Ok(Term::make_float(hp, av / bv)?)
+    }
+    _ => fail::create::badarith(),
+  }
+}
+
+/// `erlang:abs/1`. Returns absolute value preserving type (int->int, float->float).
+pub fn nativefun_abs_1(
+  _vm: &mut VM,
+  cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 1, "{}abs/1 takes 1 arg", module());
+  let a = args[0];
+
+  if a.is_small() {
+    let v = a.get_small_signed();
+    // Use wrapping_abs: for isize::MIN this wraps back to isize::MIN (negative),
+    // but small ints have a much narrower range than isize, so in practice
+    // abs will always succeed here.
+    let abs_v = v.wrapping_abs();
+    if Term::small_fits(abs_v) {
+      Ok(Term::make_small_signed(abs_v))
+    } else {
+      create_bigint(cur_proc, abs_v)
+    }
+  } else if a.is_float() {
+    let fv = unsafe { a.get_float_unchecked() };
+    let hp = cur_proc.get_heap_mut();
+    Ok(Term::make_float(hp, fv.abs())?)
+  } else if a.is_big_int() {
+    // TODO: implement proper big int abs
+    fail::create::badarg()
+  } else {
+    fail::create::badarg()
+  }
+}
+
+/// `erlang:float/1`. Converts integer to float; float stays float.
+pub fn nativefun_float_1(
+  _vm: &mut VM,
+  cur_proc: &mut Process,
+  args: &[Term],
+) -> RtResult<Term> {
+  assert_eq!(args.len(), 1, "{}float/1 takes 1 arg", module());
+  let a = args[0];
+
+  if a.is_float() {
+    Ok(a)
+  } else if a.is_small() {
+    let v = a.get_small_signed() as f64;
+    let hp = cur_proc.get_heap_mut();
+    Ok(Term::make_float(hp, v)?)
+  } else if a.is_big_int() {
+    // TODO: convert big int to float
+    fail::create::badarg()
+  } else {
+    fail::create::badarg()
+  }
+}
+
+/// Helper: convert a Term (small int or boxed float) to f64, or None.
+#[inline]
+fn term_to_f64_opt(t: Term) -> Option<f64> {
+  if t.is_small() {
+    Some(t.get_small_signed() as f64)
+  } else if t.is_float() {
+    Some(unsafe { t.get_float_unchecked() })
+  } else {
+    None
+  }
 }
 
 // TODO: shorten, use only heap of the process, inline, move to a lib module in arith

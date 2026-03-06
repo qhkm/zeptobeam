@@ -1,6 +1,6 @@
 use crate::{
   beam::disp_result::DispatchResult,
-  emulator::{heap::THeapOwner, process::Process, runtime_ctx::*},
+  emulator::{gen_atoms, heap::THeapOwner, process::Process, runtime_ctx::*},
   fail::{self, RtResult},
   term::{boxed, Term},
 };
@@ -168,6 +168,28 @@ define_opcode!(_vm, ctx, curr_p,
   name: OpcodeIsList, arity: 2,
   run: {
     if !value.is_list() { ctx.jump(fail) }
+    Ok(DispatchResult::Normal)
+  },
+  args: cp_or_nil(fail), load(value),
+);
+
+// Checks that argument is a bitstring (binary), otherwise jumps to label.
+// Structure: is_bitstr(on_false:label, val:src)
+define_opcode!(_vm, ctx, curr_p,
+  name: OpcodeIsBitstr, arity: 2,
+  run: {
+    if value != Term::empty_binary() && !value.is_binary() { ctx.jump(fail) }
+    Ok(DispatchResult::Normal)
+  },
+  args: cp_or_nil(fail), load(value),
+);
+
+// Checks that argument is the atom 'true' or 'false', otherwise jumps to label.
+// Structure: is_boolean(on_false:label, val:src)
+define_opcode!(_vm, ctx, curr_p,
+  name: OpcodeIsBoolean, arity: 2,
+  run: {
+    if value != gen_atoms::TRUE && value != gen_atoms::FALSE { ctx.jump(fail) }
     Ok(DispatchResult::Normal)
   },
   args: cp_or_nil(fail), load(value),

@@ -48,6 +48,7 @@ get_hd
 #=== === Comparisons and Predicates === ===
 is_eq
 is_eq_exact
+is_ne
 is_ne_exact
 is_ge
 is_lt
@@ -55,6 +56,8 @@ is_lt
 #=== === Type Tests === ===
 is_atom
 is_binary
+is_bitstr
+is_boolean
 is_float
 is_function
 is_function2
@@ -69,6 +72,10 @@ is_tuple
 #=== === Mailbox === ===
 loop_rec
 loop_rec_end
+recv_marker_bind
+recv_marker_clear
+recv_marker_reserve
+recv_marker_use
 remove_message
 send
 wait
@@ -101,6 +108,7 @@ bs_get_binary2
 bs_init2
 bs_put_binary
 bs_put_integer
+bs_put_string
 bs_match
 bs_get_position
 bs_get_tail
@@ -108,3 +116,44 @@ bs_set_position
 bs_start_match3
 bs_start_match4
 bs_test_tail2
+bs_context_to_binary
+bs_test_unit
+bs_match_string
+bs_append
+bs_init_bits
+bs_get_utf8
+bs_skip_utf8
+bs_utf8_size
+bs_put_utf8
+
+#=== === Map Operations === ===
+put_map_assoc
+put_map_exact
+is_map
+has_map_fields
+get_map_elements
+update_record
+badrecord
+
+#=== === Float Operations === ===
+fclearerror
+fcheckerror
+fmove
+fconv
+fadd
+fsub
+fmul
+fdiv
+fnegate
+
+#=== === Additional Control Flow === ===
+try_case_end
+raw_raise
+build_stacktrace
+case_end
+if_end
+catch
+catch_end
+timeout
+wait_timeout
+select_tuple_arity

@@ -42,3 +42,22 @@ pub fn tuple2(hp: &mut dyn THeap, a: Term, b: Term) -> RtResult<Term> {
   }
   Ok(tb.make_term())
 }
+
+/// Create a 4-tuple.
+#[inline]
+pub fn tuple4(
+  hp: &mut dyn THeap,
+  a: Term,
+  b: Term,
+  c: Term,
+  d: Term,
+) -> RtResult<Term> {
+  let tb = TupleBuilder::with_arity(4, hp)?;
+  unsafe {
+    tb.set_element(0, a);
+    tb.set_element(1, b);
+    tb.set_element(2, c);
+    tb.set_element(3, d);
+  }
+  Ok(tb.make_term())
+}

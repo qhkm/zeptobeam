@@ -1,16 +1,25 @@
 //! Module implements binary/bit syntax matching and data creation & extraction
 //! opcodes for binaries.
+mod bs_append;
+mod bs_context_to_binary;
+mod bs_create_bin;
 mod bs_get_binary;
 mod bs_init;
-mod bs_create_bin;
+mod bs_init_bits;
 mod bs_match;
+mod bs_match_string;
 mod bs_put_binary;
 mod bs_put_integer;
+mod bs_put_string;
 mod bs_start_match;
+mod bs_test_unit;
+mod bs_utf8;
 
 pub use self::{
-  bs_create_bin::*, bs_get_binary::*, bs_init::*, bs_match::*, bs_put_binary::*,
-  bs_put_integer::*, bs_start_match::*,
+  bs_append::*, bs_context_to_binary::*, bs_create_bin::*, bs_get_binary::*,
+  bs_init::*, bs_init_bits::*, bs_match::*, bs_match_string::*,
+  bs_put_binary::*, bs_put_integer::*, bs_put_string::*, bs_start_match::*,
+  bs_test_unit::*, bs_utf8::*,
 };
 
 use crate::{

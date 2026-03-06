@@ -1,6 +1,6 @@
 use crate::{
   beam::disp_result::{DispatchResult, YieldType},
-  emulator::{process::Process, runtime_ctx::*, vm::VM},
+  emulator::{heap::THeapOwner, process::Process, runtime_ctx::*, vm::VM},
   fail::{self, RtResult},
   term::*,
 };
@@ -111,3 +111,78 @@ impl OpcodeWait {
     Ok(DispatchResult::Yield(YieldType::InfiniteWait))
   }
 }
+
+// Resets the receive timeout state. Called after a message has been selected
+// from the mailbox in a receive with a timeout, or after a timeout fires.
+// Structure: timeout()
+define_opcode!(_vm, _ctx, curr_p,
+  name: OpcodeTimeout, arity: 0,
+  run: {
+    // Reset the mailbox read pointer to the beginning
+    curr_p.mailbox.reset_read_index();
+    Ok(DispatchResult::Normal)
+  },
+  args:
+);
+
+// Sets up a timeout for a receive expression. If the timeout value is 0,
+// immediately jump to the label (immediate timeout). Otherwise set up a timed
+// wait. For now, we implement immediate timeout for timeout value 0, and
+// yield for all other values.
+// Structure: wait_timeout(fail_label:cp, timeout_val:term)
+define_opcode!(_vm, ctx, curr_p,
+  name: OpcodeWaitTimeout, arity: 2,
+  run: { Self::wait_timeout(ctx, fail_label, timeout_val) },
+  args: cp_or_nil(fail_label), load(timeout_val),
+);
+
+impl OpcodeWaitTimeout {
+  #[inline]
+  pub fn wait_timeout(
+    ctx: &mut RuntimeContext,
+    fail_label: Term,
+    timeout_val: Term,
+  ) -> RtResult<DispatchResult> {
+    // If timeout is 0, the timeout fires immediately
+    if timeout_val.is_small() && timeout_val.get_small_unsigned() == 0 {
+      // Do not jump — fall through to the timeout code (next instruction)
+      return Ok(DispatchResult::Normal);
+    }
+
+    // For non-zero timeout, yield and wait. When rescheduled, jump to the
+    // receive loop label to retry.
+    ctx.jump(fail_label);
+    Ok(DispatchResult::Yield(YieldType::InfiniteWait))
+  }
+}
+
+// Recv marker opcodes — optimization hints for the receive implementation.
+// These are no-ops in our simplified implementation.
+
+// recv_marker_bind/2: bind a marker to a reference
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeRecvMarkerBind, arity: 2,
+  run: { Ok(DispatchResult::Normal) },
+  args: IGNORE(_marker), IGNORE(_ref),
+);
+
+// recv_marker_clear/1: clear a receive marker
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeRecvMarkerClear, arity: 1,
+  run: { Ok(DispatchResult::Normal) },
+  args: IGNORE(_ref),
+);
+
+// recv_marker_reserve/1: reserve a receive marker
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeRecvMarkerReserve, arity: 1,
+  run: { Ok(DispatchResult::Normal) },
+  args: IGNORE(_marker),
+);
+
+// recv_marker_use/1: use a receive marker
+define_opcode!(_vm, _ctx, _curr_p,
+  name: OpcodeRecvMarkerUse, arity: 1,
+  run: { Ok(DispatchResult::Normal) },
+  args: IGNORE(_ref),
+);

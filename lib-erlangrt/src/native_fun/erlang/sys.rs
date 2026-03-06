@@ -51,6 +51,20 @@ define_nativefun!(_vm, _proc, args,
   args: term(reason),
 );
 
+// Create an exception of type `throw`.
+define_nativefun!(_vm, _proc, args,
+  name: "erlang:throw/1", struct_name: NfErlangThrow1, arity: 1,
+  invoke: { Err(RtErr::Exception(ExceptionType::Throw, reason)) },
+  args: term(reason),
+);
+
+// Create an exception of type `exit`.
+define_nativefun!(_vm, _proc, args,
+  name: "erlang:exit/1", struct_name: NfErlangExit1, arity: 1,
+  invoke: { Err(RtErr::Exception(ExceptionType::Exit, reason)) },
+  args: term(reason),
+);
+
 // Make a nice face like we are loading something here
 // TODO: Implement pre-linked NIF modules which are ready to be activated
 define_nativefun!(_vm, _proc, args,

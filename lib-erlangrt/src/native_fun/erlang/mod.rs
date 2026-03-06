@@ -27,6 +27,7 @@ pub fn new() -> NativeModule {
     NativeFnEntry::with_str("+", 2, nativefun_plus_2),
     NativeFnEntry::with_str("++", 2, NfErlangPlusPlus2::_f),
     NativeFnEntry::with_str("-", 2, nativefun_minus_2),
+    NativeFnEntry::with_str("/", 2, nativefun_float_div_2),
     NativeFnEntry::with_str("/=", 2, nativefun_notequal_2),
     NativeFnEntry::with_str("<", 2, nativefun_lessthan_2),
     NativeFnEntry::with_str("=/=", 2, nativefun_notequal_exact_2),
@@ -35,6 +36,7 @@ pub fn new() -> NativeModule {
     NativeFnEntry::with_str("==", 2, nativefun_equalequal_2),
     NativeFnEntry::with_str(">", 2, nativefun_greaterthan_2),
     NativeFnEntry::with_str(">=", 2, nativefun_greaterequal_2),
+    NativeFnEntry::with_str("abs", 1, nativefun_abs_1),
     NativeFnEntry::with_str("atom_to_list", 1, NfErlangA2List2::_f),
     NativeFnEntry::with_str("band", 2, nativefun_band_2),
     NativeFnEntry::with_str("bnot", 1, nativefun_bnot_1),
@@ -45,6 +47,7 @@ pub fn new() -> NativeModule {
     NativeFnEntry::with_str("div", 2, nativefun_div_2),
     NativeFnEntry::with_str("error", 1, NfErlangError1::_f),
     NativeFnEntry::with_str("error", 2, NfErlangError2::_f),
+    NativeFnEntry::with_str("float", 1, nativefun_float_1),
     NativeFnEntry::with_str("hd", 1, NfErlangHd1::_f),
     NativeFnEntry::with_str("integer_to_list", 1, NfErlangInt2List2::_f),
     NativeFnEntry::with_str("is_boolean", 1, nativefun_is_boolean_1),
@@ -68,6 +71,24 @@ pub fn new() -> NativeModule {
     NativeFnEntry::with_str("binary_to_list", 1, NfErlangB2l1::_f),
     NativeFnEntry::with_str("spawn", 3, NfErlangSpawn3::_f),
     NativeFnEntry::with_str("tl", 1, NfErlangTl1::_f),
+    // New BIFs: tuple operations
+    NativeFnEntry::with_str("element", 2, nativefun_element_2),
+    NativeFnEntry::with_str("setelement", 3, nativefun_setelement_3),
+    NativeFnEntry::with_str("tuple_size", 1, nativefun_tuple_size_1),
+    NativeFnEntry::with_str("tuple_to_list", 1, nativefun_tuple_to_list_1),
+    NativeFnEntry::with_str("list_to_tuple", 1, nativefun_list_to_tuple_1),
+    // New BIFs: map operations
+    NativeFnEntry::with_str("map_size", 1, nativefun_map_size_1),
+    NativeFnEntry::with_str("is_map_key", 2, nativefun_is_map_key_2),
+    // New BIFs: exceptions
+    NativeFnEntry::with_str("throw", 1, NfErlangThrow1::_f),
+    NativeFnEntry::with_str("exit", 1, NfErlangExit1::_f),
+    // New BIFs: comparison
+    NativeFnEntry::with_str("max", 2, nativefun_max_2),
+    NativeFnEntry::with_str("min", 2, nativefun_min_2),
+    // New BIFs: type conversions
+    NativeFnEntry::with_str("atom_to_binary", 1, nativefun_atom_to_binary_1),
+    NativeFnEntry::with_str("binary_to_atom", 1, nativefun_binary_to_atom_1),
   ];
   m.init_with(fn_entries.iter());
   m

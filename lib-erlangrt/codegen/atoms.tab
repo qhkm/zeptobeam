@@ -12,7 +12,10 @@ badarg
 badarith
 badarity
 badfun
+badkey
+badmap
 badmatch
+badrecord
 
 #--- C
 case_clause
@@ -25,6 +28,7 @@ erts_internal
 
 #--- F
 false
+file
 function_clause
 
 #--- H
@@ -39,6 +43,7 @@ kill
 killed
 
 #--- L
+line
 low
 
 #--- N
@@ -56,6 +61,10 @@ system_limit
 throw
 trap_exit
 true
+try_clause
+
+#--- Uppercase atoms
+EXIT UPPER_EXIT
 
 #--- U
 undef

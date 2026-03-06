@@ -74,6 +74,13 @@ impl ProcessMailbox {
     self.read_index = mri;
   }
 
+  /// Reset the read index back to the start. Called by the `timeout` opcode
+  /// after a receive timeout fires, so that subsequent receives start scanning
+  /// from the beginning of the mailbox again.
+  pub fn reset_read_index(&mut self) {
+    self.read_index = 0;
+  }
+
   // Remove value from current mailbox position and return it, move pointer
   // forward.
   pub fn remove_current(&mut self) -> Term {

@@ -4,8 +4,10 @@ pub mod macros;
 pub mod binary;
 pub mod op_data;
 pub mod op_execution;
+pub mod op_float;
 pub mod op_fun;
 pub mod op_list;
+pub mod op_map;
 pub mod op_memory;
 pub mod op_message;
 pub mod op_native_fun;
@@ -15,9 +17,9 @@ pub mod op_tuple;
 pub mod op_type_checks;
 
 pub use crate::beam::opcodes::{
-  binary::*, op_data::*, op_execution::*, op_fun::*, op_list::*, op_memory::*,
-  op_message::*, op_native_fun::*, op_predicates::*, op_try_catch::*, op_tuple::*,
-  op_type_checks::*,
+  binary::*, op_data::*, op_execution::*, op_float::*, op_fun::*, op_list::*,
+  op_map::*, op_memory::*, op_message::*, op_native_fun::*, op_predicates::*,
+  op_try_catch::*, op_tuple::*, op_type_checks::*,
 };
 use crate::{
   beam::gen_op,

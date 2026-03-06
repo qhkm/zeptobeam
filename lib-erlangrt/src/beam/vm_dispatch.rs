@@ -107,6 +107,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeRemoveMessage::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_TIMEOUT => {
+      assert_arity(OPCODE_TIMEOUT, OpcodeTimeout::ARITY);
+      return OpcodeTimeout::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_LOOP_REC => {
       assert_arity(OPCODE_LOOP_REC, OpcodeLoopRec::ARITY);
       return OpcodeLoopRec::__run(vm, ctx, curr_p);
@@ -122,6 +127,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeWait::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_WAIT_TIMEOUT => {
+      assert_arity(OPCODE_WAIT_TIMEOUT, OpcodeWaitTimeout::ARITY);
+      return OpcodeWaitTimeout::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_IS_LT => {
       assert_arity(OPCODE_IS_LT, OpcodeIsLt::ARITY);
       return OpcodeIsLt::__run(vm, ctx, curr_p);
@@ -135,6 +145,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_IS_EQ => {
       assert_arity(OPCODE_IS_EQ, OpcodeIsEq::ARITY);
       return OpcodeIsEq::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_IS_NE => {
+      assert_arity(OPCODE_IS_NE, OpcodeIsNe::ARITY);
+      return OpcodeIsNe::__run(vm, ctx, curr_p);
     },
 
     OPCODE_IS_EQ_EXACT => {
@@ -217,9 +232,24 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeSelectVal::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_SELECT_TUPLE_ARITY => {
+      assert_arity(OPCODE_SELECT_TUPLE_ARITY, OpcodeSelectTupleArity::ARITY);
+      return OpcodeSelectTupleArity::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_JUMP => {
       assert_arity(OPCODE_JUMP, OpcodeJump::ARITY);
       return OpcodeJump::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_CATCH => {
+      assert_arity(OPCODE_CATCH, OpcodeCatch::ARITY);
+      return OpcodeCatch::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_CATCH_END => {
+      assert_arity(OPCODE_CATCH_END, OpcodeCatchEnd::ARITY);
+      return OpcodeCatchEnd::__run(vm, ctx, curr_p);
     },
 
     OPCODE_MOVE => {
@@ -257,6 +287,16 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeBadmatch::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_IF_END => {
+      assert_arity(OPCODE_IF_END, OpcodeIfEnd::ARITY);
+      return OpcodeIfEnd::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_CASE_END => {
+      assert_arity(OPCODE_CASE_END, OpcodeCaseEnd::ARITY);
+      return OpcodeCaseEnd::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_CALL_FUN => {
       assert_arity(OPCODE_CALL_FUN, OpcodeCallFun::ARITY);
       return OpcodeCallFun::__run(vm, ctx, curr_p);
@@ -282,6 +322,56 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeBsPutBinary::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_BS_PUT_STRING => {
+      assert_arity(OPCODE_BS_PUT_STRING, OpcodeBsPutString::ARITY);
+      return OpcodeBsPutString::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FCLEARERROR => {
+      assert_arity(OPCODE_FCLEARERROR, OpcodeFclearerror::ARITY);
+      return OpcodeFclearerror::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FCHECKERROR => {
+      assert_arity(OPCODE_FCHECKERROR, OpcodeFcheckerror::ARITY);
+      return OpcodeFcheckerror::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FMOVE => {
+      assert_arity(OPCODE_FMOVE, OpcodeFmove::ARITY);
+      return OpcodeFmove::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FCONV => {
+      assert_arity(OPCODE_FCONV, OpcodeFconv::ARITY);
+      return OpcodeFconv::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FADD => {
+      assert_arity(OPCODE_FADD, OpcodeFadd::ARITY);
+      return OpcodeFadd::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FSUB => {
+      assert_arity(OPCODE_FSUB, OpcodeFsub::ARITY);
+      return OpcodeFsub::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FMUL => {
+      assert_arity(OPCODE_FMUL, OpcodeFmul::ARITY);
+      return OpcodeFmul::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FDIV => {
+      assert_arity(OPCODE_FDIV, OpcodeFdiv::ARITY);
+      return OpcodeFdiv::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_FNEGATE => {
+      assert_arity(OPCODE_FNEGATE, OpcodeFnegate::ARITY);
+      return OpcodeFnegate::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_MAKE_FUN2 => {
       assert_arity(OPCODE_MAKE_FUN2, OpcodeMakeFun2::ARITY);
       return OpcodeMakeFun2::__run(vm, ctx, curr_p);
@@ -300,6 +390,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_TRY_CASE => {
       assert_arity(OPCODE_TRY_CASE, OpcodeTryCase::ARITY);
       return OpcodeTryCase::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_TRY_CASE_END => {
+      assert_arity(OPCODE_TRY_CASE_END, OpcodeTryCaseEnd::ARITY);
+      return OpcodeTryCaseEnd::__run(vm, ctx, curr_p);
     },
 
     OPCODE_RAISE => {
@@ -325,6 +420,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_APPLY_LAST => {
       assert_arity(OPCODE_APPLY_LAST, OpcodeApplyLast::ARITY);
       return OpcodeApplyLast::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_IS_BOOLEAN => {
+      assert_arity(OPCODE_IS_BOOLEAN, OpcodeIsBoolean::ARITY);
+      return OpcodeIsBoolean::__run(vm, ctx, curr_p);
     },
 
     OPCODE_IS_FUNCTION2 => {
@@ -357,9 +457,59 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeGcBif2::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_IS_BITSTR => {
+      assert_arity(OPCODE_IS_BITSTR, OpcodeIsBitstr::ARITY);
+      return OpcodeIsBitstr::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_CONTEXT_TO_BINARY => {
+      assert_arity(OPCODE_BS_CONTEXT_TO_BINARY, OpcodeBsContextToBinary::ARITY);
+      return OpcodeBsContextToBinary::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_TEST_UNIT => {
+      assert_arity(OPCODE_BS_TEST_UNIT, OpcodeBsTestUnit::ARITY);
+      return OpcodeBsTestUnit::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_MATCH_STRING => {
+      assert_arity(OPCODE_BS_MATCH_STRING, OpcodeBsMatchString::ARITY);
+      return OpcodeBsMatchString::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_APPEND => {
+      assert_arity(OPCODE_BS_APPEND, OpcodeBsAppend::ARITY);
+      return OpcodeBsAppend::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_TRIM => {
       assert_arity(OPCODE_TRIM, OpcodeTrim::ARITY);
       return OpcodeTrim::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_INIT_BITS => {
+      assert_arity(OPCODE_BS_INIT_BITS, OpcodeBsInitBits::ARITY);
+      return OpcodeBsInitBits::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_GET_UTF8 => {
+      assert_arity(OPCODE_BS_GET_UTF8, OpcodeBsGetUtf8::ARITY);
+      return OpcodeBsGetUtf8::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_SKIP_UTF8 => {
+      assert_arity(OPCODE_BS_SKIP_UTF8, OpcodeBsSkipUtf8::ARITY);
+      return OpcodeBsSkipUtf8::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_UTF8_SIZE => {
+      assert_arity(OPCODE_BS_UTF8_SIZE, OpcodeBsUtf8Size::ARITY);
+      return OpcodeBsUtf8Size::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_PUT_UTF8 => {
+      assert_arity(OPCODE_BS_PUT_UTF8, OpcodeBsPutUtf8::ARITY);
+      return OpcodeBsPutUtf8::__run(vm, ctx, curr_p);
     },
 
     OPCODE_GC_BIF3 => {
@@ -367,9 +517,44 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeGcBif3::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_PUT_MAP_ASSOC => {
+      assert_arity(OPCODE_PUT_MAP_ASSOC, OpcodePutMapAssoc::ARITY);
+      return OpcodePutMapAssoc::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_PUT_MAP_EXACT => {
+      assert_arity(OPCODE_PUT_MAP_EXACT, OpcodePutMapExact::ARITY);
+      return OpcodePutMapExact::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_IS_MAP => {
+      assert_arity(OPCODE_IS_MAP, OpcodeIsMap::ARITY);
+      return OpcodeIsMap::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_HAS_MAP_FIELDS => {
+      assert_arity(OPCODE_HAS_MAP_FIELDS, OpcodeHasMapFields::ARITY);
+      return OpcodeHasMapFields::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_GET_MAP_ELEMENTS => {
+      assert_arity(OPCODE_GET_MAP_ELEMENTS, OpcodeGetMapElements::ARITY);
+      return OpcodeGetMapElements::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_IS_TAGGED_TUPLE => {
       assert_arity(OPCODE_IS_TAGGED_TUPLE, OpcodeIsTaggedTuple::ARITY);
       return OpcodeIsTaggedTuple::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BUILD_STACKTRACE => {
+      assert_arity(OPCODE_BUILD_STACKTRACE, OpcodeBuildStacktrace::ARITY);
+      return OpcodeBuildStacktrace::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RAW_RAISE => {
+      assert_arity(OPCODE_RAW_RAISE, OpcodeRawRaise::ARITY);
+      return OpcodeRawRaise::__run(vm, ctx, curr_p);
     },
 
     OPCODE_GET_HD => {
@@ -427,6 +612,26 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeInitYregs::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_RECV_MARKER_BIND => {
+      assert_arity(OPCODE_RECV_MARKER_BIND, OpcodeRecvMarkerBind::ARITY);
+      return OpcodeRecvMarkerBind::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RECV_MARKER_CLEAR => {
+      assert_arity(OPCODE_RECV_MARKER_CLEAR, OpcodeRecvMarkerClear::ARITY);
+      return OpcodeRecvMarkerClear::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RECV_MARKER_RESERVE => {
+      assert_arity(OPCODE_RECV_MARKER_RESERVE, OpcodeRecvMarkerReserve::ARITY);
+      return OpcodeRecvMarkerReserve::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_RECV_MARKER_USE => {
+      assert_arity(OPCODE_RECV_MARKER_USE, OpcodeRecvMarkerUse::ARITY);
+      return OpcodeRecvMarkerUse::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_BS_CREATE_BIN => {
       assert_arity(OPCODE_BS_CREATE_BIN, OpcodeBsCreateBin::ARITY);
       return OpcodeBsCreateBin::__run(vm, ctx, curr_p);
@@ -435,6 +640,16 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
     OPCODE_CALL_FUN2 => {
       assert_arity(OPCODE_CALL_FUN2, OpcodeCallFun2::ARITY);
       return OpcodeCallFun2::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BADRECORD => {
+      assert_arity(OPCODE_BADRECORD, OpcodeBadrecord::ARITY);
+      return OpcodeBadrecord::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_UPDATE_RECORD => {
+      assert_arity(OPCODE_UPDATE_RECORD, OpcodeUpdateRecord::ARITY);
+      return OpcodeUpdateRecord::__run(vm, ctx, curr_p);
     },
 
     OPCODE_BS_MATCH => {

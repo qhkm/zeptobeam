@@ -135,8 +135,23 @@ impl LoaderState {
           }
         }
 
-        // add nothing for line, but TODO: Record line contents
-        gen_op::OPCODE_LINE => {}
+        // Record mapping from current code offset to line number.
+        // All three line-type opcodes carry the same payload and are handled identically.
+        gen_op::OPCODE_LINE
+        | gen_op::OPCODE_EXECUTABLE_LINE
+        | gen_op::OPCODE_DEBUG_LINE => {
+          if let Some(arg) = next_instr.args.get(0) {
+            if arg.is_small() {
+              let line_num = arg.get_small_unsigned();
+              let offset = self.code.len();
+              debug_assert!(
+                self.line_table.last().map_or(true, |&(prev, _)| prev <= offset),
+                "line_table must be appended in non-decreasing offset order"
+              );
+              self.line_table.push((offset, line_num));
+            }
+          }
+        }
 
         gen_op::OPCODE_FUNC_INFO => {
           // arg[0] mod name, arg[1] fun name, arg[2] arity
