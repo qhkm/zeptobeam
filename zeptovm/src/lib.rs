@@ -1,4 +1,5 @@
 pub mod behavior;
+pub mod durability;
 pub mod error;
 pub mod link;
 pub mod mailbox;

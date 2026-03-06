@@ -4168,6 +4168,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "futures",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",
