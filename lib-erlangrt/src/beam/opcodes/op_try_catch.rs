@@ -217,13 +217,32 @@ impl OpcodeBuildStacktrace {
     // Build a simple stacktrace from the current CP.
     // Erlang stacktrace format: [{M, F, A, Info} | ...]
     // where Info is a proplist like [{file, File}, {line, Line}]
+    //
+    // TODO: Currently only the immediate CP is used. A full implementation
+    // should walk the stack to collect multiple frames for a complete
+    // multi-frame stacktrace.
     let mut trace = Term::nil();
 
     if !ctx.cp.is_null() {
-      if let Some(mfa) = vm.code_server.code_reverse_lookup(ctx.cp) {
+      if let Some((mfa, line)) =
+        vm.code_server.code_reverse_lookup_with_line(ctx.cp)
+      {
         let hp = curr_p.get_heap_mut();
         let arity_term = Term::make_small_unsigned(mfa.arity);
-        let info = Term::nil(); // empty info list for now
+
+        // Build info list: [{line, Line}] if line > 0, else []
+        let info = if line > 0 {
+          let line_term = Term::make_small_unsigned(line);
+          let line_tuple = tuple2(hp, gen_atoms::LINE, line_term)?;
+          unsafe {
+            let mut lb = ListBuilder::new()?;
+            lb.append(line_tuple, hp)?;
+            lb.make_term()
+          }
+        } else {
+          Term::nil()
+        };
+
         let entry = tuple4(hp, mfa.m, mfa.f, arity_term, info)?;
         // Build list: [entry]
         unsafe {

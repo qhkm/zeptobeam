@@ -28,6 +28,7 @@ erts_internal
 
 #--- F
 false
+file
 function_clause
 
 #--- H
@@ -42,6 +43,7 @@ kill
 killed
 
 #--- L
+line
 low
 
 #--- N

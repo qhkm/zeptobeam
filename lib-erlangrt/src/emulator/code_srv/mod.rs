@@ -4,6 +4,7 @@
 use crate::{
   beam::loader,
   command_line_args::ErlStartArgs,
+  defs::Word,
   emulator::{
     atom,
     code::{pointer::VersionedCodePtr, CodePtr},
@@ -190,6 +191,26 @@ impl CodeServer {
         return lresult;
       }
       // nope, keep searching
+    }
+    None
+  }
+
+  /// Given a code address, find the module, MFA, and line number.
+  pub fn code_reverse_lookup_with_line(
+    &self,
+    ip: CodePtr,
+  ) -> Option<(ModFunArity, usize)> {
+    for val in self.mods.values() {
+      let modp = &val.curr_modp;
+      if let Some(mfa) = modp.code_reverse_lookup(ip) {
+        // Calculate offset within module's code
+        let code_begin = modp.code.as_ptr();
+        let ip_ptr = ip.get_pointer();
+        let offset =
+          (ip_ptr as usize - code_begin as usize) / std::mem::size_of::<Word>();
+        let line = modp.lookup_line(offset);
+        return Some((mfa, line));
+      }
     }
     None
   }

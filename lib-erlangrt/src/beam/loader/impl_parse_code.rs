@@ -135,28 +135,11 @@ impl LoaderState {
           }
         }
 
-        // Record mapping from current code offset to line number
-        gen_op::OPCODE_LINE => {
-          if let Some(arg) = next_instr.args.get(0) {
-            if arg.is_small() {
-              let line_num = arg.get_small_unsigned();
-              let offset = self.code.len();
-              self.line_table.push((offset, line_num));
-            }
-          }
-        }
-
-        // executable_line and debug_line: also record line info
-        gen_op::OPCODE_EXECUTABLE_LINE => {
-          if let Some(arg) = next_instr.args.get(0) {
-            if arg.is_small() {
-              let line_num = arg.get_small_unsigned();
-              let offset = self.code.len();
-              self.line_table.push((offset, line_num));
-            }
-          }
-        }
-        gen_op::OPCODE_DEBUG_LINE => {
+        // Record mapping from current code offset to line number.
+        // All three line-type opcodes carry the same payload and are handled identically.
+        gen_op::OPCODE_LINE
+        | gen_op::OPCODE_EXECUTABLE_LINE
+        | gen_op::OPCODE_DEBUG_LINE => {
           if let Some(arg) = next_instr.args.get(0) {
             if arg.is_small() {
               let line_num = arg.get_small_unsigned();
