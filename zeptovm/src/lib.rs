@@ -2,6 +2,7 @@ pub mod behavior;
 pub mod control;
 pub mod core;
 pub mod durability;
+pub mod effects;
 pub mod error;
 pub mod kernel;
 pub mod link;
