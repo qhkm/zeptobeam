@@ -37,6 +37,9 @@ pub struct SchedulerEngine {
   outbound_messages: Vec<Envelope>,
   state_patches: Vec<(Pid, Vec<u8>)>,
   rollback_pids: Vec<Pid>,
+  spawn_requests:
+    Vec<Box<dyn crate::core::behavior::StepBehavior>>,
+  budget_debits: Vec<(Pid, u64, u64)>,
   max_reductions: u32,
   completed: Vec<(Pid, Reason)>,
   timer_wheel: TimerWheel,
@@ -55,6 +58,8 @@ impl SchedulerEngine {
       outbound_messages: Vec::new(),
       state_patches: Vec::new(),
       rollback_pids: Vec::new(),
+      spawn_requests: Vec::new(),
+      budget_debits: Vec::new(),
       max_reductions: 200,
       completed: Vec::new(),
       timer_wheel: TimerWheel::new(),
@@ -213,6 +218,17 @@ impl SchedulerEngine {
           }
           TurnIntent::Demonitor(mref) => {
             self.link_table.demonitor(mref);
+          }
+          TurnIntent::SpawnProcess(behavior) => {
+            self.spawn_requests.push(behavior);
+          }
+          TurnIntent::DebitBudget {
+            tokens,
+            cost_microdollars,
+          } => {
+            self
+              .budget_debits
+              .push((pid, tokens, cost_microdollars));
           }
         }
       }
@@ -389,6 +405,22 @@ impl SchedulerEngine {
     &mut self,
   ) -> Vec<Pid> {
     std::mem::take(&mut self.rollback_pids)
+  }
+
+  /// Take spawn requests emitted by behaviors during
+  /// this tick.
+  pub fn take_spawn_requests(
+    &mut self,
+  ) -> Vec<Box<dyn crate::core::behavior::StepBehavior>>
+  {
+    std::mem::take(&mut self.spawn_requests)
+  }
+
+  /// Take budget debit requests from this tick.
+  pub fn take_budget_debits(
+    &mut self,
+  ) -> Vec<(Pid, u64, u64)> {
+    std::mem::take(&mut self.budget_debits)
   }
 
   /// Kill a process.
@@ -985,5 +1017,38 @@ mod tests {
     assert_eq!(patches.len(), 1);
     assert_eq!(patches[0].0, pid);
     assert_eq!(patches[0].1, b"new-state");
+  }
+
+  #[test]
+  fn test_scheduler_spawn_process_intent() {
+    let mut engine = SchedulerEngine::new();
+
+    struct Spawner;
+    impl StepBehavior for Spawner {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        ctx: &mut TurnContext,
+      ) -> StepResult {
+        ctx.spawn(Box::new(Echo));
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _: &Reason) {}
+    }
+
+    let parent =
+      engine.spawn(Box::new(Spawner));
+    engine
+      .send(Envelope::text(parent, "spawn-child"));
+    engine.tick();
+
+    let spawns = engine.take_spawn_requests();
+    assert_eq!(spawns.len(), 1);
   }
 }

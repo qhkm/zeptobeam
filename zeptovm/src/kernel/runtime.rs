@@ -385,6 +385,29 @@ impl SchedulerRuntime {
       }
     }
 
+    // 9. Process spawn requests
+    let spawn_requests =
+      self.engine.take_spawn_requests();
+    for behavior in spawn_requests {
+      self.spawn(behavior);
+    }
+
+    // 10. Apply budget debits
+    let debits = self.engine.take_budget_debits();
+    for (_pid, tokens, cost_microdollars) in debits {
+      if self.budget.token_remaining >= tokens {
+        self.budget.token_remaining -= tokens;
+      } else {
+        self.budget.token_remaining = 0;
+      }
+      let cost_dollars =
+        cost_microdollars as f64 / 1_000_000.0;
+      self.budget.usd_remaining -= cost_dollars;
+      if self.budget.usd_remaining < 0.0 {
+        self.budget.usd_remaining = 0.0;
+      }
+    }
+
     stepped
   }
 

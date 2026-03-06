@@ -29,7 +29,7 @@ pub enum TurnIntent {
   SpawnProcess(
     Box<dyn crate::core::behavior::StepBehavior>,
   ),
-  // Phase 2: DebitBudget
+  DebitBudget { tokens: u64, cost_microdollars: u64 },
 }
 
 impl std::fmt::Debug for TurnIntent {
@@ -73,6 +73,14 @@ impl std::fmt::Debug for TurnIntent {
       TurnIntent::SpawnProcess(_) => {
         write!(f, "SpawnProcess(...)")
       }
+      TurnIntent::DebitBudget {
+        tokens,
+        cost_microdollars,
+      } => f
+        .debug_struct("DebitBudget")
+        .field("tokens", tokens)
+        .field("cost_microdollars", cost_microdollars)
+        .finish(),
     }
   }
 }
@@ -155,6 +163,18 @@ impl TurnContext {
   /// Remove a monitor.
   pub fn demonitor(&mut self, mref: crate::link::MonitorRef) {
     self.intents.push(TurnIntent::Demonitor(mref));
+  }
+
+  /// Debit tokens and cost from the runtime budget.
+  pub fn debit_budget(
+    &mut self,
+    tokens: u64,
+    cost_microdollars: u64,
+  ) {
+    self.intents.push(TurnIntent::DebitBudget {
+      tokens,
+      cost_microdollars,
+    });
   }
 
   /// Spawn a new child process with the given behavior.
