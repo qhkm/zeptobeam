@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::{
   behavior::Behavior,
+  durability::checkpoint::CheckpointStore,
   error::{Action, ProcessInfo, ProcessStatus, Reason, SystemMsg},
   mailbox::{create_mailbox, ProcessHandle, ProcessMailbox},
   pid::Pid,
@@ -19,12 +21,21 @@ pub fn spawn_process(
   mut behavior: impl Behavior,
   user_mailbox_capacity: usize,
   checkpoint: Option<Vec<u8>>,
+  checkpoint_store: Option<Arc<dyn CheckpointStore>>,
 ) -> (Pid, ProcessHandle, JoinHandle<ProcessExit>) {
   let pid = Pid::new();
   let (handle, mailbox) = create_mailbox(user_mailbox_capacity, 32);
   let kill_token = handle.kill_token.clone();
   let join = tokio::spawn(async move {
-    run_process(pid, &mut behavior, mailbox, kill_token, checkpoint).await
+    run_process(
+      pid,
+      &mut behavior,
+      mailbox,
+      kill_token,
+      checkpoint,
+      checkpoint_store,
+    )
+    .await
   });
   (pid, handle, join)
 }
@@ -34,12 +45,21 @@ pub fn spawn_process_boxed(
   mut behavior: Box<dyn Behavior>,
   user_mailbox_capacity: usize,
   checkpoint: Option<Vec<u8>>,
+  checkpoint_store: Option<Arc<dyn CheckpointStore>>,
 ) -> (Pid, ProcessHandle, JoinHandle<ProcessExit>) {
   let pid = Pid::new();
   let (handle, mailbox) = create_mailbox(user_mailbox_capacity, 32);
   let kill_token = handle.kill_token.clone();
   let join = tokio::spawn(async move {
-    run_process(pid, behavior.as_mut(), mailbox, kill_token, checkpoint).await
+    run_process(
+      pid,
+      behavior.as_mut(),
+      mailbox,
+      kill_token,
+      checkpoint,
+      checkpoint_store,
+    )
+    .await
   });
   (pid, handle, join)
 }
@@ -50,6 +70,7 @@ async fn run_process(
   mut mailbox: ProcessMailbox,
   kill_token: tokio_util::sync::CancellationToken,
   checkpoint: Option<Vec<u8>>,
+  checkpoint_store: Option<Arc<dyn CheckpointStore>>,
 ) -> ProcessExit {
   if let Err(e) = behavior.init(checkpoint).await {
     warn!(pid = %pid, error = %e, "process init failed");
@@ -112,13 +133,33 @@ async fn run_process(
       msg = mailbox.user_rx.recv(), if !suspended && !user_closed => {
         match msg {
           Some(m) => match behavior.handle(m).await {
-            Action::Continue => {}
+            Action::Continue => {
+              if let Some(ref store) = checkpoint_store {
+                if behavior.should_checkpoint() {
+                  if let Some(data) = behavior.checkpoint() {
+                    let encoded =
+                      crate::durability::recovery::encode_checkpoint(0, &data);
+                    if let Err(e) = store.save(pid, &encoded).await {
+                      warn!(pid = %pid, error = %e, "checkpoint save failed");
+                    }
+                  }
+                }
+              }
+            }
             Action::Stop(reason) => {
               exit_reason = reason;
               break;
             }
             Action::Checkpoint => {
-              // Checkpoint support added in v2
+              if let Some(ref store) = checkpoint_store {
+                if let Some(data) = behavior.checkpoint() {
+                  let encoded =
+                    crate::durability::recovery::encode_checkpoint(0, &data);
+                  if let Err(e) = store.save(pid, &encoded).await {
+                    warn!(pid = %pid, error = %e, "checkpoint save failed");
+                  }
+                }
+              }
             }
           },
           None => {
@@ -148,7 +189,7 @@ mod tests {
   use super::*;
   use crate::{
     behavior::Behavior,
-    error::{Action, Message, Reason},
+    error::{Action, Message, Reason, UserPayload},
   };
   use async_trait::async_trait;
   use std::sync::{
@@ -181,7 +222,7 @@ mod tests {
     let behavior = CountBehavior {
       count: count.clone(),
     };
-    let (_pid, handle, join) = spawn_process(behavior, 16, None);
+    let (_pid, handle, join) = spawn_process(behavior, 16, None, None);
 
     handle.send_user(Message::text("a")).await.unwrap();
     handle.send_user(Message::text("b")).await.unwrap();
@@ -201,7 +242,7 @@ mod tests {
     let behavior = CountBehavior {
       count: count.clone(),
     };
-    let (_pid, handle, join) = spawn_process(behavior, 16, None);
+    let (_pid, handle, join) = spawn_process(behavior, 16, None, None);
 
     handle.kill();
     let exit = join.await.unwrap();
@@ -227,7 +268,7 @@ mod tests {
   #[tokio::test]
   async fn test_process_stops_on_action_stop() {
     let behavior = StopAfterOneBehavior;
-    let (_pid, handle, join) = spawn_process(behavior, 16, None);
+    let (_pid, handle, join) = spawn_process(behavior, 16, None, None);
 
     handle.send_user(Message::text("bye")).await.unwrap();
     let exit = join.await.unwrap();
@@ -240,9 +281,127 @@ mod tests {
     let behavior = CountBehavior {
       count: count.clone(),
     };
-    let (_pid, handle, join) = spawn_process(behavior, 16, None);
+    let (_pid, handle, join) = spawn_process(behavior, 16, None, None);
 
     drop(handle);
     let _exit = join.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn test_process_checkpoint_on_action() {
+    use crate::durability::checkpoint::SqliteCheckpointStore;
+    use crate::durability::recovery::decode_checkpoint;
+
+    struct CheckpointBehavior {
+      state: String,
+    }
+
+    #[async_trait]
+    impl Behavior for CheckpointBehavior {
+      async fn init(
+        &mut self,
+        cp: Option<Vec<u8>>,
+      ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(data) = cp {
+          self.state = String::from_utf8(data).unwrap();
+        }
+        Ok(())
+      }
+      async fn handle(&mut self, msg: Message) -> Action {
+        match msg {
+          Message::User(UserPayload::Text(ref t)) if t == "checkpoint" => {
+            self.state = "checkpointed".into();
+            Action::Checkpoint
+          }
+          Message::User(UserPayload::Text(ref t)) if t == "stop" => {
+            Action::Stop(Reason::Normal)
+          }
+          _ => Action::Continue,
+        }
+      }
+      async fn terminate(&mut self, _reason: &Reason) {}
+      fn checkpoint(&self) -> Option<Vec<u8>> {
+        Some(self.state.as_bytes().to_vec())
+      }
+    }
+
+    let store =
+      Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
+    let behavior = CheckpointBehavior {
+      state: "initial".into(),
+    };
+    let (pid, handle, join) =
+      spawn_process(behavior, 16, None, Some(store.clone()));
+
+    // Send checkpoint message
+    handle
+      .send_user(Message::text("checkpoint"))
+      .await
+      .unwrap();
+    // Give time to process
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Verify checkpoint was saved
+    let saved = store.load(pid).await.unwrap().unwrap();
+    let (seq, state) = decode_checkpoint(&saved).unwrap();
+    assert_eq!(seq, 0);
+    assert_eq!(state, b"checkpointed");
+
+    // Stop the process
+    handle.send_user(Message::text("stop")).await.unwrap();
+    let exit = join.await.unwrap();
+    assert!(matches!(exit.reason, Reason::Normal));
+  }
+
+  #[tokio::test]
+  async fn test_process_should_checkpoint_auto() {
+    use crate::durability::checkpoint::SqliteCheckpointStore;
+
+    struct AutoCheckpointBehavior {
+      msg_count: u32,
+    }
+
+    #[async_trait]
+    impl Behavior for AutoCheckpointBehavior {
+      async fn init(
+        &mut self,
+        _cp: Option<Vec<u8>>,
+      ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+      }
+      async fn handle(&mut self, _msg: Message) -> Action {
+        self.msg_count += 1;
+        Action::Continue
+      }
+      async fn terminate(&mut self, _reason: &Reason) {}
+      fn should_checkpoint(&self) -> bool {
+        self.msg_count % 3 == 0 // checkpoint every 3 messages
+      }
+      fn checkpoint(&self) -> Option<Vec<u8>> {
+        Some(self.msg_count.to_be_bytes().to_vec())
+      }
+    }
+
+    let store =
+      Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
+    let behavior = AutoCheckpointBehavior { msg_count: 0 };
+    let (pid, handle, join) =
+      spawn_process(behavior, 16, None, Some(store.clone()));
+
+    // Send 4 messages — checkpoint should trigger after msg 3
+    for i in 0..4 {
+      handle
+        .send_user(Message::text(format!("msg-{i}")))
+        .await
+        .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Verify checkpoint exists (saved after 3rd message)
+    let saved = store.load(pid).await.unwrap();
+    assert!(saved.is_some());
+
+    handle.kill();
+    let _ = join.await;
   }
 }
