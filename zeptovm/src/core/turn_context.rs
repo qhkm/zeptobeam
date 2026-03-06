@@ -20,8 +20,9 @@ pub enum TurnIntent {
   SendMessage(Envelope),
   RequestEffect(EffectRequest),
   PatchState(Vec<u8>),
-  // Phase 2: SpawnProcess, Link, Monitor, ScheduleTimer,
-  // DebitBudget
+  ScheduleTimer(crate::core::timer::TimerSpec),
+  CancelTimer(crate::core::timer::TimerId),
+  // Phase 2: SpawnProcess, Link, Monitor, DebitBudget
 }
 
 /// Context passed to behavior.handle(). Handlers emit intents
@@ -59,6 +60,22 @@ impl TurnContext {
   /// Patch process state (serialized blob).
   pub fn set_state(&mut self, state: Vec<u8>) {
     self.intents.push(TurnIntent::PatchState(state));
+  }
+
+  /// Schedule a timer (fires as a signal later).
+  pub fn schedule_timer(
+    &mut self,
+    spec: crate::core::timer::TimerSpec,
+  ) {
+    self.intents.push(TurnIntent::ScheduleTimer(spec));
+  }
+
+  /// Cancel a previously scheduled timer.
+  pub fn cancel_timer(
+    &mut self,
+    id: crate::core::timer::TimerId,
+  ) {
+    self.intents.push(TurnIntent::CancelTimer(id));
   }
 
   /// Take all collected intents (consumed by turn executor).

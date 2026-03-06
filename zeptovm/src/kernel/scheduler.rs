@@ -174,6 +174,12 @@ impl SchedulerEngine {
           TurnIntent::PatchState(_data) => {
             // Phase 2: persist state patch
           }
+          TurnIntent::ScheduleTimer(_spec) => {
+            // Phase 2: wire into timer wheel
+          }
+          TurnIntent::CancelTimer(_id) => {
+            // Phase 2: wire into timer wheel
+          }
         }
       }
 
