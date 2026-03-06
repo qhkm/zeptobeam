@@ -32,6 +32,8 @@ pub struct ProcessEntry {
   pub pid: Pid,
   pub state: ProcessRuntimeState,
   pub mailbox: MultiLaneMailbox,
+  pub parent: Option<Pid>,
+  pub trap_exit: bool,
   behavior: Box<dyn StepBehavior>,
   reductions: u32,
   kill_requested: bool,
@@ -44,6 +46,8 @@ impl ProcessEntry {
       pid,
       state: ProcessRuntimeState::Ready,
       mailbox: MultiLaneMailbox::new(),
+      parent: None,
+      trap_exit: false,
       behavior,
       reductions: 0,
       kill_requested: false,
@@ -54,6 +58,10 @@ impl ProcessEntry {
   /// Initialize the process.
   pub fn init(&mut self, checkpoint: Option<Vec<u8>>) -> StepResult {
     self.behavior.init(checkpoint)
+  }
+
+  pub fn set_trap_exit(&mut self, trap: bool) {
+    self.trap_exit = trap;
   }
 
   /// Step the process once with panic isolation.
@@ -71,12 +79,45 @@ impl ProcessEntry {
     match self.mailbox.pop() {
       Some(env) => {
         // Check for control signals that the runtime handles
+        // directly. Signals not matched here fall through to
+        // behavior.handle() (e.g. ChildExited, TimerFired,
+        // MonitorDown, trapping ExitLinked).
         if let EnvelopePayload::Signal(ref sig) = env.payload {
-          return (self.handle_signal(sig), ctx);
+          match sig {
+            Signal::Kill => {
+              self.state = ProcessRuntimeState::Done;
+              return (StepResult::Done(Reason::Kill), ctx);
+            }
+            Signal::Shutdown => {
+              self.state = ProcessRuntimeState::Done;
+              return (StepResult::Done(Reason::Shutdown), ctx);
+            }
+            Signal::Suspend => {
+              self.state = ProcessRuntimeState::Suspended;
+              return (StepResult::Wait, ctx);
+            }
+            Signal::Resume => {
+              return (StepResult::Continue, ctx);
+            }
+            Signal::ExitLinked(_, reason)
+              if !self.trap_exit && reason.is_abnormal() =>
+            {
+              self.state = ProcessRuntimeState::Done;
+              return (StepResult::Done(reason.clone()), ctx);
+            }
+            Signal::ExitLinked(_, _) if !self.trap_exit => {
+              // Normal exit from linked process, not trapping
+              return (StepResult::Continue, ctx);
+            }
+            // All other signals (ChildExited, TimerFired,
+            // MonitorDown, trapping ExitLinked) fall through
+            // to behavior.handle()
+            _ => {}
+          }
         }
 
-        // User/effect messages go to behavior.handle() with
-        // catch_unwind
+        // User/effect messages and fall-through signals go to
+        // behavior.handle() with catch_unwind
         self.reductions += 1;
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
           self.behavior.handle(env, &mut ctx)
@@ -102,37 +143,6 @@ impl ProcessEntry {
         }
       }
       None => (StepResult::Wait, ctx),
-    }
-  }
-
-  fn handle_signal(&mut self, signal: &Signal) -> StepResult {
-    match signal {
-      Signal::Kill => {
-        self.state = ProcessRuntimeState::Done;
-        StepResult::Done(Reason::Kill)
-      }
-      Signal::Shutdown => {
-        self.state = ProcessRuntimeState::Done;
-        StepResult::Done(Reason::Shutdown)
-      }
-      Signal::ExitLinked(_from, reason) => {
-        if reason.is_abnormal() {
-          self.state = ProcessRuntimeState::Done;
-          StepResult::Done(reason.clone())
-        } else {
-          // Normal exit from linked process -- ignore
-          StepResult::Continue
-        }
-      }
-      Signal::MonitorDown(_, _) => {
-        // Could deliver to behavior, for now just continue
-        StepResult::Continue
-      }
-      Signal::Suspend => {
-        self.state = ProcessRuntimeState::Suspended;
-        StepResult::Wait
-      }
-      Signal::Resume => StepResult::Continue,
     }
   }
 
@@ -387,5 +397,31 @@ mod tests {
     assert_eq!(p.reductions(), 5);
     assert_eq!(p.take_reductions(), 5);
     assert_eq!(p.reductions(), 0);
+  }
+
+  #[test]
+  fn test_process_with_parent() {
+    let pid = Pid::new();
+    let mut p = ProcessEntry::new(pid, Box::new(Echo));
+    p.parent = Some(Pid::from_raw(100));
+    assert_eq!(p.parent, Some(Pid::from_raw(100)));
+  }
+
+  #[test]
+  fn test_process_trap_exit_converts_signal() {
+    let pid = Pid::new();
+    let mut p = ProcessEntry::new(pid, Box::new(Echo));
+    p.set_trap_exit(true);
+    p.init(None);
+    let other = Pid::new();
+    p.mailbox.push(Envelope::signal(
+      pid,
+      Signal::ExitLinked(other, Reason::Custom("crash".into())),
+    ));
+    let (result, _) = p.step();
+    // trap_exit: signal goes to behavior.handle(), which returns
+    // Continue
+    assert!(matches!(result, StepResult::Continue));
+    assert_ne!(p.state, ProcessRuntimeState::Done);
   }
 }

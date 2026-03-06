@@ -82,6 +82,11 @@ pub enum Signal {
   MonitorDown(Pid, crate::error::Reason),
   Suspend,
   Resume,
+  TimerFired(crate::core::timer::TimerId),
+  ChildExited {
+    child_pid: Pid,
+    reason: crate::error::Reason,
+  },
 }
 
 impl Envelope {
