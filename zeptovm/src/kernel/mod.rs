@@ -1,6 +1,7 @@
 pub mod compensation;
 pub mod mailbox;
 pub mod metrics;
+pub mod name_registry;
 pub mod process_table;
 pub mod reactor;
 pub mod recovery;
