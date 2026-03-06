@@ -17,6 +17,7 @@ use crate::{
     journal::Journal,
     snapshot::SnapshotStore,
   },
+  effects::config::ProviderConfig,
   error::Reason,
   kernel::{
     compensation::{CompensationEntry, CompensationLog},
@@ -63,6 +64,7 @@ pub struct SchedulerRuntime {
   pending_compensations:
     HashMap<u64, (Pid, CompensationSpec)>,
   idempotency_store: Option<IdempotencyStore>,
+  provider_config: Option<ProviderConfig>,
   budget: BudgetState,
   budget_gate: Option<BudgetGate>,
   budget_violations: Vec<BudgetViolation>,
@@ -80,6 +82,7 @@ impl SchedulerRuntime {
       compensation_log: CompensationLog::new(),
       pending_compensations: HashMap::new(),
       idempotency_store: None,
+      provider_config: None,
       budget: BudgetState::default(),
       budget_gate: None,
       budget_violations: Vec::new(),
@@ -106,12 +109,32 @@ impl SchedulerRuntime {
       idempotency_store: Some(
         IdempotencyStore::open_in_memory().unwrap(),
       ),
+      provider_config: None,
       budget: BudgetState::default(),
       budget_gate: None,
       budget_violations: Vec::new(),
       budget_enabled: false,
       metrics: Metrics::new(),
     }
+  }
+
+  /// Configure provider credentials for LLM/HTTP effects.
+  ///
+  /// If a reactor already exists it is restarted with the
+  /// new provider config so that real API keys take effect.
+  pub fn with_provider_config(
+    mut self,
+    config: ProviderConfig,
+  ) -> Self {
+    if self.reactor.is_some() {
+      self.reactor = Some(
+        Reactor::start_with_config(
+          Some(config.clone()),
+        ),
+      );
+    }
+    self.provider_config = Some(config);
+    self
   }
 
   /// Enable budget checking with custom limits.
@@ -1313,5 +1336,18 @@ mod tests {
     assert!(
       (rt.budget().usd_remaining - 9.5).abs() < 0.01
     );
+  }
+
+  #[test]
+  fn test_runtime_with_provider_config() {
+    use crate::effects::config::ProviderConfig;
+    let config = ProviderConfig {
+      openai_api_key: Some("sk-test".into()),
+      ..Default::default()
+    };
+    let rt = SchedulerRuntime::with_durability()
+      .with_provider_config(config);
+    assert!(rt.provider_config.is_some());
+    assert!(rt.has_reactor());
   }
 }
