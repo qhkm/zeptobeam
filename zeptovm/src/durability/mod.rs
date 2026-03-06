@@ -2,6 +2,7 @@ pub mod checkpoint;
 pub mod journal;
 pub mod recovery;
 pub mod snapshot;
+pub mod timer_store;
 pub mod wal;
 
 pub use checkpoint::{CheckpointStore, SqliteCheckpointStore};
