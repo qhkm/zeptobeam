@@ -5,7 +5,7 @@ use std::{
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Pid(u64);
 
 impl Pid {
