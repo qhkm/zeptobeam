@@ -1,19 +1,25 @@
 //! v2 Gate Test: durability — checkpoint recovery and WAL replay.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+  sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+  },
+  time::Duration,
+};
 
 use async_trait::async_trait;
-use zeptovm::behavior::Behavior;
-use zeptovm::durability::checkpoint::{CheckpointStore, SqliteCheckpointStore};
-use zeptovm::durability::recovery::{
-  build_recovery_plan, decode_checkpoint, encode_checkpoint,
+use zeptovm::{
+  behavior::Behavior,
+  durability::{
+    checkpoint::{CheckpointStore, SqliteCheckpointStore},
+    recovery::{build_recovery_plan, decode_checkpoint, encode_checkpoint},
+    wal::{SqliteWalStore, WalEntry},
+  },
+  error::{Action, Message, Reason, UserPayload},
+  pid::Pid,
+  process::spawn_process,
 };
-use zeptovm::durability::wal::{SqliteWalStore, WalEntry};
-use zeptovm::error::{Action, Message, Reason, UserPayload};
-use zeptovm::pid::Pid;
-use zeptovm::process::spawn_process;
 
 // ---------------------------------------------------------------------------
 // Test 1: checkpoint save and recover
@@ -36,8 +42,7 @@ impl Behavior for CounterBehavior {
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(data) = checkpoint {
       if data.len() >= 4 {
-        self.counter =
-          u32::from_be_bytes(data[..4].try_into().unwrap());
+        self.counter = u32::from_be_bytes(data[..4].try_into().unwrap());
         self.observable.store(self.counter, Ordering::SeqCst);
       }
     }
@@ -63,8 +68,7 @@ impl Behavior for CounterBehavior {
 
 #[tokio::test]
 async fn gate_v2_checkpoint_save_and_recover() {
-  let store =
-    Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
+  let store = Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
   let observable = Arc::new(AtomicU32::new(0));
 
   // --- Phase 1: spawn, send 5 messages, kill ---
@@ -72,8 +76,7 @@ async fn gate_v2_checkpoint_save_and_recover() {
     counter: 0,
     observable: observable.clone(),
   };
-  let (pid1, handle1, join1) =
-    spawn_process(behavior, 16, None, Some(store.clone()));
+  let (pid1, handle1, join1) = spawn_process(behavior, 16, None, Some(store.clone()));
 
   for _ in 0..5 {
     handle1.send_user(Message::text("inc")).await.unwrap();
@@ -92,17 +95,15 @@ async fn gate_v2_checkpoint_save_and_recover() {
   assert!(matches!(exit1.reason, Reason::Kill));
 
   // --- Verify checkpoint was persisted ---
-  let saved = store.load(pid1).await.unwrap().expect(
-    "checkpoint should exist after processing 5 messages",
-  );
+  let saved = store
+    .load(pid1)
+    .await
+    .unwrap()
+    .expect("checkpoint should exist after processing 5 messages");
   let (seq, state_bytes) = decode_checkpoint(&saved).unwrap();
   assert_eq!(seq, 0, "process loop encodes wal_seq as 0");
-  let stored_counter =
-    u32::from_be_bytes(state_bytes[..4].try_into().unwrap());
-  assert_eq!(
-    stored_counter, 5,
-    "checkpoint should reflect counter = 5"
-  );
+  let stored_counter = u32::from_be_bytes(state_bytes[..4].try_into().unwrap());
+  assert_eq!(stored_counter, 5, "checkpoint should reflect counter = 5");
 
   // --- Phase 2: recover into a new process ---
   let observable2 = Arc::new(AtomicU32::new(0));
@@ -174,10 +175,9 @@ async fn gate_v2_recovery_plan_with_wal_replay() {
   }
 
   // Build recovery plan
-  let plan =
-    build_recovery_plan(pid, &cp_store, &wal_store)
-      .await
-      .unwrap();
+  let plan = build_recovery_plan(pid, &cp_store, &wal_store)
+    .await
+    .unwrap();
 
   // Verify checkpoint state is present (header stripped)
   assert_eq!(
@@ -192,8 +192,7 @@ async fn gate_v2_recovery_plan_with_wal_replay() {
     4,
     "should replay 4 entries after checkpoint seq 3"
   );
-  let replay_seqs: Vec<u64> =
-    plan.replay_entries.iter().map(|e| e.wal_seq).collect();
+  let replay_seqs: Vec<u64> = plan.replay_entries.iter().map(|e| e.wal_seq).collect();
   assert_eq!(replay_seqs, vec![4, 5, 6, 7]);
 
   // Verify metrics
@@ -258,10 +257,8 @@ impl Behavior for JournalBehavior {
 
 #[tokio::test]
 async fn gate_v2_full_lifecycle_checkpoint_kill_recover() {
-  let store =
-    Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
-  let observable1 =
-    Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+  let store = Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
+  let observable1 = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
 
   // --- Phase 1: send a, b, c, d, e ---
   let behavior1 = JournalBehavior {
@@ -269,8 +266,7 @@ async fn gate_v2_full_lifecycle_checkpoint_kill_recover() {
     msg_count: 0,
     observable: observable1.clone(),
   };
-  let (pid1, handle1, join1) =
-    spawn_process(behavior1, 16, None, Some(store.clone()));
+  let (pid1, handle1, join1) = spawn_process(behavior1, 16, None, Some(store.clone()));
 
   for label in &["a", "b", "c", "d", "e"] {
     handle1.send_user(Message::text(*label)).await.unwrap();
@@ -298,8 +294,7 @@ async fn gate_v2_full_lifecycle_checkpoint_kill_recover() {
     .unwrap()
     .expect("checkpoint should exist");
   let (_seq, state_bytes) = decode_checkpoint(&saved).unwrap();
-  let checkpoint_msgs: Vec<String> =
-    serde_json::from_slice(state_bytes).unwrap();
+  let checkpoint_msgs: Vec<String> = serde_json::from_slice(state_bytes).unwrap();
 
   // should_checkpoint fires at msg_count 3 (after "c") and possibly
   // again at msg_count 6 if we sent that many. With 5 messages the
@@ -316,8 +311,7 @@ async fn gate_v2_full_lifecycle_checkpoint_kill_recover() {
   );
 
   // --- Phase 2: recover and continue ---
-  let observable2 =
-    Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+  let observable2 = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
   let behavior2 = JournalBehavior {
     messages: Vec::new(),
     msg_count: 0,

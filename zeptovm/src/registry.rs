@@ -30,7 +30,8 @@ impl ProcessRegistry {
     user_mailbox_capacity: usize,
     checkpoint: Option<Vec<u8>>,
   ) -> (Pid, JoinHandle<ProcessExit>) {
-    let (pid, handle, join) = spawn_process(behavior, user_mailbox_capacity, checkpoint, None);
+    let (pid, handle, join) =
+      spawn_process(behavior, user_mailbox_capacity, checkpoint, None);
     self.handles.insert(pid, handle);
     (pid, join)
   }
@@ -112,8 +113,8 @@ impl ProcessRegistry {
 
     for (_mref, watcher_pid) in monitors {
       if let Some(handle) = self.handles.get(&watcher_pid) {
-        let _ =
-          handle.try_send_control(SystemMsg::MonitorDown(*pid, propagated_reason.clone()));
+        let _ = handle
+          .try_send_control(SystemMsg::MonitorDown(*pid, propagated_reason.clone()));
       }
     }
   }

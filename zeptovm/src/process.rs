@@ -289,8 +289,9 @@ mod tests {
 
   #[tokio::test]
   async fn test_process_checkpoint_on_action() {
-    use crate::durability::checkpoint::SqliteCheckpointStore;
-    use crate::durability::recovery::decode_checkpoint;
+    use crate::durability::{
+      checkpoint::SqliteCheckpointStore, recovery::decode_checkpoint,
+    };
 
     struct CheckpointBehavior {
       state: String,
@@ -325,19 +326,14 @@ mod tests {
       }
     }
 
-    let store =
-      Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
+    let store = Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
     let behavior = CheckpointBehavior {
       state: "initial".into(),
     };
-    let (pid, handle, join) =
-      spawn_process(behavior, 16, None, Some(store.clone()));
+    let (pid, handle, join) = spawn_process(behavior, 16, None, Some(store.clone()));
 
     // Send checkpoint message
-    handle
-      .send_user(Message::text("checkpoint"))
-      .await
-      .unwrap();
+    handle.send_user(Message::text("checkpoint")).await.unwrap();
     // Give time to process
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -382,11 +378,9 @@ mod tests {
       }
     }
 
-    let store =
-      Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
+    let store = Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
     let behavior = AutoCheckpointBehavior { msg_count: 0 };
-    let (pid, handle, join) =
-      spawn_process(behavior, 16, None, Some(store.clone()));
+    let (pid, handle, join) = spawn_process(behavior, 16, None, Some(store.clone()));
 
     // Send 4 messages — checkpoint should trigger after msg 3
     for i in 0..4 {
