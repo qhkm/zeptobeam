@@ -1,3 +1,5 @@
+use tracing::info_span;
+
 use crate::{
   core::effect::EffectRequest,
   core::message::Envelope,
@@ -56,7 +58,17 @@ impl TurnExecutor {
   ///
   /// Returns Ok(()) if the commit succeeded, Err if it failed
   /// (turn should be retried or aborted).
-  pub fn commit(&mut self, turn: &TurnCommit) -> Result<(), String> {
+  pub fn commit(
+    &mut self,
+    turn: &TurnCommit,
+  ) -> Result<(), String> {
+    let _span = info_span!(
+      "turn_commit",
+      pid = turn.pid.raw(),
+      turn_id = turn.turn_id,
+      intents = turn.journal_entries.len(),
+    )
+    .entered();
     // Build journal entries
     let mut entries = Vec::new();
 
