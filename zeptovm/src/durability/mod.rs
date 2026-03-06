@@ -1,4 +1,5 @@
 pub mod checkpoint;
+pub mod idempotency;
 pub mod journal;
 pub mod recovery;
 pub mod snapshot;
