@@ -4,7 +4,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use tracing::{info_span, Instrument};
 
 use crate::core::effect::{
-  EffectKind, EffectRequest, EffectResult,
+  EffectKind, EffectRequest, EffectResult, EffectStatus,
 };
 use crate::pid::Pid;
 
@@ -69,8 +69,10 @@ impl Reactor {
               tokio::spawn(
                 async move {
                   let result =
-                    execute_effect(&dispatch.request)
-                      .await;
+                    execute_effect_with_retry(
+                      &dispatch.request,
+                    )
+                    .await;
                   let _ = tx.send(EffectCompletion {
                     pid: dispatch.pid,
                     result,
@@ -118,9 +120,59 @@ impl Reactor {
   }
 }
 
+/// Execute an effect with retry logic based on the request's
+/// RetryPolicy.
+async fn execute_effect_with_retry(
+  request: &EffectRequest,
+) -> EffectResult {
+  let max_attempts = request.retry.max_attempts.max(1);
+  let mut last_error = String::new();
+
+  for attempt in 0..max_attempts {
+    let result = execute_effect_once(request).await;
+
+    match result.status {
+      EffectStatus::Succeeded => return result,
+      EffectStatus::Failed => {
+        last_error =
+          result.error.clone().unwrap_or_default();
+
+        // Check retry_on filter
+        if !request.retry.retry_on.is_empty()
+          && !request
+            .retry
+            .retry_on
+            .iter()
+            .any(|cat| last_error.contains(cat))
+        {
+          return result; // Error category not retryable
+        }
+
+        if attempt + 1 < max_attempts {
+          let delay =
+            request.retry.backoff.delay_ms(attempt);
+          if delay > 0 {
+            tokio::time::sleep(
+              std::time::Duration::from_millis(delay),
+            )
+            .await;
+          }
+        } else {
+          return result; // Final attempt failed
+        }
+      }
+      _ => return result, // TimedOut, Cancelled — don't retry
+    }
+  }
+
+  EffectResult::failure(request.effect_id, last_error)
+}
+
 /// Execute an effect asynchronously. For v1, most effects return
 /// placeholder results.
-async fn execute_effect(request: &EffectRequest) -> EffectResult {
+async fn execute_effect_once(
+  request: &EffectRequest,
+) -> EffectResult {
   match &request.kind {
     EffectKind::SleepUntil => {
       tokio::time::sleep(request.timeout).await;
@@ -293,5 +345,31 @@ mod tests {
       completions[0].result.status,
       EffectStatus::Succeeded
     );
+  }
+
+  #[tokio::test]
+  async fn test_execute_effect_with_retry_succeeds_first_try()
+  {
+    let req = EffectRequest::new(
+      EffectKind::LlmCall,
+      serde_json::json!({}),
+    );
+    let result =
+      execute_effect_with_retry(&req).await;
+    assert_eq!(result.status, EffectStatus::Succeeded);
+  }
+
+  #[test]
+  fn test_reactor_retry_integration() {
+    let reactor = Reactor::start();
+    let pid = Pid::from_raw(1);
+    let req = EffectRequest::new(
+      EffectKind::LlmCall,
+      serde_json::json!({}),
+    );
+    reactor.dispatch(pid, req);
+    std::thread::sleep(Duration::from_millis(100));
+    let completions = reactor.drain_completions();
+    assert_eq!(completions.len(), 1);
   }
 }
