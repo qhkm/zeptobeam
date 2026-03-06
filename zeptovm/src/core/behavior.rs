@@ -3,6 +3,14 @@ use crate::core::step_result::StepResult;
 use crate::core::turn_context::TurnContext;
 use crate::error::Reason;
 
+/// Metadata about a behavior implementation for versioning
+/// and migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BehaviorMeta {
+  pub module: String,
+  pub version: String,
+}
+
 /// Step-based process behavior.
 ///
 /// handle() is synchronous and takes a TurnContext for emitting
@@ -33,6 +41,13 @@ pub trait StepBehavior: Send + 'static {
   /// Opt-in: restore state from a snapshot blob.
   fn restore(&mut self, _state: &[u8]) -> Result<(), String> {
     Ok(())
+  }
+
+  /// Opt-in: return metadata about this behavior (module name,
+  /// version). Recorded in the journal at process spawn for
+  /// future migration support.
+  fn meta(&self) -> Option<BehaviorMeta> {
+    None
   }
 }
 
@@ -155,6 +170,41 @@ mod tests {
     let msg = Envelope::effect_result(pid, result);
     let step = agent.handle(msg, &mut ctx);
     assert!(matches!(step, StepResult::Done(Reason::Normal)));
+  }
+
+  #[test]
+  fn test_behavior_meta_default_none() {
+    let b = EchoStep;
+    assert!(b.meta().is_none());
+  }
+
+  #[test]
+  fn test_behavior_meta_custom() {
+    struct Versioned;
+    impl StepBehavior for Versioned {
+      fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+      fn meta(&self) -> Option<BehaviorMeta> {
+        Some(BehaviorMeta {
+          module: "my_agent".to_string(),
+          version: "1.2.0".to_string(),
+        })
+      }
+    }
+
+    let b = Versioned;
+    let meta = b.meta().unwrap();
+    assert_eq!(meta.module, "my_agent");
+    assert_eq!(meta.version, "1.2.0");
   }
 
   #[test]
