@@ -1,4 +1,5 @@
 pub mod behavior;
+pub mod control;
 pub mod durability;
 pub mod error;
 pub mod link;
