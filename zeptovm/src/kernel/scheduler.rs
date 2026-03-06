@@ -261,6 +261,22 @@ impl SchedulerEngine {
               .budget_debits
               .push((pid, tokens, cost_microdollars));
           }
+          TurnIntent::RegisterName(name) => {
+            let _ = self
+              .name_registry
+              .register(name, pid);
+          }
+          TurnIntent::UnregisterName(name) => {
+            self.name_registry.unregister(&name);
+          }
+          TurnIntent::SendNamed { name, payload } => {
+            if let Some(target) =
+              self.name_registry.whereis(&name)
+            {
+              let env = Envelope::text(target, payload);
+              self.outbound_messages.push(env);
+            }
+          }
         }
       }
 
@@ -1256,5 +1272,43 @@ mod tests {
     let result =
       engine.register_name("ghost".into(), pid);
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_scheduler_register_name_via_intent() {
+    struct Registrar;
+    impl StepBehavior for Registrar {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        ctx: &mut TurnContext,
+      ) -> StepResult {
+        ctx.register_name("my_worker".into());
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _: &Reason) {}
+    }
+
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Registrar));
+
+    // Before handling, name should not exist
+    assert_eq!(engine.whereis("my_worker"), None);
+
+    engine.send(Envelope::text(pid, "register"));
+    engine.tick();
+
+    // After tick, the RegisterName intent should
+    // have been processed
+    assert_eq!(
+      engine.whereis("my_worker"),
+      Some(pid)
+    );
   }
 }

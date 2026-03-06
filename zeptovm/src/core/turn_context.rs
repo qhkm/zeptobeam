@@ -30,6 +30,9 @@ pub enum TurnIntent {
     Box<dyn crate::core::behavior::StepBehavior>,
   ),
   DebitBudget { tokens: u64, cost_microdollars: u64 },
+  RegisterName(String),
+  UnregisterName(String),
+  SendNamed { name: String, payload: String },
 }
 
 impl std::fmt::Debug for TurnIntent {
@@ -80,6 +83,21 @@ impl std::fmt::Debug for TurnIntent {
         .debug_struct("DebitBudget")
         .field("tokens", tokens)
         .field("cost_microdollars", cost_microdollars)
+        .finish(),
+      TurnIntent::RegisterName(name) => {
+        f.debug_tuple("RegisterName")
+          .field(name)
+          .finish()
+      }
+      TurnIntent::UnregisterName(name) => {
+        f.debug_tuple("UnregisterName")
+          .field(name)
+          .finish()
+      }
+      TurnIntent::SendNamed { name, payload } => f
+        .debug_struct("SendNamed")
+        .field("name", name)
+        .field("payload", payload)
         .finish(),
     }
   }
@@ -177,6 +195,28 @@ impl TurnContext {
     });
   }
 
+  /// Register the current process under a name.
+  pub fn register_name(&mut self, name: String) {
+    self.intents.push(TurnIntent::RegisterName(name));
+  }
+
+  /// Unregister a name.
+  pub fn unregister_name(&mut self, name: String) {
+    self.intents.push(TurnIntent::UnregisterName(name));
+  }
+
+  /// Send a text message to a named process.
+  pub fn send_named(
+    &mut self,
+    name: String,
+    text: String,
+  ) {
+    self.intents.push(TurnIntent::SendNamed {
+      name,
+      payload: text,
+    });
+  }
+
   /// Spawn a new child process with the given behavior.
   pub fn spawn(
     &mut self,
@@ -252,5 +292,60 @@ mod tests {
     let a = next_turn_id();
     let b = next_turn_id();
     assert_ne!(a, b);
+  }
+
+  #[test]
+  fn test_turn_context_register_name() {
+    let pid = Pid::from_raw(1);
+    let mut ctx = TurnContext::new(pid);
+    ctx.register_name("my_worker".into());
+    let intents = ctx.take_intents();
+    assert_eq!(intents.len(), 1);
+    match &intents[0] {
+      TurnIntent::RegisterName(name) => {
+        assert_eq!(name, "my_worker");
+      }
+      other => panic!(
+        "expected RegisterName, got {:?}",
+        other
+      ),
+    }
+  }
+
+  #[test]
+  fn test_turn_context_unregister_name() {
+    let pid = Pid::from_raw(1);
+    let mut ctx = TurnContext::new(pid);
+    ctx.unregister_name("my_worker".into());
+    let intents = ctx.take_intents();
+    assert_eq!(intents.len(), 1);
+    match &intents[0] {
+      TurnIntent::UnregisterName(name) => {
+        assert_eq!(name, "my_worker");
+      }
+      other => panic!(
+        "expected UnregisterName, got {:?}",
+        other
+      ),
+    }
+  }
+
+  #[test]
+  fn test_turn_context_send_named() {
+    let pid = Pid::from_raw(1);
+    let mut ctx = TurnContext::new(pid);
+    ctx.send_named("worker".into(), "hello".into());
+    let intents = ctx.take_intents();
+    assert_eq!(intents.len(), 1);
+    match &intents[0] {
+      TurnIntent::SendNamed { name, payload } => {
+        assert_eq!(name, "worker");
+        assert_eq!(payload, "hello");
+      }
+      other => panic!(
+        "expected SendNamed, got {:?}",
+        other
+      ),
+    }
   }
 }
