@@ -32,6 +32,26 @@ impl SnapshotStore {
     Ok(store)
   }
 
+  /// Initialise the snapshot schema on an existing connection.
+  /// Used for shared-connection atomic commit.
+  pub fn init_on_connection(
+    conn: &Connection,
+  ) -> SqlResult<()> {
+    conn.execute_batch(
+      "CREATE TABLE IF NOT EXISTS snapshots (
+                pid INTEGER NOT NULL,
+                version INTEGER NOT NULL,
+                state_blob BLOB NOT NULL,
+                mailbox_cursor INTEGER NOT NULL,
+                pending_effects TEXT,
+                created_at TEXT NOT NULL \
+                  DEFAULT (datetime('now')),
+                PRIMARY KEY (pid, version)
+            );",
+    )?;
+    Ok(())
+  }
+
   fn init_schema(&self) -> SqlResult<()> {
     self.conn.execute_batch(
       "CREATE TABLE IF NOT EXISTS snapshots (

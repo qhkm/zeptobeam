@@ -34,7 +34,7 @@ pub enum JournalEntryType {
 }
 
 impl JournalEntryType {
-  fn as_str(&self) -> &'static str {
+  pub(crate) fn as_str(&self) -> &'static str {
     match self {
       Self::ProcessSpawned => "process_spawned",
       Self::MessageReceived => "message_received",
@@ -64,7 +64,7 @@ impl JournalEntryType {
     }
   }
 
-  fn from_str(s: &str) -> Option<Self> {
+  pub(crate) fn from_str(s: &str) -> Option<Self> {
     match s {
       "process_spawned" => Some(Self::ProcessSpawned),
       "message_received" => Some(Self::MessageReceived),
@@ -140,6 +140,24 @@ impl Journal {
     let journal = Self { conn };
     journal.init_schema()?;
     Ok(journal)
+  }
+
+  /// Initialise the journal schema on an existing connection.
+  /// Used for shared-connection atomic commit.
+  pub fn from_connection(conn: &Connection) -> SqlResult<()> {
+    conn.execute_batch(
+      "CREATE TABLE IF NOT EXISTS journal (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pid INTEGER NOT NULL,
+          entry_type TEXT NOT NULL,
+          payload BLOB,
+          created_at TEXT NOT NULL \
+            DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_journal_pid
+        ON journal(pid);",
+    )?;
+    Ok(())
   }
 
   fn init_schema(&self) -> SqlResult<()> {
