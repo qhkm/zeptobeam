@@ -1,4 +1,6 @@
 mod agent_adapter;
+mod config_loader;
+mod swarm;
 
 use std::{
   sync::{
