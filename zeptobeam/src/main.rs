@@ -594,6 +594,7 @@ async fn run_daemon_v2(
   bind: Option<String>,
 ) {
   use std::sync::Arc;
+  use zeptobeam::config_watcher::{self, ConfigWatcher};
   use zeptobeam::llm_bridge::LlmBridge;
   use zeptobeam::runtime_ops::ZeptovmRuntimeOps;
   use zeptovm::durability::SqliteCheckpointStore as ZeptoCheckpointStore;
@@ -724,16 +725,27 @@ async fn run_daemon_v2(
     None
   };
 
+  // Start config watcher for hot-reload
+  let (watcher_handle, mut config_rx) = config_watcher::spawn_config_watcher(
+    config_path.clone(),
+    Duration::from_secs(5),
+    resolved.config_hash,
+  );
+  info!("config watcher started (poll every 5s)");
+
   info!("waiting for shutdown signal");
 
-  // Wait for shutdown signal (SIGINT / SIGTERM)
-  let shutdown = async {
+  // Create a unified shutdown future that resolves on SIGINT or SIGTERM
+  let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+  tokio::spawn(async move {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
       let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-          .expect("register SIGTERM");
+        tokio::signal::unix::signal(
+          tokio::signal::unix::SignalKind::terminate(),
+        )
+        .expect("register SIGTERM");
       tokio::select! {
         _ = ctrl_c => info!("received SIGINT"),
         _ = sigterm.recv() => info!("received SIGTERM"),
@@ -744,10 +756,95 @@ async fn run_daemon_v2(
       ctrl_c.await.ok();
       info!("received SIGINT");
     }
-  };
-  shutdown.await;
+    let _ = shutdown_tx.send(());
+  });
+
+  // Main loop: handle shutdown signal OR config changes
+  loop {
+    tokio::select! {
+      _ = &mut shutdown_rx => {
+        break;
+      }
+      Some(change) = config_rx.recv() => {
+        let running_names: Vec<String> =
+          handles.iter().map(|(name, _)| name.clone()).collect();
+        let diff =
+          ConfigWatcher::diff_agents(&running_names, &change.new_agents);
+
+        // Remove agents that are no longer in config
+        for name in &diff.to_remove {
+          if let Some(idx) =
+            handles.iter().position(|(n, _)| n == name)
+          {
+            let (removed_name, removed_handle) = handles.remove(idx);
+            removed_handle.kill();
+            info!(agent = %removed_name, "removed agent (config change)");
+            runtime_ops.remove(&removed_name);
+            // Also remove the corresponding join handle
+            if let Some(jidx) =
+              joins.iter().position(|(n, _)| n == name)
+            {
+              let (_, join) = joins.remove(jidx);
+              // Wait briefly for the killed process to exit
+              let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                join,
+              ).await;
+            }
+          }
+        }
+
+        // Add new agents from config
+        for agent_cfg in &diff.to_add {
+          let adapter =
+            agent_adapter::create_agent_adapter_with_bridge(
+              agent_cfg.clone(),
+              llm_bridge.clone(),
+            );
+          let (pid, handle, join) = spawn_process(
+            adapter,
+            64,
+            None,
+            Some(checkpoint_store.clone()),
+            None,
+          );
+          info!(
+            agent = %agent_cfg.name,
+            pid = %pid,
+            "spawned new agent (config change)"
+          );
+          runtime_ops.register(
+            agent_cfg.name.clone(),
+            pid,
+            handle.clone(),
+          );
+          handles.push((agent_cfg.name.clone(), handle));
+          joins.push((agent_cfg.name.clone(), join));
+        }
+
+        // Update process count metric
+        process_count.store(
+          handles.len(),
+          std::sync::atomic::Ordering::Relaxed,
+        );
+
+        if !diff.to_add.is_empty() || !diff.to_remove.is_empty() {
+          info!(
+            added = diff.to_add.len(),
+            removed = diff.to_remove.len(),
+            total = handles.len(),
+            "config reload complete"
+          );
+        }
+      }
+    }
+  }
 
   info!("shutting down gracefully...");
+
+  // Stop config watcher
+  watcher_handle.abort();
+  info!("config watcher stopped");
 
   // Shutdown HTTP server first
   if let Some(s) = server {
