@@ -594,6 +594,7 @@ async fn run_daemon_v2(
   _bind: Option<String>,
 ) {
   use std::sync::Arc;
+  use zeptobeam::llm_bridge::LlmBridge;
   use zeptovm::durability::SqliteCheckpointStore as ZeptoCheckpointStore;
   use zeptovm::process::spawn_process;
 
@@ -632,6 +633,13 @@ async fn run_daemon_v2(
     "resolved agents from config"
   );
 
+  // Create the LLM bridge (crossbeam channels + Tokio worker)
+  let (bridge_handle, bridge_worker) = create_bridge();
+  let bridge_worker_handle =
+    tokio::spawn(async move { bridge_worker.run().await });
+  let llm_bridge = LlmBridge::new(bridge_handle);
+  info!("LLM bridge started");
+
   // Create checkpoint store
   let checkpoint_store = Arc::new(
     ZeptoCheckpointStore::new(&config.checkpoint.path)
@@ -645,7 +653,10 @@ async fn run_daemon_v2(
 
   for agent_cfg in resolved.agents {
     let name = agent_cfg.name.clone();
-    let adapter = agent_adapter::create_agent_adapter(agent_cfg);
+    let adapter = agent_adapter::create_agent_adapter_with_bridge(
+      agent_cfg,
+      llm_bridge.clone(),
+    );
     let (pid, handle, join) =
       spawn_process(adapter, 64, None, Some(checkpoint_store.clone()));
     info!(agent = %name, pid = %pid, "spawned agent process");
@@ -698,6 +709,10 @@ async fn run_daemon_v2(
       }
     }
   }
+
+  // Shutdown the bridge worker
+  bridge_worker_handle.abort();
+  info!("LLM bridge stopped");
 
   info!("zeptobeam v2 stopped");
 }

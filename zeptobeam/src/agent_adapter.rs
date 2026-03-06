@@ -5,10 +5,12 @@
 //! process runtime.
 
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use zeptovm::error::{Action, Message, Reason, UserPayload};
 use zeptovm::Behavior;
+
+use crate::llm_bridge::LlmBridge;
 
 /// Configuration for an agent adapter, mirroring the legacy `AgentConfig`
 /// fields that are relevant to the zeptovm runtime.
@@ -26,20 +28,35 @@ pub struct AgentAdapterConfig {
 /// An agent adapter that implements `zeptovm::Behavior`.
 ///
 /// Holds agent configuration plus mutable runtime state (message count,
-/// conversation history). This is the behavioral skeleton — actual LLM calls
-/// will be added later.
+/// conversation history). When a `LlmBridge` is present, text messages
+/// are forwarded to the LLM for a response.
 pub struct AgentAdapter {
   config: AgentAdapterConfig,
   message_count: usize,
   conversation_history: Vec<String>,
+  bridge: Option<LlmBridge>,
 }
 
-/// Create a new `AgentAdapter` from a config.
+/// Create a new `AgentAdapter` from a config (no LLM bridge).
 pub fn create_agent_adapter(config: AgentAdapterConfig) -> AgentAdapter {
   AgentAdapter {
     config,
     message_count: 0,
     conversation_history: Vec::new(),
+    bridge: None,
+  }
+}
+
+/// Create a new `AgentAdapter` wired to an `LlmBridge` for actual LLM calls.
+pub fn create_agent_adapter_with_bridge(
+  config: AgentAdapterConfig,
+  bridge: LlmBridge,
+) -> AgentAdapter {
+  AgentAdapter {
+    config,
+    message_count: 0,
+    conversation_history: Vec::new(),
+    bridge: Some(bridge),
   }
 }
 
@@ -78,6 +95,48 @@ impl Behavior for AgentAdapter {
           message_count = self.message_count,
           "handled text message"
         );
+
+        if let Some(ref bridge) = self.bridge {
+          let tools = if self.config.tools.is_empty() {
+            None
+          } else {
+            Some(self.config.tools.clone())
+          };
+          match bridge
+            .chat(
+              &self.config.provider,
+              self.config.model.as_deref(),
+              self.config.system_prompt.as_deref(),
+              &text,
+              tools,
+              self.config.max_iterations,
+              self.config.timeout_ms,
+            )
+            .await
+          {
+            Ok(response) => {
+              let response_str = response.to_string();
+              self.conversation_history.push(response_str.clone());
+              info!(
+                agent = %self.config.name,
+                "LLM response received"
+              );
+              debug!(
+                agent = %self.config.name,
+                response = %response_str,
+                "LLM response"
+              );
+            }
+            Err(e) => {
+              warn!(
+                agent = %self.config.name,
+                error = %e,
+                "LLM call failed"
+              );
+            }
+          }
+        }
+
         Action::Continue
       }
       Message::User(UserPayload::Json(value)) => {
@@ -241,5 +300,33 @@ mod tests {
     adapter
       .terminate(&Reason::Custom("test reason".into()))
       .await;
+  }
+
+  #[tokio::test]
+  async fn test_adapter_with_bridge_none_still_works() {
+    // Adapter created without bridge should handle text normally
+    let mut adapter = create_agent_adapter(test_config());
+    adapter.init(None).await.unwrap();
+    assert!(adapter.bridge.is_none());
+
+    let action = adapter.handle(Message::text("hello")).await;
+    assert!(matches!(action, Action::Continue));
+    assert_eq!(adapter.message_count, 1);
+    assert_eq!(adapter.conversation_history.len(), 1);
+    assert_eq!(adapter.conversation_history[0], "hello");
+  }
+
+  #[tokio::test]
+  async fn test_adapter_with_bridge_factory() {
+    use erlangrt::agent_rt::bridge::create_bridge;
+
+    let (handle, _worker) = create_bridge();
+    let bridge = LlmBridge::new(handle);
+    let adapter =
+      create_agent_adapter_with_bridge(test_config(), bridge);
+    assert!(adapter.bridge.is_some());
+    assert_eq!(adapter.config.name, "test-agent");
+    assert_eq!(adapter.message_count, 0);
+    assert!(adapter.conversation_history.is_empty());
   }
 }
