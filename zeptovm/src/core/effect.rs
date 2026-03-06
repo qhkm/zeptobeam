@@ -50,22 +50,59 @@ pub enum EffectKind {
     Custom(String),
 }
 
+/// Backoff strategy for effect retries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BackoffKind {
+  Fixed(u64),
+  Exponential { base_ms: u64, max_ms: u64 },
+  ExponentialJitter { base_ms: u64, max_ms: u64 },
+}
+
+impl BackoffKind {
+  pub fn delay_ms(&self, attempt: u32) -> u64 {
+    match self {
+      BackoffKind::Fixed(ms) => *ms,
+      BackoffKind::Exponential {
+        base_ms,
+        max_ms,
+      } => {
+        let delay = base_ms
+          .saturating_mul(1u64 << attempt.min(30));
+        delay.min(*max_ms)
+      }
+      BackoffKind::ExponentialJitter {
+        base_ms,
+        max_ms,
+      } => {
+        let base_delay = base_ms
+          .saturating_mul(1u64 << attempt.min(30));
+        let capped = base_delay.min(*max_ms);
+        let jitter = (attempt as u64 * 37) % base_ms;
+        capped.saturating_add(jitter).min(*max_ms)
+      }
+    }
+  }
+}
+
 /// Retry policy for effects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
-    pub max_attempts: u32,
-    pub backoff_base: Duration,
-    pub backoff_max: Duration,
+  pub max_attempts: u32,
+  pub backoff: BackoffKind,
+  pub retry_on: Vec<String>,
 }
 
 impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            backoff_base: Duration::from_millis(500),
-            backoff_max: Duration::from_secs(30),
-        }
+  fn default() -> Self {
+    Self {
+      max_attempts: 3,
+      backoff: BackoffKind::Exponential {
+        base_ms: 500,
+        max_ms: 30_000,
+      },
+      retry_on: Vec::new(),
     }
+  }
 }
 
 /// Describes how to undo/compensate a completed effect.
@@ -217,5 +254,60 @@ mod tests {
     fn test_effect_kind_custom() {
         let kind = EffectKind::Custom("my-tool".into());
         assert_eq!(kind, EffectKind::Custom("my-tool".into()));
+    }
+
+    #[test]
+    fn test_backoff_fixed() {
+        let b = BackoffKind::Fixed(1000);
+        assert_eq!(b.delay_ms(0), 1000);
+        assert_eq!(b.delay_ms(5), 1000);
+    }
+
+    #[test]
+    fn test_backoff_exponential() {
+        let b = BackoffKind::Exponential {
+            base_ms: 100,
+            max_ms: 5000,
+        };
+        assert_eq!(b.delay_ms(0), 100);
+        assert_eq!(b.delay_ms(1), 200);
+        assert_eq!(b.delay_ms(2), 400);
+        assert_eq!(b.delay_ms(10), 5000);
+    }
+
+    #[test]
+    fn test_backoff_exponential_jitter() {
+        let b = BackoffKind::ExponentialJitter {
+            base_ms: 100,
+            max_ms: 5000,
+        };
+        let d0 = b.delay_ms(0);
+        let d1 = b.delay_ms(1);
+        assert!(d0 >= 100);
+        assert!(d1 >= 200);
+    }
+
+    #[test]
+    fn test_retry_policy_default() {
+        let p = RetryPolicy::default();
+        assert_eq!(p.max_attempts, 3);
+        assert!(p.retry_on.is_empty());
+    }
+
+    #[test]
+    fn test_effect_request_with_compensation() {
+        let req = EffectRequest::new(
+            EffectKind::Http,
+            serde_json::json!({
+              "url": "https://api.example.com/charge"
+            }),
+        )
+        .with_compensation(CompensationSpec {
+            undo_kind: EffectKind::Http,
+            undo_input: serde_json::json!({
+              "url": "https://api.example.com/refund"
+            }),
+        });
+        assert!(req.compensation.is_some());
     }
 }
