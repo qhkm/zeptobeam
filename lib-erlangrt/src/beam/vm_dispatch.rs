@@ -322,6 +322,11 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeBsPutBinary::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_BS_PUT_STRING => {
+      assert_arity(OPCODE_BS_PUT_STRING, OpcodeBsPutString::ARITY);
+      return OpcodeBsPutString::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_FCLEARERROR => {
       assert_arity(OPCODE_FCLEARERROR, OpcodeFclearerror::ARITY);
       return OpcodeFclearerror::__run(vm, ctx, curr_p);
@@ -457,9 +462,54 @@ pub fn dispatch_op_inline(vm: &mut VM, op: RawOpcode, ctx: &mut RuntimeContext, 
       return OpcodeIsBitstr::__run(vm, ctx, curr_p);
     },
 
+    OPCODE_BS_CONTEXT_TO_BINARY => {
+      assert_arity(OPCODE_BS_CONTEXT_TO_BINARY, OpcodeBsContextToBinary::ARITY);
+      return OpcodeBsContextToBinary::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_TEST_UNIT => {
+      assert_arity(OPCODE_BS_TEST_UNIT, OpcodeBsTestUnit::ARITY);
+      return OpcodeBsTestUnit::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_MATCH_STRING => {
+      assert_arity(OPCODE_BS_MATCH_STRING, OpcodeBsMatchString::ARITY);
+      return OpcodeBsMatchString::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_APPEND => {
+      assert_arity(OPCODE_BS_APPEND, OpcodeBsAppend::ARITY);
+      return OpcodeBsAppend::__run(vm, ctx, curr_p);
+    },
+
     OPCODE_TRIM => {
       assert_arity(OPCODE_TRIM, OpcodeTrim::ARITY);
       return OpcodeTrim::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_INIT_BITS => {
+      assert_arity(OPCODE_BS_INIT_BITS, OpcodeBsInitBits::ARITY);
+      return OpcodeBsInitBits::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_GET_UTF8 => {
+      assert_arity(OPCODE_BS_GET_UTF8, OpcodeBsGetUtf8::ARITY);
+      return OpcodeBsGetUtf8::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_SKIP_UTF8 => {
+      assert_arity(OPCODE_BS_SKIP_UTF8, OpcodeBsSkipUtf8::ARITY);
+      return OpcodeBsSkipUtf8::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_UTF8_SIZE => {
+      assert_arity(OPCODE_BS_UTF8_SIZE, OpcodeBsUtf8Size::ARITY);
+      return OpcodeBsUtf8Size::__run(vm, ctx, curr_p);
+    },
+
+    OPCODE_BS_PUT_UTF8 => {
+      assert_arity(OPCODE_BS_PUT_UTF8, OpcodeBsPutUtf8::ARITY);
+      return OpcodeBsPutUtf8::__run(vm, ctx, curr_p);
     },
 
     OPCODE_GC_BIF3 => {

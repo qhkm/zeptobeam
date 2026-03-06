@@ -108,6 +108,7 @@ bs_get_binary2
 bs_init2
 bs_put_binary
 bs_put_integer
+bs_put_string
 bs_match
 bs_get_position
 bs_get_tail
@@ -115,6 +116,15 @@ bs_set_position
 bs_start_match3
 bs_start_match4
 bs_test_tail2
+bs_context_to_binary
+bs_test_unit
+bs_match_string
+bs_append
+bs_init_bits
+bs_get_utf8
+bs_skip_utf8
+bs_utf8_size
+bs_put_utf8
 
 #=== === Map Operations === ===
 put_map_assoc
