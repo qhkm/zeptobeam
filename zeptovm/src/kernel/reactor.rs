@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -6,7 +7,69 @@ use tracing::{info_span, Instrument};
 use crate::core::effect::{
   EffectKind, EffectRequest, EffectResult, EffectStatus,
 };
+use crate::effects::anthropic::AnthropicClient;
+use crate::effects::config::ProviderConfig;
+use crate::effects::http_worker::HttpWorker;
+use crate::effects::openai::OpenAiClient;
+use crate::effects::provider::ProviderClient;
 use crate::pid::Pid;
+
+/// Configuration for the reactor's real LLM and HTTP workers.
+///
+/// When API keys are present, the reactor delegates to real
+/// provider clients. Otherwise it falls back to placeholder
+/// responses (identical to pre-integration behavior).
+pub struct ReactorConfig {
+  openai: Option<Arc<OpenAiClient>>,
+  anthropic: Option<Arc<AnthropicClient>>,
+  http_worker: Arc<HttpWorker>,
+  provider_config: ProviderConfig,
+  /// When true, HTTP effects use the real HttpWorker.
+  /// When false (placeholder mode), all effects return
+  /// placeholder responses for backward compatibility.
+  use_real_http: bool,
+}
+
+impl ReactorConfig {
+  /// Build from an existing `ProviderConfig`, creating real
+  /// clients for any provider that has an API key.
+  pub fn from_provider_config(
+    config: &ProviderConfig,
+  ) -> Self {
+    Self {
+      openai: config.openai_api_key.as_ref().map(|key| {
+        Arc::new(OpenAiClient::new(
+          key.clone(),
+          config.openai_base_url.clone(),
+        ))
+      }),
+      anthropic: config
+        .anthropic_api_key
+        .as_ref()
+        .map(|key| {
+          Arc::new(AnthropicClient::new(
+            key.clone(),
+            config.anthropic_base_url.clone(),
+          ))
+        }),
+      http_worker: Arc::new(HttpWorker::new()),
+      provider_config: config.clone(),
+      use_real_http: true,
+    }
+  }
+
+  /// Build a placeholder config with no real providers.
+  /// All effects return placeholder responses.
+  pub fn placeholder() -> Self {
+    Self {
+      openai: None,
+      anthropic: None,
+      http_worker: Arc::new(HttpWorker::new()),
+      provider_config: ProviderConfig::default(),
+      use_real_http: false,
+    }
+  }
+}
 
 /// A request sent to the reactor for dispatch.
 pub struct EffectDispatch {
@@ -33,8 +96,29 @@ pub struct Reactor {
 }
 
 impl Reactor {
-  /// Start the reactor on a background thread with a Tokio runtime.
+  /// Start the reactor on a background thread with a Tokio
+  /// runtime, using placeholder responses for all effects.
   pub fn start() -> Self {
+    Self::start_with_config(None)
+  }
+
+  /// Start the reactor with an optional `ProviderConfig`.
+  ///
+  /// When a config with API keys is supplied, LLM calls are
+  /// routed to real provider clients (OpenAI / Anthropic) and
+  /// HTTP effects use the real `HttpWorker`. When no config
+  /// (or no keys) are present, placeholder responses are
+  /// returned — preserving backward-compatible behavior.
+  pub fn start_with_config(
+    config: Option<ProviderConfig>,
+  ) -> Self {
+    let reactor_config = Arc::new(match config {
+      Some(ref c) if c.has_any_provider() => {
+        ReactorConfig::from_provider_config(c)
+      }
+      _ => ReactorConfig::placeholder(),
+    });
+
     let (dispatch_tx, dispatch_rx) =
       unbounded::<EffectDispatch>();
     let (completion_tx, completion_rx) =
@@ -60,21 +144,26 @@ impl Reactor {
           match recv_result {
             Ok(Ok(dispatch)) => {
               let tx = completion_tx.clone();
+              let cfg = reactor_config.clone();
               let span = info_span!(
                 "effect_dispatch",
                 effect_id =
                   %dispatch.request.effect_id,
                 kind = ?dispatch.request.kind,
               );
+              let pid = dispatch.pid;
               tokio::spawn(
                 async move {
                   let result =
-                    execute_effect_with_retry(
+                    execute_effect_with_retry_configured(
                       &dispatch.request,
+                      &cfg,
+                      &tx,
+                      pid,
                     )
                     .await;
                   let _ = tx.send(EffectCompletion {
-                    pid: dispatch.pid,
+                    pid,
                     result,
                   });
                 }
@@ -121,7 +210,8 @@ impl Reactor {
 }
 
 /// Execute an effect with retry logic based on the request's
-/// RetryPolicy.
+/// RetryPolicy. Retained for backward-compatible tests.
+#[cfg(test)]
 async fn execute_effect_with_retry(
   request: &EffectRequest,
 ) -> EffectResult {
@@ -169,7 +259,8 @@ async fn execute_effect_with_retry(
 }
 
 /// Execute an effect asynchronously. For v1, most effects return
-/// placeholder results.
+/// placeholder results. Retained for backward-compatible tests.
+#[cfg(test)]
 async fn execute_effect_once(
   request: &EffectRequest,
 ) -> EffectResult {
@@ -203,6 +294,198 @@ async fn execute_effect_once(
         "kind": format!("{:?}", other)
       }),
     ),
+  }
+}
+
+// ---- Configured variants (used by start_with_config) ----
+
+/// Execute an effect with retry logic, routing through real
+/// providers when configured.
+async fn execute_effect_with_retry_configured(
+  request: &EffectRequest,
+  config: &ReactorConfig,
+  completion_tx: &Sender<EffectCompletion>,
+  pid: Pid,
+) -> EffectResult {
+  let max_attempts = request.retry.max_attempts.max(1);
+  let mut last_error = String::new();
+
+  for attempt in 0..max_attempts {
+    let result = execute_effect_once_configured(
+      request,
+      config,
+      completion_tx,
+      pid,
+    )
+    .await;
+
+    match result.status {
+      EffectStatus::Succeeded => return result,
+      EffectStatus::Failed => {
+        last_error =
+          result.error.clone().unwrap_or_default();
+
+        // Check retry_on filter
+        if !request.retry.retry_on.is_empty()
+          && !request
+            .retry
+            .retry_on
+            .iter()
+            .any(|cat| last_error.contains(cat))
+        {
+          return result; // Error category not retryable
+        }
+
+        if attempt + 1 < max_attempts {
+          let delay =
+            request.retry.backoff.delay_ms(attempt);
+          if delay > 0 {
+            tokio::time::sleep(
+              std::time::Duration::from_millis(delay),
+            )
+            .await;
+          }
+        } else {
+          return result; // Final attempt failed
+        }
+      }
+      _ => return result, // TimedOut, Cancelled — no retry
+    }
+  }
+
+  EffectResult::failure(request.effect_id, last_error)
+}
+
+/// Execute a single effect attempt, using real providers when
+/// API keys are configured, falling back to placeholders
+/// otherwise.
+async fn execute_effect_once_configured(
+  request: &EffectRequest,
+  config: &ReactorConfig,
+  completion_tx: &Sender<EffectCompletion>,
+  pid: Pid,
+) -> EffectResult {
+  match &request.kind {
+    EffectKind::SleepUntil => {
+      tokio::time::sleep(request.timeout).await;
+      EffectResult::success(
+        request.effect_id,
+        serde_json::json!({
+          "slept_ms": request.timeout.as_millis()
+        }),
+      )
+    }
+
+    EffectKind::LlmCall => {
+      let provider_name = config
+        .provider_config
+        .resolve_provider(&request.input);
+
+      // Select the appropriate provider client.
+      let provider: Option<Arc<dyn ProviderClient>> =
+        match provider_name {
+          "anthropic" => config
+            .anthropic
+            .clone()
+            .map(|c| c as Arc<dyn ProviderClient>),
+          _ => config
+            .openai
+            .clone()
+            .map(|c| c as Arc<dyn ProviderClient>),
+        };
+
+      match provider {
+        Some(p) => {
+          // Default to streaming for LLM calls unless
+          // explicitly disabled.
+          let use_streaming = request
+            .input
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+          if use_streaming {
+            let (tx, mut rx) =
+              tokio::sync::mpsc::channel(64);
+            let effect_id = request.effect_id;
+            let input = request.input.clone();
+
+            tokio::spawn(async move {
+              let _ = p
+                .complete_stream(effect_id, &input, tx)
+                .await;
+            });
+
+            let mut final_result = None;
+            while let Some(result) = rx.recv().await {
+              if result.status == EffectStatus::Streaming
+              {
+                // Forward streaming deltas to the
+                // completion channel.
+                let _ = completion_tx.send(
+                  EffectCompletion { pid, result },
+                );
+              } else {
+                final_result = Some(result);
+              }
+            }
+
+            final_result.unwrap_or_else(|| {
+              EffectResult::failure(
+                effect_id,
+                "stream ended without final result",
+              )
+            })
+          } else {
+            p.complete(request.effect_id, &request.input)
+              .await
+          }
+        }
+        None => {
+          // No API key configured — placeholder fallback.
+          EffectResult::success(
+            request.effect_id,
+            serde_json::json!({
+              "response": "placeholder LLM response"
+            }),
+          )
+        }
+      }
+    }
+
+    EffectKind::Http => {
+      if config.use_real_http {
+        // Real HTTP worker (no API key required).
+        config
+          .http_worker
+          .execute(
+            request.effect_id,
+            &request.input,
+            request.timeout,
+          )
+          .await
+      } else {
+        // Placeholder fallback.
+        EffectResult::success(
+          request.effect_id,
+          serde_json::json!({
+            "status": 200,
+            "body": "placeholder"
+          }),
+        )
+      }
+    }
+
+    other => {
+      // Placeholder for other effect kinds.
+      EffectResult::success(
+        request.effect_id,
+        serde_json::json!({
+          "status": "completed",
+          "kind": format!("{:?}", other)
+        }),
+      )
+    }
   }
 }
 
