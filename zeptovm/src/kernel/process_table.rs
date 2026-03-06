@@ -38,6 +38,9 @@ pub struct ProcessEntry {
   reductions: u32,
   kill_requested: bool,
   exit_reason: Option<Reason>,
+  max_turn_wall_clock: std::time::Duration,
+  turn_overrun_flag: bool,
+  last_turn_duration: Option<std::time::Duration>,
 }
 
 impl ProcessEntry {
@@ -52,6 +55,9 @@ impl ProcessEntry {
       reductions: 0,
       kill_requested: false,
       exit_reason: None,
+      max_turn_wall_clock: std::time::Duration::from_secs(5),
+      turn_overrun_flag: false,
+      last_turn_duration: None,
     }
   }
 
@@ -64,10 +70,29 @@ impl ProcessEntry {
     self.trap_exit = trap;
   }
 
+  pub fn set_max_turn_wall_clock(
+    &mut self,
+    d: std::time::Duration,
+  ) {
+    self.max_turn_wall_clock = d;
+  }
+
+  pub fn turn_overrun(&self) -> bool {
+    self.turn_overrun_flag
+  }
+
+  pub fn last_turn_duration(
+    &self,
+  ) -> Option<std::time::Duration> {
+    self.last_turn_duration
+  }
+
   /// Step the process once with panic isolation.
   /// Returns (StepResult, TurnContext with collected intents).
   pub fn step(&mut self) -> (StepResult, TurnContext) {
     let mut ctx = TurnContext::new(self.pid);
+    self.turn_overrun_flag = false;
+    self.last_turn_duration = None;
 
     // Kill check (highest priority, like BEAM)
     if self.kill_requested {
@@ -119,9 +144,23 @@ impl ProcessEntry {
         // User/effect messages and fall-through signals go to
         // behavior.handle() with catch_unwind
         self.reductions += 1;
+        let start = std::time::Instant::now();
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
           self.behavior.handle(env, &mut ctx)
         }));
+        let elapsed = start.elapsed();
+        self.last_turn_duration = Some(elapsed);
+
+        if elapsed > self.max_turn_wall_clock {
+          self.turn_overrun_flag = true;
+          tracing::warn!(
+            pid = self.pid.raw(),
+            elapsed_ms = elapsed.as_millis() as u64,
+            limit_ms =
+              self.max_turn_wall_clock.as_millis() as u64,
+            "handler overrun: turn exceeded wall-clock limit"
+          );
+        }
 
         match result {
           Ok(step) => (step, ctx),
@@ -177,6 +216,13 @@ impl ProcessEntry {
   /// Get a snapshot of behavior state.
   pub fn snapshot(&self) -> Option<Vec<u8>> {
     self.behavior.snapshot()
+  }
+
+  /// Get behavior metadata if the behavior provides it.
+  pub fn behavior_meta(
+    &self,
+  ) -> Option<crate::core::behavior::BehaviorMeta> {
+    self.behavior.meta()
   }
 }
 
@@ -423,5 +469,148 @@ mod tests {
     // Continue
     assert!(matches!(result, StepResult::Continue));
     assert_ne!(p.state, ProcessRuntimeState::Done);
+  }
+
+  #[test]
+  fn test_watchdog_slow_handler_sets_overrun() {
+    struct SlowHandler;
+    impl StepBehavior for SlowHandler {
+      fn init(
+        &mut self,
+        _cp: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        std::thread::sleep(
+          std::time::Duration::from_millis(20),
+        );
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::new();
+    let mut p =
+      ProcessEntry::new(pid, Box::new(SlowHandler));
+    p.set_max_turn_wall_clock(
+      std::time::Duration::from_millis(5),
+    );
+    p.init(None);
+    p.mailbox.push(Envelope::text(pid, "go"));
+    let (result, _) = p.step();
+    assert!(matches!(result, StepResult::Continue));
+    assert!(
+      p.turn_overrun(),
+      "expected overrun flag to be set"
+    );
+  }
+
+  #[test]
+  fn test_watchdog_fast_handler_no_overrun() {
+    let pid = Pid::new();
+    let mut p = ProcessEntry::new(pid, Box::new(Echo));
+    p.set_max_turn_wall_clock(
+      std::time::Duration::from_secs(5),
+    );
+    p.init(None);
+    p.mailbox.push(Envelope::text(pid, "go"));
+    let (result, _) = p.step();
+    assert!(matches!(result, StepResult::Continue));
+    assert!(
+      !p.turn_overrun(),
+      "expected no overrun for fast handler"
+    );
+  }
+
+  #[test]
+  fn test_watchdog_overrun_resets_each_step() {
+    struct SlowHandler;
+    impl StepBehavior for SlowHandler {
+      fn init(
+        &mut self,
+        _cp: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        std::thread::sleep(
+          std::time::Duration::from_millis(20),
+        );
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::new();
+    let mut p =
+      ProcessEntry::new(pid, Box::new(SlowHandler));
+    p.set_max_turn_wall_clock(
+      std::time::Duration::from_millis(5),
+    );
+    p.init(None);
+    p.mailbox.push(Envelope::text(pid, "go"));
+    p.step();
+    assert!(p.turn_overrun());
+    // Second step: no message, should return Wait and
+    // reset overrun flag
+    let (result, _) = p.step();
+    assert!(matches!(result, StepResult::Wait));
+    assert!(!p.turn_overrun());
+  }
+
+  #[test]
+  fn test_process_entry_stores_behavior_meta() {
+    use crate::core::behavior::BehaviorMeta;
+
+    struct MetaBehavior;
+    impl StepBehavior for MetaBehavior {
+      fn init(
+        &mut self,
+        _cp: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+      fn meta(
+        &self,
+      ) -> Option<BehaviorMeta> {
+        Some(BehaviorMeta {
+          module: "test_agent".to_string(),
+          version: "0.1.0".to_string(),
+        })
+      }
+    }
+
+    let pid = Pid::new();
+    let p =
+      ProcessEntry::new(pid, Box::new(MetaBehavior));
+    let meta = p.behavior_meta();
+    assert!(meta.is_some());
+    let meta = meta.unwrap();
+    assert_eq!(meta.module, "test_agent");
+    assert_eq!(meta.version, "0.1.0");
+  }
+
+  #[test]
+  fn test_process_entry_no_meta_default() {
+    let pid = Pid::new();
+    let p = ProcessEntry::new(pid, Box::new(Echo));
+    assert!(p.behavior_meta().is_none());
   }
 }
