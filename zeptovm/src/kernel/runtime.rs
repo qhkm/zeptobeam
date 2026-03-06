@@ -984,4 +984,71 @@ mod tests {
       "effects.completed should be incremented"
     );
   }
+
+  #[test]
+  fn test_runtime_recover_process() {
+    struct Recoverable {
+      state: String,
+    }
+    impl StepBehavior for Recoverable {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        self.state = "fresh".into();
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _: Envelope,
+        _: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _: &Reason) {}
+      fn restore(
+        &mut self,
+        data: &[u8],
+      ) -> Result<(), String> {
+        self.state =
+          String::from_utf8(data.to_vec())
+            .map_err(|e| e.to_string())?;
+        Ok(())
+      }
+      fn snapshot(&self) -> Option<Vec<u8>> {
+        Some(self.state.as_bytes().to_vec())
+      }
+    }
+
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid = Pid::from_raw(42);
+
+    // Recover (no prior state -- creates fresh process)
+    let result = rt.recover_process(pid, &|| {
+      Box::new(Recoverable {
+        state: String::new(),
+      })
+    });
+    assert!(result.is_ok());
+    assert_eq!(rt.process_count(), 1);
+
+    // Process should be ready and responsive
+    rt.send(Envelope::text(pid, "hello"));
+    rt.tick();
+    assert_eq!(rt.process_count(), 1);
+  }
+
+  #[test]
+  fn test_runtime_recover_requires_durability() {
+    let mut rt = SchedulerRuntime::new();
+    let pid = Pid::from_raw(1);
+    let result =
+      rt.recover_process(pid, &|| Box::new(Echo));
+    assert!(result.is_err());
+    assert!(
+      result
+        .unwrap_err()
+        .contains("no turn executor"),
+    );
+  }
 }
