@@ -19,6 +19,18 @@ pub enum JournalEntryType {
   ProcessResumed,
   ProcessFailed,
   ProcessExited,
+  TimerCancelled,
+  ChildStarted,
+  ChildRestarted,
+  Linked,
+  Unlinked,
+  MonitorCreated,
+  MonitorRemoved,
+  EffectRetried,
+  CompensationRecorded,
+  CompensationStarted,
+  CompensationStepCompleted,
+  CompensationFinished,
 }
 
 impl JournalEntryType {
@@ -37,6 +49,18 @@ impl JournalEntryType {
       Self::ProcessResumed => "process_resumed",
       Self::ProcessFailed => "process_failed",
       Self::ProcessExited => "process_exited",
+      Self::TimerCancelled => "timer_cancelled",
+      Self::ChildStarted => "child_started",
+      Self::ChildRestarted => "child_restarted",
+      Self::Linked => "linked",
+      Self::Unlinked => "unlinked",
+      Self::MonitorCreated => "monitor_created",
+      Self::MonitorRemoved => "monitor_removed",
+      Self::EffectRetried => "effect_retried",
+      Self::CompensationRecorded => "compensation_recorded",
+      Self::CompensationStarted => "compensation_started",
+      Self::CompensationStepCompleted => "compensation_step_completed",
+      Self::CompensationFinished => "compensation_finished",
     }
   }
 
@@ -55,6 +79,18 @@ impl JournalEntryType {
       "process_resumed" => Some(Self::ProcessResumed),
       "process_failed" => Some(Self::ProcessFailed),
       "process_exited" => Some(Self::ProcessExited),
+      "timer_cancelled" => Some(Self::TimerCancelled),
+      "child_started" => Some(Self::ChildStarted),
+      "child_restarted" => Some(Self::ChildRestarted),
+      "linked" => Some(Self::Linked),
+      "unlinked" => Some(Self::Unlinked),
+      "monitor_created" => Some(Self::MonitorCreated),
+      "monitor_removed" => Some(Self::MonitorRemoved),
+      "effect_retried" => Some(Self::EffectRetried),
+      "compensation_recorded" => Some(Self::CompensationRecorded),
+      "compensation_started" => Some(Self::CompensationStarted),
+      "compensation_step_completed" => Some(Self::CompensationStepCompleted),
+      "compensation_finished" => Some(Self::CompensationFinished),
       _ => None,
     }
   }
