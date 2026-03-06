@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crate::pid::Pid;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Trait for persisting process checkpoints.
 #[async_trait]
@@ -28,7 +28,7 @@ pub trait CheckpointStore: Send + Sync {
 /// but not `Sync`, we wrap it in `Arc<Mutex<Connection>>` and execute all
 /// operations inside `tokio::task::spawn_blocking`.
 pub struct SqliteCheckpointStore {
-    conn: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    conn: Arc<Mutex<rusqlite::Connection>>,
 }
 
 impl SqliteCheckpointStore {
@@ -43,7 +43,7 @@ impl SqliteCheckpointStore {
             );",
         )?;
         Ok(Self {
-            conn: Arc::new(std::sync::Mutex::new(conn)),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 }
@@ -59,7 +59,7 @@ impl CheckpointStore for SqliteCheckpointStore {
         let pid_raw = pid.raw() as i64;
         let data = data.to_vec();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(|e| e.to_string())?;
+            let conn = conn.lock().expect("checkpoint store lock poisoned");
             conn.execute(
                 "INSERT OR REPLACE INTO checkpoints (pid, data, updated_at)
                  VALUES (?1, ?2, datetime('now'))",
@@ -78,7 +78,7 @@ impl CheckpointStore for SqliteCheckpointStore {
         let conn = Arc::clone(&self.conn);
         let pid_raw = pid.raw() as i64;
         let result = tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(|e| e.to_string())?;
+            let conn = conn.lock().expect("checkpoint store lock poisoned");
             let mut stmt = conn.prepare("SELECT data FROM checkpoints WHERE pid = ?1")?;
             let mut rows = stmt.query(rusqlite::params![pid_raw])?;
             match rows.next()? {
@@ -100,7 +100,7 @@ impl CheckpointStore for SqliteCheckpointStore {
         let conn = Arc::clone(&self.conn);
         let pid_raw = pid.raw() as i64;
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(|e| e.to_string())?;
+            let conn = conn.lock().expect("checkpoint store lock poisoned");
             conn.execute(
                 "DELETE FROM checkpoints WHERE pid = ?1",
                 rusqlite::params![pid_raw],
@@ -162,7 +162,6 @@ mod tests {
     async fn test_delete_nonexistent() {
         let store = make_store();
         let pid = Pid::from_raw(999);
-        // Should not error
         store.delete(pid).await.unwrap();
     }
 }
