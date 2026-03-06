@@ -102,13 +102,19 @@ impl SchedulerEngine {
   }
 
   /// Deliver an effect result to the waiting process.
-  pub fn deliver_effect_result(&mut self, result: EffectResult) {
+  pub fn deliver_effect_result(
+    &mut self,
+    result: EffectResult,
+  ) {
     let effect_raw = result.effect_id.raw();
-    if let Some(pending) = self.pending_effects.remove(&effect_raw)
+    if let Some(pending) =
+      self.pending_effects.remove(&effect_raw)
     {
       let pid = pending.pid;
       if let Some(proc) = self.processes.get_mut(&pid) {
-        proc.mailbox.push(Envelope::effect_result(pid, result));
+        proc.mailbox.push(
+          Envelope::effect_result(pid, result),
+        );
         if matches!(
           proc.state,
           ProcessRuntimeState::WaitingEffect(_)
@@ -116,6 +122,28 @@ impl SchedulerEngine {
           proc.state = ProcessRuntimeState::Ready;
           self.ready_queue.push(pid);
         }
+      }
+    }
+  }
+
+  /// Deliver a streaming chunk to a process's mailbox
+  /// without removing from pending_effects.
+  /// The effect is still in-flight; more chunks may follow.
+  pub fn deliver_streaming_chunk(
+    &mut self,
+    result: EffectResult,
+  ) {
+    let effect_raw = result.effect_id.raw();
+    if let Some(pending) =
+      self.pending_effects.get(&effect_raw)
+    {
+      let pid = pending.pid;
+      if let Some(proc) =
+        self.processes.get_mut(&pid)
+      {
+        proc.mailbox.push(
+          Envelope::effect_result(pid, result),
+        );
       }
     }
   }
@@ -1050,5 +1078,67 @@ mod tests {
 
     let spawns = engine.take_spawn_requests();
     assert_eq!(spawns.len(), 1);
+  }
+
+  #[test]
+  fn test_deliver_streaming_chunk_keeps_pending() {
+    use crate::core::effect::{
+      EffectResult, EffectStatus,
+    };
+
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Suspender));
+    engine.send(Envelope::text(pid, "go"));
+    engine.tick(); // Process suspends
+
+    // Take the outbound effect to get the effect_id
+    let effects = engine.take_outbound_effects();
+    assert_eq!(effects.len(), 1);
+    let effect_id = effects[0].1.effect_id;
+
+    // Process should be WaitingEffect
+    assert!(matches!(
+      engine.process_state(pid),
+      Some(ProcessRuntimeState::WaitingEffect(_))
+    ));
+
+    // Deliver a streaming chunk
+    let chunk = EffectResult {
+      effect_id,
+      status: EffectStatus::Streaming,
+      output: Some(serde_json::json!({
+        "delta": "hello"
+      })),
+      error: None,
+    };
+    engine.deliver_streaming_chunk(chunk);
+
+    // Effect should still be pending (not removed).
+    // Process should still be WaitingEffect (not woken).
+    assert!(matches!(
+      engine.process_state(pid),
+      Some(ProcessRuntimeState::WaitingEffect(_))
+    ));
+
+    // Deliver final result -- this should remove from
+    // pending and wake the process.
+    let final_result = EffectResult::success(
+      effect_id,
+      serde_json::json!({"content": "hello world"}),
+    );
+    engine.deliver_effect_result(final_result);
+
+    // Process should now be Ready (woken up)
+    assert!(matches!(
+      engine.process_state(pid),
+      Some(ProcessRuntimeState::Ready)
+    ));
+
+    // Tick to let it handle the effect result
+    engine.tick();
+
+    // Suspender exits on effect result
+    let completed = engine.take_completed();
+    assert_eq!(completed.len(), 1);
   }
 }

@@ -204,6 +204,17 @@ impl SchedulerRuntime {
 
       let completions = reactor.drain_completions();
       for completion in completions {
+        if completion.result.status
+          == EffectStatus::Streaming
+        {
+          // Streaming chunk: deliver to process
+          // mailbox but don't process as completed
+          self.engine.deliver_streaming_chunk(
+            completion.result,
+          );
+          continue;
+        }
+
         // Record compensation if effect succeeded
         if completion.result.status
           == EffectStatus::Succeeded
@@ -582,6 +593,16 @@ impl SchedulerRuntime {
     result: EffectResult,
   ) {
     self.engine.deliver_effect_result(result);
+  }
+
+  /// Deliver a streaming chunk directly (for testing
+  /// without reactor). Does not remove from
+  /// pending_effects.
+  pub fn deliver_streaming_chunk(
+    &mut self,
+    result: EffectResult,
+  ) {
+    self.engine.deliver_streaming_chunk(result);
   }
 
   /// Get a reference to the metrics.
@@ -1349,5 +1370,72 @@ mod tests {
       .with_provider_config(config);
     assert!(rt.provider_config.is_some());
     assert!(rt.has_reactor());
+  }
+
+  #[test]
+  fn test_runtime_streaming_chunk_not_counted() {
+    use crate::core::effect::{
+      EffectId, EffectResult, EffectStatus,
+    };
+
+    // Use runtime without reactor so we can inject
+    // completions manually via deliver_effect_result.
+    let mut rt = SchedulerRuntime::new();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick(); // Suspends with LlmCall
+
+    // Deliver a streaming chunk directly via engine
+    // (simulates what tick() does when reactor returns
+    // a Streaming completion).
+    let effect_id = {
+      // We need the effect_id but it was consumed.
+      // Retrieve it from the process state.
+      match rt.process_state(pid) {
+        Some(
+          ProcessRuntimeState::WaitingEffect(raw),
+        ) => EffectId::from_raw(raw),
+        _ => panic!("expected WaitingEffect"),
+      }
+    };
+
+    let chunk = EffectResult {
+      effect_id,
+      status: EffectStatus::Streaming,
+      output: Some(
+        serde_json::json!({"delta": "tok1"}),
+      ),
+      error: None,
+    };
+    rt.deliver_streaming_chunk(chunk);
+
+    // Streaming chunk should NOT count as completed
+    assert_eq!(
+      rt.metrics().counter("effects.completed"),
+      0,
+      "streaming chunk must not increment \
+       effects.completed"
+    );
+
+    // Process should still be waiting (not woken)
+    assert!(matches!(
+      rt.process_state(pid),
+      Some(ProcessRuntimeState::WaitingEffect(_))
+    ));
+
+    // Now deliver the final result
+    let final_result = EffectResult::success(
+      effect_id,
+      serde_json::json!({"content": "done"}),
+    );
+    rt.deliver_effect_result(final_result);
+    rt.tick(); // Process handles result and exits
+
+    let completed = rt.take_completed();
+    assert_eq!(completed.len(), 1);
+    assert!(matches!(
+      completed[0].1,
+      Reason::Normal
+    ));
   }
 }
