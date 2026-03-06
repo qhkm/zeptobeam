@@ -591,14 +591,17 @@ async fn run_daemon_v2(
   config_path: String,
   log_level: Option<String>,
   _workers: Option<usize>,
-  _bind: Option<String>,
+  bind: Option<String>,
 ) {
   use std::sync::Arc;
+  use zeptobeam::config_watcher::{self, ConfigWatcher};
+  use zeptobeam::llm_bridge::LlmBridge;
+  use zeptobeam::runtime_ops::ZeptovmRuntimeOps;
   use zeptovm::durability::SqliteCheckpointStore as ZeptoCheckpointStore;
   use zeptovm::process::spawn_process;
 
   // Load config (same pattern as legacy daemon)
-  let config = match load_config(&config_path) {
+  let mut config = match load_config(&config_path) {
     Ok(c) => {
       eprintln!("Loaded config from {}", config_path);
       c
@@ -608,6 +611,11 @@ async fn run_daemon_v2(
       AppConfig::default()
     }
   };
+
+  // Apply CLI overrides
+  if let Some(ref bind) = bind {
+    config.server.bind = bind.clone();
+  }
 
   // Init tracing
   init_tracing(&config, log_level.as_deref());
@@ -632,6 +640,13 @@ async fn run_daemon_v2(
     "resolved agents from config"
   );
 
+  // Create the LLM bridge (crossbeam channels + Tokio worker)
+  let (bridge_handle, bridge_worker) = create_bridge();
+  let bridge_worker_handle =
+    tokio::spawn(async move { bridge_worker.run().await });
+  let llm_bridge = LlmBridge::new(bridge_handle);
+  info!("LLM bridge started");
+
   // Create checkpoint store
   let checkpoint_store = Arc::new(
     ZeptoCheckpointStore::new(&config.checkpoint.path)
@@ -639,33 +654,98 @@ async fn run_daemon_v2(
   );
 
   // Spawn a zeptovm process for each resolved agent
+  let runtime_ops = Arc::new(ZeptovmRuntimeOps::new());
   let mut handles: Vec<(String, zeptovm::mailbox::ProcessHandle)> = Vec::new();
   let mut joins: Vec<(String, tokio::task::JoinHandle<zeptovm::process::ProcessExit>)> =
     Vec::new();
 
   for agent_cfg in resolved.agents {
     let name = agent_cfg.name.clone();
-    let adapter = agent_adapter::create_agent_adapter(agent_cfg);
+    let adapter = agent_adapter::create_agent_adapter_with_bridge(
+      agent_cfg,
+      llm_bridge.clone(),
+    );
     let (pid, handle, join) =
-      spawn_process(adapter, 64, None, Some(checkpoint_store.clone()));
+      spawn_process(adapter, 64, None, Some(checkpoint_store.clone()), None);
     info!(agent = %name, pid = %pid, "spawned agent process");
+    runtime_ops.register(name.clone(), pid, handle.clone());
     handles.push((name.clone(), handle));
     joins.push((name, join));
   }
 
   info!(
     process_count = handles.len(),
-    "all agents spawned, waiting for shutdown signal"
+    "all agents spawned"
   );
 
-  // Wait for shutdown signal (SIGINT / SIGTERM)
-  let shutdown = async {
+  // Start HTTP/MCP server
+  let metrics = Arc::new(RuntimeMetrics::new());
+  let process_count = Arc::new(AtomicUsize::new(handles.len()));
+  let http_enabled = config.server.enabled || config.mcp.server.enabled;
+  let server = if http_enabled {
+    let state = ServerState {
+      metrics: metrics.clone(),
+      process_count: process_count.clone(),
+      approval_registry: None,
+    };
+
+    let mcp_auth_token = if config.mcp.server.enabled {
+      config.mcp.server.auth_token_env.as_ref().and_then(
+        |env_name| match std::env::var(env_name) {
+          Ok(value) if !value.trim().is_empty() => Some(value),
+          Ok(_) | Err(_) => None,
+        },
+      )
+    } else {
+      None
+    };
+
+    let mcp_state = McpServerStateExt::with_timeout(
+      state,
+      mcp_auth_token,
+      config.mcp.server.enabled,
+      config.mcp.server.session_timeout_secs,
+    );
+    let mcp_state = mcp_state
+      .with_runtime_ops(runtime_ops.clone() as Arc<dyn McpRuntimeOps>);
+
+    match HealthServer::start_with_mcp(&config.server.bind, mcp_state)
+      .await
+    {
+      Ok(s) => {
+        info!(bind = %config.server.bind, "health + MCP server started (v2)");
+        Some(s)
+      }
+      Err(e) => {
+        warn!("Failed to start health server: {}", e);
+        None
+      }
+    }
+  } else {
+    None
+  };
+
+  // Start config watcher for hot-reload
+  let (watcher_handle, mut config_rx) = config_watcher::spawn_config_watcher(
+    config_path.clone(),
+    Duration::from_secs(5),
+    resolved.config_hash,
+  );
+  info!("config watcher started (poll every 5s)");
+
+  info!("waiting for shutdown signal");
+
+  // Create a unified shutdown future that resolves on SIGINT or SIGTERM
+  let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+  tokio::spawn(async move {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
       let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-          .expect("register SIGTERM");
+        tokio::signal::unix::signal(
+          tokio::signal::unix::SignalKind::terminate(),
+        )
+        .expect("register SIGTERM");
       tokio::select! {
         _ = ctrl_c => info!("received SIGINT"),
         _ = sigterm.recv() => info!("received SIGTERM"),
@@ -676,10 +756,101 @@ async fn run_daemon_v2(
       ctrl_c.await.ok();
       info!("received SIGINT");
     }
-  };
-  shutdown.await;
+    let _ = shutdown_tx.send(());
+  });
+
+  // Main loop: handle shutdown signal OR config changes
+  loop {
+    tokio::select! {
+      _ = &mut shutdown_rx => {
+        break;
+      }
+      Some(change) = config_rx.recv() => {
+        let running_names: Vec<String> =
+          handles.iter().map(|(name, _)| name.clone()).collect();
+        let diff =
+          ConfigWatcher::diff_agents(&running_names, &change.new_agents);
+
+        // Remove agents that are no longer in config
+        for name in &diff.to_remove {
+          if let Some(idx) =
+            handles.iter().position(|(n, _)| n == name)
+          {
+            let (removed_name, removed_handle) = handles.remove(idx);
+            removed_handle.kill();
+            info!(agent = %removed_name, "removed agent (config change)");
+            runtime_ops.remove(&removed_name);
+            // Also remove the corresponding join handle
+            if let Some(jidx) =
+              joins.iter().position(|(n, _)| n == name)
+            {
+              let (_, join) = joins.remove(jidx);
+              // Wait briefly for the killed process to exit
+              let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                join,
+              ).await;
+            }
+          }
+        }
+
+        // Add new agents from config
+        for agent_cfg in &diff.to_add {
+          let adapter =
+            agent_adapter::create_agent_adapter_with_bridge(
+              agent_cfg.clone(),
+              llm_bridge.clone(),
+            );
+          let (pid, handle, join) = spawn_process(
+            adapter,
+            64,
+            None,
+            Some(checkpoint_store.clone()),
+            None,
+          );
+          info!(
+            agent = %agent_cfg.name,
+            pid = %pid,
+            "spawned new agent (config change)"
+          );
+          runtime_ops.register(
+            agent_cfg.name.clone(),
+            pid,
+            handle.clone(),
+          );
+          handles.push((agent_cfg.name.clone(), handle));
+          joins.push((agent_cfg.name.clone(), join));
+        }
+
+        // Update process count metric
+        process_count.store(
+          handles.len(),
+          std::sync::atomic::Ordering::Relaxed,
+        );
+
+        if !diff.to_add.is_empty() || !diff.to_remove.is_empty() {
+          info!(
+            added = diff.to_add.len(),
+            removed = diff.to_remove.len(),
+            total = handles.len(),
+            "config reload complete"
+          );
+        }
+      }
+    }
+  }
 
   info!("shutting down gracefully...");
+
+  // Stop config watcher
+  watcher_handle.abort();
+  info!("config watcher stopped");
+
+  // Shutdown HTTP server first
+  if let Some(s) = server {
+    s.shutdown().await;
+    info!("health server stopped");
+  }
 
   // Kill all processes
   for (name, handle) in &handles {
@@ -698,6 +869,10 @@ async fn run_daemon_v2(
       }
     }
   }
+
+  // Shutdown the bridge worker
+  bridge_worker_handle.abort();
+  info!("LLM bridge stopped");
 
   info!("zeptobeam v2 stopped");
 }

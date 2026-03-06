@@ -218,7 +218,7 @@ fn start_child(
 ) -> (ChildMeta, JoinHandle<ProcessExit>) {
   let behavior = (spec.factory)();
   let (pid, handle, join) =
-    spawn_process_boxed(behavior, spec.user_mailbox_capacity, None, None);
+    spawn_process_boxed(behavior, spec.user_mailbox_capacity, None, None, None);
   let meta = ChildMeta {
     pid,
     handle,

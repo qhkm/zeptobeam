@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+  atomic::{AtomicU64, Ordering},
+  Arc,
+};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
@@ -17,11 +20,17 @@ pub struct ProcessExit {
 }
 
 /// Spawn a new process as a tokio task.
+///
+/// `last_wal_seq` is an optional shared counter that the `DurableHandle`
+/// writes to after each WAL append. The process reads it when encoding
+/// checkpoints so the checkpoint records the latest acknowledged WAL
+/// sequence. Pass `None` for non-durable scenarios.
 pub fn spawn_process(
   mut behavior: impl Behavior,
   user_mailbox_capacity: usize,
   checkpoint: Option<Vec<u8>>,
   checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+  last_wal_seq: Option<Arc<AtomicU64>>,
 ) -> (Pid, ProcessHandle, JoinHandle<ProcessExit>) {
   let pid = Pid::new();
   let (handle, mailbox) = create_mailbox(user_mailbox_capacity, 32);
@@ -34,6 +43,7 @@ pub fn spawn_process(
       kill_token,
       checkpoint,
       checkpoint_store,
+      last_wal_seq,
     )
     .await
   });
@@ -46,6 +56,7 @@ pub fn spawn_process_boxed(
   user_mailbox_capacity: usize,
   checkpoint: Option<Vec<u8>>,
   checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+  last_wal_seq: Option<Arc<AtomicU64>>,
 ) -> (Pid, ProcessHandle, JoinHandle<ProcessExit>) {
   let pid = Pid::new();
   let (handle, mailbox) = create_mailbox(user_mailbox_capacity, 32);
@@ -58,6 +69,7 @@ pub fn spawn_process_boxed(
       kill_token,
       checkpoint,
       checkpoint_store,
+      last_wal_seq,
     )
     .await
   });
@@ -71,6 +83,7 @@ async fn run_process(
   kill_token: tokio_util::sync::CancellationToken,
   checkpoint: Option<Vec<u8>>,
   checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+  last_wal_seq: Option<Arc<AtomicU64>>,
 ) -> ProcessExit {
   if let Err(e) = behavior.init(checkpoint).await {
     warn!(pid = %pid, error = %e, "process init failed");
@@ -137,8 +150,12 @@ async fn run_process(
               if let Some(ref store) = checkpoint_store {
                 if behavior.should_checkpoint() {
                   if let Some(data) = behavior.checkpoint() {
+                    let wal_seq = last_wal_seq
+                      .as_ref()
+                      .map(|a| a.load(Ordering::SeqCst))
+                      .unwrap_or(0);
                     let encoded =
-                      crate::durability::recovery::encode_checkpoint(0, &data);
+                      crate::durability::recovery::encode_checkpoint(wal_seq, &data);
                     if let Err(e) = store.save(pid, &encoded).await {
                       warn!(pid = %pid, error = %e, "checkpoint save failed");
                     }
@@ -153,8 +170,12 @@ async fn run_process(
             Action::Checkpoint => {
               if let Some(ref store) = checkpoint_store {
                 if let Some(data) = behavior.checkpoint() {
+                  let wal_seq = last_wal_seq
+                    .as_ref()
+                    .map(|a| a.load(Ordering::SeqCst))
+                    .unwrap_or(0);
                   let encoded =
-                    crate::durability::recovery::encode_checkpoint(0, &data);
+                    crate::durability::recovery::encode_checkpoint(wal_seq, &data);
                   if let Err(e) = store.save(pid, &encoded).await {
                     warn!(pid = %pid, error = %e, "checkpoint save failed");
                   }
@@ -222,7 +243,7 @@ mod tests {
     let behavior = CountBehavior {
       count: count.clone(),
     };
-    let (_pid, handle, join) = spawn_process(behavior, 16, None, None);
+    let (_pid, handle, join) = spawn_process(behavior, 16, None, None, None);
 
     handle.send_user(Message::text("a")).await.unwrap();
     handle.send_user(Message::text("b")).await.unwrap();
@@ -242,7 +263,7 @@ mod tests {
     let behavior = CountBehavior {
       count: count.clone(),
     };
-    let (_pid, handle, join) = spawn_process(behavior, 16, None, None);
+    let (_pid, handle, join) = spawn_process(behavior, 16, None, None, None);
 
     handle.kill();
     let exit = join.await.unwrap();
@@ -268,7 +289,7 @@ mod tests {
   #[tokio::test]
   async fn test_process_stops_on_action_stop() {
     let behavior = StopAfterOneBehavior;
-    let (_pid, handle, join) = spawn_process(behavior, 16, None, None);
+    let (_pid, handle, join) = spawn_process(behavior, 16, None, None, None);
 
     handle.send_user(Message::text("bye")).await.unwrap();
     let exit = join.await.unwrap();
@@ -281,7 +302,7 @@ mod tests {
     let behavior = CountBehavior {
       count: count.clone(),
     };
-    let (_pid, handle, join) = spawn_process(behavior, 16, None, None);
+    let (_pid, handle, join) = spawn_process(behavior, 16, None, None, None);
 
     drop(handle);
     let _exit = join.await.unwrap();
@@ -330,7 +351,7 @@ mod tests {
     let behavior = CheckpointBehavior {
       state: "initial".into(),
     };
-    let (pid, handle, join) = spawn_process(behavior, 16, None, Some(store.clone()));
+    let (pid, handle, join) = spawn_process(behavior, 16, None, Some(store.clone()), None);
 
     // Send checkpoint message
     handle.send_user(Message::text("checkpoint")).await.unwrap();
@@ -380,7 +401,7 @@ mod tests {
 
     let store = Arc::new(SqliteCheckpointStore::new(":memory:").unwrap());
     let behavior = AutoCheckpointBehavior { msg_count: 0 };
-    let (pid, handle, join) = spawn_process(behavior, 16, None, Some(store.clone()));
+    let (pid, handle, join) = spawn_process(behavior, 16, None, Some(store.clone()), None);
 
     // Send 4 messages — checkpoint should trigger after msg 3
     for i in 0..4 {

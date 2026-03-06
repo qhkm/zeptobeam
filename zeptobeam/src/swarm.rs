@@ -51,7 +51,7 @@ pub async fn run_sequential(
   for step in steps {
     info!(step_id = %step.id, "starting sequential step");
     let adapter = create_agent_adapter(step.config);
-    let (_pid, handle, join) = spawn_process(adapter, 64, None, None);
+    let (_pid, handle, join) = spawn_process(adapter, 64, None, None, None);
 
     if let Err(e) = handle.send_user(message.clone()).await {
       warn!(step_id = %step.id, error = %e, "failed to send message");
@@ -91,7 +91,7 @@ pub async fn run_parallel(
   for step in &steps {
     info!(step_id = %step.id, "starting parallel step");
     let adapter = create_agent_adapter(step.config.clone());
-    let (_pid, proc_handle, join) = spawn_process(adapter, 64, None, None);
+    let (_pid, proc_handle, join) = spawn_process(adapter, 64, None, None, None);
 
     if let Err(e) = proc_handle.send_user(message.clone()).await {
       warn!(step_id = %step.id, error = %e, "failed to send message");
@@ -167,7 +167,7 @@ pub async fn run_dag(
 
       let adapter = create_agent_adapter(step.config.clone());
       let (_pid, proc_handle, join) =
-        spawn_process(adapter, 64, None, None);
+        spawn_process(adapter, 64, None, None, None);
 
       if let Err(e) = proc_handle.send_user(message.clone()).await {
         warn!(step_id = %step_id, error = %e, "failed to send message");
