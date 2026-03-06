@@ -4,4 +4,5 @@ pub mod reactor;
 pub mod run_queue;
 pub mod runtime;
 pub mod scheduler;
+pub mod timer_wheel;
 pub mod turn_executor;
