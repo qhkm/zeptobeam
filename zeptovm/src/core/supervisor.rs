@@ -8,6 +8,13 @@ pub enum BackoffPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisionStrategy {
+  OneForOne,
+  OneForAll,
+  RestForOne,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestartStrategy {
     Permanent,
     Transient,
@@ -16,9 +23,10 @@ pub enum RestartStrategy {
 
 #[derive(Debug, Clone)]
 pub struct SupervisorSpec {
-    pub max_restarts: u32,
-    pub restart_window_ms: u64,
-    pub backoff: BackoffPolicy,
+  pub max_restarts: u32,
+  pub restart_window_ms: u64,
+  pub backoff: BackoffPolicy,
+  pub strategy: SupervisionStrategy,
 }
 
 impl Default for SupervisorSpec {
@@ -27,6 +35,7 @@ impl Default for SupervisorSpec {
             max_restarts: 3,
             restart_window_ms: 5000,
             backoff: BackoffPolicy::Immediate,
+            strategy: SupervisionStrategy::OneForOne,
         }
     }
 }
@@ -116,6 +125,15 @@ mod tests {
     fn test_restart_strategy() {
         assert_eq!(RestartStrategy::Permanent, RestartStrategy::Permanent);
         assert_ne!(RestartStrategy::Permanent, RestartStrategy::Transient);
+    }
+
+    #[test]
+    fn test_supervision_strategy_default_one_for_one() {
+        let spec = SupervisorSpec::default();
+        assert_eq!(
+            spec.strategy,
+            SupervisionStrategy::OneForOne
+        );
     }
 
     #[test]

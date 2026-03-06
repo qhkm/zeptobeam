@@ -173,7 +173,7 @@ impl StepBehavior for SupervisorBehavior {
 mod tests {
   use super::*;
   use crate::core::supervisor::{
-    BackoffPolicy, SupervisorSpec,
+    BackoffPolicy, SupervisionStrategy, SupervisorSpec,
   };
 
   fn make_supervisor(
@@ -184,6 +184,7 @@ mod tests {
       max_restarts,
       restart_window_ms: window_ms,
       backoff: BackoffPolicy::Immediate,
+      strategy: SupervisionStrategy::OneForOne,
     })
   }
 
@@ -314,6 +315,7 @@ mod tests {
       max_restarts: 5,
       restart_window_ms: 10000,
       backoff: BackoffPolicy::Fixed(1000),
+      strategy: SupervisionStrategy::OneForOne,
     });
     let sup_pid = Pid::from_raw(1);
     let child_pid = Pid::from_raw(10);

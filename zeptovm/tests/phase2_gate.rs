@@ -6,7 +6,9 @@ use zeptovm::core::effect::{
 };
 use zeptovm::core::message::{Envelope, Signal};
 use zeptovm::core::step_result::StepResult;
-use zeptovm::core::supervisor::{BackoffPolicy, RestartStrategy, SupervisorSpec};
+use zeptovm::core::supervisor::{
+  BackoffPolicy, RestartStrategy, SupervisionStrategy, SupervisorSpec,
+};
 use zeptovm::core::timer::{TimerKind, TimerSpec};
 use zeptovm::core::turn_context::TurnContext;
 use zeptovm::durability::idempotency::IdempotencyStore;
@@ -48,6 +50,7 @@ fn phase2_gate_supervisor_escalation() {
         max_restarts: 2,
         restart_window_ms: 5000,
         backoff: BackoffPolicy::Immediate,
+        strategy: SupervisionStrategy::OneForOne,
     });
     let sup_pid = Pid::from_raw(1);
     let child = Pid::from_raw(10);
