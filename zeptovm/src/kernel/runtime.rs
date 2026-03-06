@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 
 use crate::{
+  control::budget::BudgetGate,
   core::{
     behavior::StepBehavior,
     effect::{
@@ -63,6 +64,7 @@ pub struct SchedulerRuntime {
     HashMap<u64, (Pid, CompensationSpec)>,
   idempotency_store: Option<IdempotencyStore>,
   budget: BudgetState,
+  budget_gate: Option<BudgetGate>,
   budget_violations: Vec<BudgetViolation>,
   budget_enabled: bool,
   metrics: Metrics,
@@ -79,6 +81,7 @@ impl SchedulerRuntime {
       pending_compensations: HashMap::new(),
       idempotency_store: None,
       budget: BudgetState::default(),
+      budget_gate: None,
       budget_violations: Vec::new(),
       budget_enabled: false,
       metrics: Metrics::new(),
@@ -104,6 +107,7 @@ impl SchedulerRuntime {
         IdempotencyStore::open_in_memory().unwrap(),
       ),
       budget: BudgetState::default(),
+      budget_gate: None,
       budget_violations: Vec::new(),
       budget_enabled: false,
       metrics: Metrics::new(),
@@ -119,6 +123,20 @@ impl SchedulerRuntime {
 
   /// Enable budget checking with default limits.
   pub fn enable_budget(mut self) -> Self {
+    self.budget_enabled = true;
+    self
+  }
+
+  /// Enable atomic two-phase budget gate.
+  pub fn with_budget_gate(
+    mut self,
+    token_limit: Option<u64>,
+    cost_limit_microdollars: Option<u64>,
+  ) -> Self {
+    self.budget_gate = Some(BudgetGate::new(
+      token_limit,
+      cost_limit_microdollars,
+    ));
     self.budget_enabled = true;
     self
   }
@@ -184,6 +202,25 @@ impl SchedulerRuntime {
                   .as_millis() as u64,
               },
             );
+          }
+
+          // Commit usage to BudgetGate
+          if let Some(ref gate) = self.budget_gate {
+            let tokens = completion
+              .result
+              .output
+              .as_ref()
+              .and_then(|v| v.get("tokens_used"))
+              .and_then(|v| v.as_u64())
+              .unwrap_or(100);
+            let cost = completion
+              .result
+              .output
+              .as_ref()
+              .and_then(|v| v.get("cost_microdollars"))
+              .and_then(|v| v.as_u64())
+              .unwrap_or(0);
+            gate.commit(tokens, cost);
           }
         }
         // Record in idempotency store
@@ -431,6 +468,12 @@ impl SchedulerRuntime {
   ) -> bool {
     match &req.kind {
       EffectKind::LlmCall => {
+        // Use BudgetGate if available (atomic two-phase)
+        if let Some(ref gate) = self.budget_gate {
+          let estimated_tokens = 1000;
+          return !gate.precheck(estimated_tokens);
+        }
+        // Fall back to simple BudgetState
         self.budget.usd_remaining <= 0.0
           || self.budget.token_remaining == 0
       }
@@ -496,6 +539,11 @@ impl SchedulerRuntime {
   /// Mutably access the budget.
   pub fn budget_mut(&mut self) -> &mut BudgetState {
     &mut self.budget
+  }
+
+  /// Get a reference to the BudgetGate (if configured).
+  pub fn budget_gate(&self) -> Option<&BudgetGate> {
+    self.budget_gate.as_ref()
   }
 
   /// Check if the runtime has a reactor.
@@ -1181,6 +1229,51 @@ mod tests {
       rt.metrics().counter("turns.committed") >= 2,
       "each process should have its turn committed"
     );
+  }
+
+  #[test]
+  fn test_runtime_budget_gate_blocks_when_exhausted() {
+    let mut rt = SchedulerRuntime::new()
+      .with_budget_gate(Some(100), None); // 100 token limit
+
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+
+    // With 100 token limit and 1000 estimated, precheck
+    // fails so the effect should be blocked
+    let violations = rt.take_budget_violations();
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].pid, pid);
+  }
+
+  #[test]
+  fn test_runtime_budget_gate_allows_when_sufficient() {
+    let mut rt = SchedulerRuntime::new()
+      .with_budget_gate(Some(1_000_000), None);
+
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+
+    let violations = rt.take_budget_violations();
+    assert_eq!(violations.len(), 0);
+  }
+
+  #[test]
+  fn test_runtime_budget_gate_accessor() {
+    let rt = SchedulerRuntime::new()
+      .with_budget_gate(Some(500), Some(10_000));
+
+    let gate = rt.budget_gate().unwrap();
+    assert_eq!(gate.tokens_used(), 0);
+    assert_eq!(gate.cost_used(), 0);
+  }
+
+  #[test]
+  fn test_runtime_no_budget_gate_by_default() {
+    let rt = SchedulerRuntime::new();
+    assert!(rt.budget_gate().is_none());
   }
 
   #[test]
