@@ -3,12 +3,15 @@ use std::collections::HashMap;
 use crate::{
   core::{
     effect::{EffectRequest, EffectResult},
-    message::Envelope,
+    message::{Envelope, Signal},
     step_result::StepResult,
     turn_context::TurnIntent,
   },
   error::Reason,
-  kernel::process_table::{ProcessEntry, ProcessRuntimeState},
+  kernel::{
+    process_table::{ProcessEntry, ProcessRuntimeState},
+    timer_wheel::TimerWheel,
+  },
   pid::Pid,
 };
 
@@ -31,6 +34,8 @@ pub struct SchedulerEngine {
   outbound_messages: Vec<Envelope>,
   max_reductions: u32,
   completed: Vec<(Pid, Reason)>,
+  timer_wheel: TimerWheel,
+  clock_ms: u64,
 }
 
 impl SchedulerEngine {
@@ -43,6 +48,8 @@ impl SchedulerEngine {
       outbound_messages: Vec::new(),
       max_reductions: 200,
       completed: Vec::new(),
+      timer_wheel: TimerWheel::new(),
+      clock_ms: 0,
     }
   }
 
@@ -174,11 +181,11 @@ impl SchedulerEngine {
           TurnIntent::PatchState(_data) => {
             // Phase 2: persist state patch
           }
-          TurnIntent::ScheduleTimer(_spec) => {
-            // Phase 2: wire into timer wheel
+          TurnIntent::ScheduleTimer(spec) => {
+            self.timer_wheel.schedule(spec);
           }
-          TurnIntent::CancelTimer(_id) => {
-            // Phase 2: wire into timer wheel
+          TurnIntent::CancelTimer(id) => {
+            self.timer_wheel.cancel(id);
           }
         }
       }
@@ -291,6 +298,35 @@ impl SchedulerEngine {
       self.processes.remove(pid);
     }
     dead
+  }
+
+  /// Advance the logical clock and deliver fired timers.
+  ///
+  /// Ticks the timer wheel at `now_ms`, delivering
+  /// `Signal::TimerFired` to each owner whose timer expired.
+  /// Wakes any owner that was `WaitingMessage`.
+  pub fn advance_clock(&mut self, now_ms: u64) {
+    self.clock_ms = now_ms;
+    let fired = self.timer_wheel.tick(now_ms);
+    for spec in fired {
+      let env = Envelope::signal(
+        spec.owner,
+        Signal::TimerFired(spec.id),
+      );
+      let owner = spec.owner;
+      if let Some(proc) = self.processes.get_mut(&owner) {
+        proc.mailbox.push(env);
+        if proc.state == ProcessRuntimeState::WaitingMessage {
+          proc.state = ProcessRuntimeState::Ready;
+          self.ready_queue.push(owner);
+        }
+      }
+    }
+  }
+
+  /// Current logical clock value (milliseconds).
+  pub fn clock_ms(&self) -> u64 {
+    self.clock_ms
   }
 }
 
@@ -535,5 +571,135 @@ mod tests {
     }
     engine.tick();
     assert_eq!(engine.process_count(), 100);
+  }
+
+  #[test]
+  fn test_scheduler_timer_schedule_and_fire() {
+    use crate::core::message::Signal;
+
+    let mut engine = SchedulerEngine::new();
+
+    // On any user message, schedules a timer.
+    // On TimerFired, exits normally.
+    struct TimerScheduler;
+    impl StepBehavior for TimerScheduler {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        msg: Envelope,
+        ctx: &mut TurnContext,
+      ) -> StepResult {
+        match &msg.payload {
+          EnvelopePayload::Signal(
+            Signal::TimerFired(_),
+          ) => StepResult::Done(Reason::Normal),
+          _ => {
+            use crate::core::timer::{
+              TimerKind, TimerSpec,
+            };
+            let spec = TimerSpec::new(
+              ctx.pid,
+              TimerKind::Timeout,
+              1000,
+            );
+            ctx.schedule_timer(spec);
+            StepResult::Continue
+          }
+        }
+      }
+      fn terminate(&mut self, _: &Reason) {}
+    }
+
+    let pid = engine.spawn(Box::new(TimerScheduler));
+    engine.send(Envelope::text(pid, "schedule"));
+    engine.tick(); // Handles msg, emits ScheduleTimer
+
+    // Timer not fired yet
+    assert!(engine.take_completed().is_empty());
+
+    // Advance clock past deadline
+    engine.advance_clock(1001);
+    engine.tick(); // Handles TimerFired signal
+
+    let completed = engine.take_completed();
+    assert_eq!(completed.len(), 1);
+    assert!(matches!(completed[0].1, Reason::Normal));
+  }
+
+  #[test]
+  fn test_scheduler_timer_cancel() {
+    use crate::core::message::{Payload, Signal};
+
+    let mut engine = SchedulerEngine::new();
+
+    struct TimerCanceller {
+      timer_id: Option<crate::core::timer::TimerId>,
+    }
+    impl StepBehavior for TimerCanceller {
+      fn init(
+        &mut self,
+        _: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        msg: Envelope,
+        ctx: &mut TurnContext,
+      ) -> StepResult {
+        match &msg.payload {
+          EnvelopePayload::Signal(
+            Signal::TimerFired(_),
+          ) => {
+            // Should NOT reach here if cancelled
+            StepResult::Fail(Reason::Custom(
+              "unexpected timer".into(),
+            ))
+          }
+          EnvelopePayload::User(
+            Payload::Text(text),
+          ) if text == "cancel" => {
+            if let Some(id) = self.timer_id {
+              ctx.cancel_timer(id);
+            }
+            StepResult::Continue
+          }
+          _ => {
+            use crate::core::timer::{
+              TimerKind, TimerSpec,
+            };
+            let spec = TimerSpec::new(
+              ctx.pid,
+              TimerKind::Timeout,
+              1000,
+            );
+            self.timer_id = Some(spec.id);
+            ctx.schedule_timer(spec);
+            StepResult::Continue
+          }
+        }
+      }
+      fn terminate(&mut self, _: &Reason) {}
+    }
+
+    let pid = engine
+      .spawn(Box::new(TimerCanceller { timer_id: None }));
+    engine.send(Envelope::text(pid, "schedule"));
+    engine.tick(); // Schedules timer
+
+    engine.send(Envelope::text(pid, "cancel"));
+    engine.tick(); // Cancels timer
+
+    engine.advance_clock(2000); // Past deadline
+    engine.tick(); // No TimerFired should arrive
+
+    // Process should NOT have failed
+    let completed = engine.take_completed();
+    assert!(completed.is_empty());
   }
 }
