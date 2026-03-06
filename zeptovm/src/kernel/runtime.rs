@@ -1,3 +1,5 @@
+use tracing::{debug, warn};
+
 use crate::{
   core::{
     behavior::StepBehavior,
@@ -7,6 +9,7 @@ use crate::{
   durability::{journal::Journal, snapshot::SnapshotStore},
   error::Reason,
   kernel::{
+    metrics::Metrics,
     process_table::ProcessRuntimeState,
     reactor::Reactor,
     scheduler::SchedulerEngine,
@@ -49,6 +52,7 @@ pub struct SchedulerRuntime {
   budget: BudgetState,
   budget_violations: Vec<BudgetViolation>,
   budget_enabled: bool,
+  metrics: Metrics,
 }
 
 impl SchedulerRuntime {
@@ -61,6 +65,7 @@ impl SchedulerRuntime {
       budget: BudgetState::default(),
       budget_violations: Vec::new(),
       budget_enabled: false,
+      metrics: Metrics::new(),
     }
   }
 
@@ -80,6 +85,7 @@ impl SchedulerRuntime {
       budget: BudgetState::default(),
       budget_violations: Vec::new(),
       budget_enabled: false,
+      metrics: Metrics::new(),
     }
   }
 
@@ -107,7 +113,13 @@ impl SchedulerRuntime {
     &mut self,
     behavior: Box<dyn StepBehavior>,
   ) -> Pid {
-    self.engine.spawn(behavior)
+    let pid = self.engine.spawn(behavior);
+    self.metrics.inc("processes.spawned");
+    self.metrics.gauge_set(
+      "processes.active",
+      self.engine.process_count() as i64,
+    );
+    pid
   }
 
   /// Send a message to a process.
@@ -132,6 +144,8 @@ impl SchedulerRuntime {
 
     // 2. Tick scheduler
     let stepped = self.engine.tick();
+    debug!(stepped, "runtime tick complete");
+    self.metrics.inc("scheduler.ticks");
 
     // 3. Process outbound effects
     let effects = self.engine.take_outbound_effects();
@@ -139,6 +153,12 @@ impl SchedulerRuntime {
       if self.budget_enabled && self.should_block_effect(&req)
       {
         // Budget exceeded -- deliver failure result
+        warn!(
+          pid = %pid,
+          kind = ?req.kind,
+          "effect blocked by budget"
+        );
+        self.metrics.inc("budget.blocked");
         let violation = BudgetViolation {
           pid,
           effect_kind: req.kind.clone(),
@@ -153,6 +173,7 @@ impl SchedulerRuntime {
         self.engine.deliver_effect_result(result);
       } else {
         // Dispatch to reactor
+        self.metrics.inc("effects.dispatched");
         if let Some(ref reactor) = self.reactor {
           reactor.dispatch(pid, req);
         }
@@ -209,7 +230,17 @@ impl SchedulerRuntime {
 
   /// Take completed processes.
   pub fn take_completed(&mut self) -> Vec<(Pid, Reason)> {
-    self.engine.take_completed()
+    let completed = self.engine.take_completed();
+    for _ in &completed {
+      self.metrics.inc("processes.exited");
+    }
+    if !completed.is_empty() {
+      self.metrics.gauge_set(
+        "processes.active",
+        self.engine.process_count() as i64,
+      );
+    }
+    completed
   }
 
   /// Take budget violations.
@@ -221,7 +252,12 @@ impl SchedulerRuntime {
 
   /// Reap completed processes.
   pub fn reap_completed(&mut self) -> Vec<Pid> {
-    self.engine.reap_completed()
+    let reaped = self.engine.reap_completed();
+    self.metrics.gauge_set(
+      "processes.active",
+      self.engine.process_count() as i64,
+    );
+    reaped
   }
 
   /// Get a reference to the budget state.
@@ -246,6 +282,11 @@ impl SchedulerRuntime {
     result: EffectResult,
   ) {
     self.engine.deliver_effect_result(result);
+  }
+
+  /// Get a reference to the metrics.
+  pub fn metrics(&self) -> &Metrics {
+    &self.metrics
   }
 }
 
@@ -460,5 +501,59 @@ mod tests {
     let reaped = rt.reap_completed();
     assert_eq!(reaped.len(), 1);
     assert_eq!(rt.process_count(), 0);
+  }
+
+  #[test]
+  fn test_runtime_metrics_spawn() {
+    let mut rt = SchedulerRuntime::new();
+    rt.spawn(Box::new(Echo));
+    rt.spawn(Box::new(Echo));
+    assert_eq!(
+      rt.metrics().counter("processes.spawned"),
+      2
+    );
+    assert_eq!(rt.metrics().gauge("processes.active"), 2);
+  }
+
+  #[test]
+  fn test_runtime_metrics_ticks() {
+    let mut rt = SchedulerRuntime::new();
+    rt.spawn(Box::new(Echo));
+    rt.tick();
+    assert_eq!(
+      rt.metrics().counter("scheduler.ticks"),
+      1
+    );
+  }
+
+  #[test]
+  fn test_runtime_metrics_budget_blocked() {
+    let budget = BudgetState {
+      usd_remaining: 0.0,
+      token_remaining: 0,
+    };
+    let mut rt =
+      SchedulerRuntime::new().with_budget(budget);
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+    assert_eq!(
+      rt.metrics().counter("budget.blocked"),
+      1
+    );
+  }
+
+  #[test]
+  fn test_runtime_metrics_process_exit() {
+    let mut rt = SchedulerRuntime::new();
+    let pid = rt.spawn(Box::new(Stopper));
+    rt.send(Envelope::text(pid, "stop"));
+    rt.tick();
+    let completed = rt.take_completed();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(
+      rt.metrics().counter("processes.exited"),
+      1
+    );
   }
 }

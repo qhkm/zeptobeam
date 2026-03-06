@@ -1,6 +1,7 @@
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use tracing::{info_span, Instrument};
 
 use crate::core::effect::{
   EffectKind, EffectRequest, EffectResult,
@@ -59,14 +60,24 @@ impl Reactor {
           match recv_result {
             Ok(Ok(dispatch)) => {
               let tx = completion_tx.clone();
-              tokio::spawn(async move {
-                let result =
-                  execute_effect(&dispatch.request).await;
-                let _ = tx.send(EffectCompletion {
-                  pid: dispatch.pid,
-                  result,
-                });
-              });
+              let span = info_span!(
+                "effect_dispatch",
+                effect_id =
+                  %dispatch.request.effect_id,
+                kind = ?dispatch.request.kind,
+              );
+              tokio::spawn(
+                async move {
+                  let result =
+                    execute_effect(&dispatch.request)
+                      .await;
+                  let _ = tx.send(EffectCompletion {
+                    pid: dispatch.pid,
+                    result,
+                  });
+                }
+                .instrument(span),
+              );
             }
             _ => break, // channel closed or join error
           }

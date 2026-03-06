@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use tracing::{debug, info_span};
+
 use crate::{
   core::{
     effect::{EffectRequest, EffectResult},
@@ -12,6 +14,7 @@ use crate::{
     process_table::{ProcessEntry, ProcessRuntimeState},
     timer_wheel::TimerWheel,
   },
+  link::LinkTable,
   pid::Pid,
 };
 
@@ -36,6 +39,8 @@ pub struct SchedulerEngine {
   completed: Vec<(Pid, Reason)>,
   timer_wheel: TimerWheel,
   clock_ms: u64,
+  link_table: LinkTable,
+  tick_count: u64,
 }
 
 impl SchedulerEngine {
@@ -50,6 +55,8 @@ impl SchedulerEngine {
       completed: Vec::new(),
       timer_wheel: TimerWheel::new(),
       clock_ms: 0,
+      link_table: LinkTable::new(),
+      tick_count: 0,
     }
   }
 
@@ -107,6 +114,12 @@ impl SchedulerEngine {
   /// Run one tick: step all ready processes up to max_reductions
   /// each. Returns: number of processes stepped.
   pub fn tick(&mut self) -> usize {
+    self.tick_count += 1;
+    let _span = info_span!(
+      "scheduler_tick",
+      tick = self.tick_count,
+    )
+    .entered();
     let ready: Vec<Pid> = self.ready_queue.drain(..).collect();
     let mut stepped = 0;
 
@@ -130,6 +143,8 @@ impl SchedulerEngine {
   }
 
   fn step_process(&mut self, pid: Pid) {
+    let _span =
+      info_span!("process_step", pid = pid.raw()).entered();
     // Set to Running (skip already-terminated processes)
     if let Some(proc) = self.processes.get_mut(&pid) {
       if proc.state == ProcessRuntimeState::Done
@@ -190,6 +205,18 @@ impl SchedulerEngine {
           TurnIntent::Rollback => {
             // Phase 2: wire into CompensationLog
           }
+          TurnIntent::Link(target) => {
+            self.link_table.link(pid, target);
+          }
+          TurnIntent::Unlink(target) => {
+            self.link_table.unlink(pid, target);
+          }
+          TurnIntent::Monitor(target) => {
+            self.link_table.monitor(pid, target);
+          }
+          TurnIntent::Demonitor(mref) => {
+            self.link_table.demonitor(mref);
+          }
         }
       }
 
@@ -229,14 +256,9 @@ impl SchedulerEngine {
           self.outbound_effects.push((pid, req));
           return;
         }
-        StepResult::Done(reason) => {
-          if let Some(proc) = self.processes.get_mut(&pid) {
-            proc.terminate(&reason);
-          }
-          self.completed.push((pid, reason));
-          return;
-        }
-        StepResult::Fail(reason) => {
+        StepResult::Done(reason)
+        | StepResult::Fail(reason) => {
+          self.propagate_exit(pid, &reason);
           if let Some(proc) = self.processes.get_mut(&pid) {
             proc.terminate(&reason);
           }
@@ -247,7 +269,98 @@ impl SchedulerEngine {
     }
   }
 
-  /// Take outbound effect requests (for the reactor/dispatcher).
+  /// Propagate exit signals to linked processes, monitors,
+  /// and parent.
+  fn propagate_exit(&mut self, pid: Pid, reason: &Reason) {
+    // Links: notify all linked processes
+    let linked = self.link_table.remove_all(&pid);
+    for linked_pid in linked {
+      if let Some(proc) =
+        self.processes.get_mut(&linked_pid)
+      {
+        proc.mailbox.push(Envelope::signal(
+          linked_pid,
+          Signal::ExitLinked(pid, reason.clone()),
+        ));
+        if proc.state
+          == ProcessRuntimeState::WaitingMessage
+        {
+          proc.state = ProcessRuntimeState::Ready;
+          self.ready_queue.push(linked_pid);
+        }
+      }
+    }
+
+    // Monitors: notify all watchers
+    let monitors =
+      self.link_table.remove_monitors_of(&pid);
+    for (_mref, watcher_pid) in monitors {
+      if let Some(proc) =
+        self.processes.get_mut(&watcher_pid)
+      {
+        proc.mailbox.push(Envelope::signal(
+          watcher_pid,
+          Signal::MonitorDown(pid, reason.clone()),
+        ));
+        if proc.state
+          == ProcessRuntimeState::WaitingMessage
+        {
+          proc.state = ProcessRuntimeState::Ready;
+          self.ready_queue.push(watcher_pid);
+        }
+      }
+    }
+
+    // Parent notification
+    let parent_pid =
+      self.processes.get(&pid).and_then(|p| p.parent);
+    if let Some(parent) = parent_pid {
+      if let Some(proc) =
+        self.processes.get_mut(&parent)
+      {
+        proc.mailbox.push(Envelope::signal(
+          parent,
+          Signal::ChildExited {
+            child_pid: pid,
+            reason: reason.clone(),
+          },
+        ));
+        if proc.state
+          == ProcessRuntimeState::WaitingMessage
+        {
+          proc.state = ProcessRuntimeState::Ready;
+          self.ready_queue.push(parent);
+        }
+      }
+    }
+  }
+
+  /// Create a link between two processes (for testing).
+  pub fn link(&mut self, a: Pid, b: Pid) {
+    self.link_table.link(a, b);
+  }
+
+  /// Spawn a process with a parent (for supervisor
+  /// wiring).
+  pub fn spawn_with_parent(
+    &mut self,
+    behavior: Box<
+      dyn crate::core::behavior::StepBehavior,
+    >,
+    parent: Pid,
+  ) -> Pid {
+    let pid = Pid::new();
+    let mut entry = ProcessEntry::new(pid, behavior);
+    entry.parent = Some(parent);
+    entry.init(None);
+    entry.state = ProcessRuntimeState::Ready;
+    self.processes.insert(pid, entry);
+    self.ready_queue.push(pid);
+    pid
+  }
+
+  /// Take outbound effect requests
+  /// (for the reactor/dispatcher).
   pub fn take_outbound_effects(
     &mut self,
   ) -> Vec<(Pid, EffectRequest)> {
@@ -704,5 +817,50 @@ mod tests {
     // Process should NOT have failed
     let completed = engine.take_completed();
     assert!(completed.is_empty());
+  }
+
+  #[test]
+  fn test_scheduler_link_exit_propagation() {
+    let mut engine = SchedulerEngine::new();
+    let a = engine.spawn(Box::new(Stopper));
+    let b = engine.spawn(Box::new(Echo));
+    engine.link(a, b);
+    engine.send(Envelope::text(a, "stop"));
+    engine.tick();
+
+    // a completed
+    let completed = engine.take_completed();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].0, a);
+
+    // b should have received ExitLinked signal and been
+    // woken
+    engine.tick();
+    // b should still be alive (normal exit, non-trapping
+    // => Continue)
+    assert!(engine.has_process(b));
+  }
+
+  #[test]
+  fn test_scheduler_parent_child_exit_notification() {
+    let mut engine = SchedulerEngine::new();
+    let parent = engine.spawn(Box::new(Echo));
+
+    // Spawn child with parent
+    let child = engine.spawn_with_parent(
+      Box::new(Stopper),
+      parent,
+    );
+    engine.send(Envelope::text(child, "stop"));
+    engine.tick();
+
+    // Child completed
+    let completed = engine.take_completed();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].0, child);
+
+    // Parent should have ChildExited in mailbox
+    engine.tick();
+    assert!(engine.has_process(parent));
   }
 }

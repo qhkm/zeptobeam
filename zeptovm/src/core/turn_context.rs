@@ -23,7 +23,11 @@ pub enum TurnIntent {
   ScheduleTimer(crate::core::timer::TimerSpec),
   CancelTimer(crate::core::timer::TimerId),
   Rollback,
-  // Phase 2: SpawnProcess, Link, Monitor, DebitBudget
+  Link(Pid),
+  Unlink(Pid),
+  Monitor(Pid),
+  Demonitor(crate::link::MonitorRef),
+  // Phase 2: SpawnProcess, DebitBudget
 }
 
 /// Context passed to behavior.handle(). Handlers emit intents
@@ -83,6 +87,26 @@ impl TurnContext {
   /// effects.
   pub fn rollback(&mut self) {
     self.intents.push(TurnIntent::Rollback);
+  }
+
+  /// Create a bidirectional link to another process.
+  pub fn link(&mut self, target: Pid) {
+    self.intents.push(TurnIntent::Link(target));
+  }
+
+  /// Remove a bidirectional link to another process.
+  pub fn unlink(&mut self, target: Pid) {
+    self.intents.push(TurnIntent::Unlink(target));
+  }
+
+  /// Monitor another process.
+  pub fn monitor(&mut self, target: Pid) {
+    self.intents.push(TurnIntent::Monitor(target));
+  }
+
+  /// Remove a monitor.
+  pub fn demonitor(&mut self, mref: crate::link::MonitorRef) {
+    self.intents.push(TurnIntent::Demonitor(mref));
   }
 
   /// Take all collected intents (consumed by turn executor).
