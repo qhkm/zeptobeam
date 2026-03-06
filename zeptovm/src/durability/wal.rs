@@ -1,7 +1,9 @@
 use crate::pid::Pid;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+  atomic::{AtomicU64, Ordering},
+  Arc, Mutex,
+};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -36,7 +38,9 @@ impl SqliteWalStore {
   pub fn new(path: &str) -> Result<Self, BoxError> {
     let conn = rusqlite::Connection::open(path)?;
     conn.execute_batch(
-      "CREATE TABLE IF NOT EXISTS wal_entries (
+      "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             CREATE TABLE IF NOT EXISTS wal_entries (
                 wal_seq     INTEGER PRIMARY KEY,
                 message_id  BLOB NOT NULL,
                 sender      INTEGER NOT NULL,
@@ -80,8 +84,7 @@ impl SqliteWalStore {
     let conn = Arc::clone(&self.conn);
     let seq = tokio::task::spawn_blocking(move || {
       let conn = conn.lock().expect("wal store lock poisoned");
-      let mut stmt =
-        conn.prepare("SELECT COALESCE(MAX(wal_seq), 0) FROM wal_entries")?;
+      let mut stmt = conn.prepare("SELECT COALESCE(MAX(wal_seq), 0) FROM wal_entries")?;
       let max_seq: i64 = stmt.query_row([], |row| row.get(0))?;
       Ok::<u64, BoxError>((max_seq as u64) + 1)
     })
@@ -116,11 +119,14 @@ impl SqliteWalStore {
           let payload: Vec<u8> = row.get(5)?;
           let timestamp: i64 = row.get(6)?;
 
-          let message_id = u128::from_be_bytes(
-            message_id_bytes
-              .try_into()
-              .expect("message_id must be 16 bytes"),
-          );
+          let message_id_arr: [u8; 16] = message_id_bytes.try_into().map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+              1,
+              rusqlite::types::Type::Blob,
+              "message_id must be 16 bytes".into(),
+            )
+          })?;
+          let message_id = u128::from_be_bytes(message_id_arr);
 
           Ok(WalEntry {
             wal_seq: wal_seq as u64,
@@ -170,9 +176,7 @@ pub struct WalWriter {
 
 impl WalWriter {
   /// Create a new writer, loading the next sequence number from the store.
-  pub async fn new(
-    store: Arc<SqliteWalStore>,
-  ) -> Result<Self, BoxError> {
+  pub async fn new(store: Arc<SqliteWalStore>) -> Result<Self, BoxError> {
     let seq = store.next_seq().await?;
     Ok(Self {
       store,
@@ -232,8 +236,7 @@ mod tests {
     };
     store.append(entry).await.unwrap();
 
-    let entries =
-      store.replay_from(0, Pid::from_raw(2)).await.unwrap();
+    let entries = store.replay_from(0, Pid::from_raw(2)).await.unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].wal_seq, 1);
     assert_eq!(entries[0].payload, b"hello");
@@ -269,8 +272,7 @@ mod tests {
       .await
       .unwrap();
 
-    let entries =
-      store.replay_from(0, Pid::from_raw(2)).await.unwrap();
+    let entries = store.replay_from(0, Pid::from_raw(2)).await.unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].payload, b"for-2");
   }
@@ -385,8 +387,7 @@ mod tests {
     assert_eq!(seq1, 1);
     assert_eq!(seq2, 2);
 
-    let entries =
-      store.replay_from(0, Pid::from_raw(2)).await.unwrap();
+    let entries = store.replay_from(0, Pid::from_raw(2)).await.unwrap();
     assert_eq!(entries.len(), 2);
   }
 }

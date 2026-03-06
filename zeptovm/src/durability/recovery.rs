@@ -1,7 +1,12 @@
-use crate::durability::checkpoint::CheckpointStore;
-use crate::durability::wal::{SqliteWalStore, WalEntry};
-use crate::pid::Pid;
+use crate::{
+  durability::{
+    checkpoint::CheckpointStore,
+    wal::{SqliteWalStore, WalEntry},
+  },
+  pid::Pid,
+};
 use std::collections::HashSet;
+use tracing::warn;
 
 /// Represents the recovery plan for a single process.
 #[derive(Debug)]
@@ -75,7 +80,7 @@ pub async fn build_recovery_plan(
         (seq, Some(state.to_vec()))
       }
       None => {
-        // Checkpoint data too short to decode; treat as no checkpoint
+        warn!(pid = %pid, "checkpoint data corrupt or too short — discarding, replaying from WAL seq 0");
         (0, None)
       }
     },
@@ -106,9 +111,13 @@ pub async fn build_recovery_plan(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::durability::checkpoint::SqliteCheckpointStore;
-  use crate::durability::wal::{SqliteWalStore, WalEntry};
-  use crate::pid::Pid;
+  use crate::{
+    durability::{
+      checkpoint::SqliteCheckpointStore,
+      wal::{SqliteWalStore, WalEntry},
+    },
+    pid::Pid,
+  };
 
   #[tokio::test]
   async fn test_recovery_no_checkpoint_no_wal() {
