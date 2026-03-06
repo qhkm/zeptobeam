@@ -11,6 +11,7 @@ use crate::{
   },
   error::Reason,
   kernel::{
+    name_registry::NameRegistry,
     process_table::{ProcessEntry, ProcessRuntimeState},
     timer_wheel::TimerWheel,
   },
@@ -45,6 +46,7 @@ pub struct SchedulerEngine {
   timer_wheel: TimerWheel,
   clock_ms: u64,
   link_table: LinkTable,
+  name_registry: NameRegistry,
   tick_count: u64,
 }
 
@@ -65,6 +67,7 @@ impl SchedulerEngine {
       timer_wheel: TimerWheel::new(),
       clock_ms: 0,
       link_table: LinkTable::new(),
+      name_registry: NameRegistry::new(),
       tick_count: 0,
     }
   }
@@ -313,6 +316,9 @@ impl SchedulerEngine {
   /// Propagate exit signals to linked processes, monitors,
   /// and parent.
   fn propagate_exit(&mut self, pid: Pid, reason: &Reason) {
+    // Auto-unregister name on exit
+    self.name_registry.unregister_pid(pid);
+
     // Links: notify all linked processes
     let linked = self.link_table.remove_all(&pid);
     for linked_pid in linked {
@@ -549,6 +555,51 @@ impl SchedulerEngine {
     spec: crate::core::timer::TimerSpec,
   ) {
     self.timer_wheel.schedule(spec);
+  }
+
+  /// Register a name for a process.
+  pub fn register_name(
+    &mut self,
+    name: String,
+    pid: Pid,
+  ) -> Result<(), String> {
+    if !self.processes.contains_key(&pid) {
+      return Err(format!(
+        "process {} not found",
+        pid.raw()
+      ));
+    }
+    self.name_registry.register(name, pid)
+  }
+
+  /// Unregister a name.
+  pub fn unregister_name(
+    &mut self,
+    name: &str,
+  ) -> Option<Pid> {
+    self.name_registry.unregister(name)
+  }
+
+  /// Lookup a process by name.
+  pub fn whereis(&self, name: &str) -> Option<Pid> {
+    self.name_registry.whereis(name)
+  }
+
+  /// Send a message to a named process.
+  pub fn send_named(
+    &mut self,
+    name: &str,
+    mut env: Envelope,
+  ) -> Result<(), String> {
+    let pid = self
+      .name_registry
+      .whereis(name)
+      .ok_or_else(|| {
+        format!("name '{}' not registered", name)
+      })?;
+    env.to = pid;
+    self.send(env);
+    Ok(())
   }
 }
 
@@ -1140,5 +1191,70 @@ mod tests {
     // Suspender exits on effect result
     let completed = engine.take_completed();
     assert_eq!(completed.len(), 1);
+  }
+
+  #[test]
+  fn test_scheduler_register_and_whereis() {
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Echo));
+    engine
+      .register_name("worker".into(), pid)
+      .unwrap();
+    assert_eq!(engine.whereis("worker"), Some(pid));
+  }
+
+  #[test]
+  fn test_scheduler_send_named() {
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Echo));
+    engine
+      .register_name("worker".into(), pid)
+      .unwrap();
+    let result = engine.send_named(
+      "worker",
+      Envelope::text(pid, "hello"),
+    );
+    assert!(result.is_ok());
+    engine.tick();
+  }
+
+  #[test]
+  fn test_scheduler_send_named_unknown_fails() {
+    let mut engine = SchedulerEngine::new();
+    let pid = Pid::from_raw(1);
+    let result = engine.send_named(
+      "nope",
+      Envelope::text(pid, "hello"),
+    );
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_scheduler_auto_unregister_on_exit() {
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Stopper));
+    engine
+      .register_name("worker".into(), pid)
+      .unwrap();
+    assert_eq!(
+      engine.whereis("worker"),
+      Some(pid)
+    );
+
+    engine.send(Envelope::text(pid, "stop"));
+    engine.tick();
+
+    // After process exits, name should be
+    // auto-unregistered
+    assert_eq!(engine.whereis("worker"), None);
+  }
+
+  #[test]
+  fn test_scheduler_register_dead_process_fails() {
+    let mut engine = SchedulerEngine::new();
+    let pid = Pid::from_raw(99999);
+    let result =
+      engine.register_name("ghost".into(), pid);
+    assert!(result.is_err());
   }
 }
