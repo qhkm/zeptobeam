@@ -10,7 +10,21 @@
 
 **Design Doc:** `docs/plans/2026-03-06-zeptovm-canonical-design.md`
 
+**Runtime Spec:** `docs/plans/2026-03-06-zeptovm-runtime-spec-v01.md`
+
 **Supersedes:** `docs/plans/2026-03-06-zeptovm-async-scheduler-impl.md` (v1 plan, `Suspend(Future)` approach)
+
+### Spec Refinements (from runtime-spec-v01)
+
+Three changes from the spec that refine this plan:
+
+1. **TurnContext** — `handle()` takes `(msg, &mut TurnContext)`, not just `(msg)`. Handlers emit intents (send, spawn, link, timer, effect, budget debit, state patch) through the context. The runtime collects intents and commits them atomically. `StepResult` only says what the process wants to do *next* (Continue/Wait/Suspend/Done/Fail).
+
+2. **ExitReason** — Replaces our `Reason` enum with a richer set: Normal, Cancelled, Timeout, BudgetExceeded, PolicyDenied, DependencyFailed, Panic, Error, Killed, NodeLost. Used consistently across ProcessStatus, StepResult, supervision, and journal entries.
+
+3. **TurnIntent + TurnCommit** — The turn executor collects `Vec<TurnIntent>` from TurnContext, builds a `TurnCommit` struct (turn_id, consumed_msg_id, state_patch, outbound_messages, effect_requests, timer_registrations, budget_changes, journal_entries, next_status), and persists it atomically. Only after commit: dispatch effects, deliver messages, fire timers.
+
+**Implementation approach:** Tasks 1-7 build the core types and in-memory kernel. We use `serde_json::Value` for effect inputs (not the full `EffectInput` enum) to keep v0.1 simple. Full typed inputs are Phase 2. Similarly, Pid stays as `u64` internally (the rich Pid with tenant/namespace/incarnation is Phase 3 cluster work). ExitReason replaces Reason from Task 2 onward.
 
 ---
 
@@ -659,31 +673,156 @@ git commit -m "feat(zeptovm): add StepResult — Suspend(EffectRequest) not Susp
 
 ---
 
-## Task 5: Create StepBehavior Trait
+## Task 5: Create StepBehavior Trait + TurnContext
 
 **Files:**
 - Create: `zeptovm/src/core/behavior.rs`
+- Create: `zeptovm/src/core/turn_context.rs`
 - Modify: `zeptovm/src/core/mod.rs`
 
-**Step 1: Write the behavior trait**
+The spec requires `handle(msg, &mut TurnContext)` — handlers emit intents (send, spawn, link, effect, timer, state patch) through the context. StepResult only says what the process does *next*.
+
+**Step 1: Write TurnContext and TurnIntent**
+
+Create `zeptovm/src/core/turn_context.rs`:
+
+```rust
+use crate::core::effect::EffectRequest;
+use crate::core::message::Envelope;
+use crate::pid::Pid;
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_TURN_ID: AtomicU64 = AtomicU64::new(1);
+
+pub type TurnId = u64;
+
+pub fn next_turn_id() -> TurnId {
+    NEXT_TURN_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// An intent emitted by a behavior handler during a turn.
+/// Collected by TurnContext, committed atomically by the turn executor.
+#[derive(Debug)]
+pub enum TurnIntent {
+    SendMessage(Envelope),
+    RequestEffect(EffectRequest),
+    PatchState(Vec<u8>),
+    // Phase 2: SpawnProcess, Link, Monitor, ScheduleTimer, DebitBudget
+}
+
+/// Context passed to behavior.handle(). Handlers emit intents through this.
+pub struct TurnContext {
+    pub pid: Pid,
+    pub turn_id: TurnId,
+    intents: Vec<TurnIntent>,
+}
+
+impl TurnContext {
+    pub fn new(pid: Pid) -> Self {
+        Self {
+            pid,
+            turn_id: next_turn_id(),
+            intents: Vec::new(),
+        }
+    }
+
+    /// Emit a message to another process.
+    pub fn send(&mut self, msg: Envelope) {
+        self.intents.push(TurnIntent::SendMessage(msg));
+    }
+
+    /// Convenience: send a text message to a pid.
+    pub fn send_text(&mut self, to: Pid, text: impl Into<String>) {
+        self.send(Envelope::text(to, text));
+    }
+
+    /// Request an effect (LLM call, HTTP, etc.).
+    pub fn request_effect(&mut self, req: EffectRequest) {
+        self.intents.push(TurnIntent::RequestEffect(req));
+    }
+
+    /// Patch process state (serialized blob).
+    pub fn set_state(&mut self, state: Vec<u8>) {
+        self.intents.push(TurnIntent::PatchState(state));
+    }
+
+    /// Take all collected intents (consumed by turn executor).
+    pub fn take_intents(&mut self) -> Vec<TurnIntent> {
+        std::mem::take(&mut self.intents)
+    }
+
+    /// How many intents have been emitted.
+    pub fn intent_count(&self) -> usize {
+        self.intents.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::effect::{EffectKind, EffectRequest};
+    use crate::pid::Pid;
+
+    #[test]
+    fn test_turn_context_send() {
+        let pid = Pid::from_raw(1);
+        let mut ctx = TurnContext::new(pid);
+        ctx.send_text(Pid::from_raw(2), "hello");
+        assert_eq!(ctx.intent_count(), 1);
+    }
+
+    #[test]
+    fn test_turn_context_request_effect() {
+        let pid = Pid::from_raw(1);
+        let mut ctx = TurnContext::new(pid);
+        let req = EffectRequest::new(EffectKind::LlmCall, serde_json::json!({}));
+        ctx.request_effect(req);
+        assert_eq!(ctx.intent_count(), 1);
+    }
+
+    #[test]
+    fn test_turn_context_take_intents() {
+        let pid = Pid::from_raw(1);
+        let mut ctx = TurnContext::new(pid);
+        ctx.send_text(Pid::from_raw(2), "a");
+        ctx.send_text(Pid::from_raw(3), "b");
+        let intents = ctx.take_intents();
+        assert_eq!(intents.len(), 2);
+        assert_eq!(ctx.intent_count(), 0);
+    }
+
+    #[test]
+    fn test_turn_id_unique() {
+        let a = next_turn_id();
+        let b = next_turn_id();
+        assert_ne!(a, b);
+    }
+}
+```
+
+**Step 2: Write the behavior trait**
+
+Create `zeptovm/src/core/behavior.rs`:
 
 ```rust
 use crate::core::message::Envelope;
 use crate::core::step_result::StepResult;
+use crate::core::turn_context::TurnContext;
 use crate::error::Reason;
 
 /// Step-based process behavior.
 ///
-/// Unlike the async Behavior trait, handle() is synchronous.
-/// When I/O is needed, return StepResult::Suspend(EffectRequest).
-/// The runtime journals the request, checks policy/budget, dispatches
-/// to the reactor, and delivers the result as an Envelope.
+/// handle() is synchronous and takes a TurnContext for emitting intents.
+/// Side effects go through ctx.request_effect() and return Suspend(EffectRequest).
+/// Outbound messages go through ctx.send(). State patches through ctx.set_state().
+/// The runtime collects all intents and commits them atomically.
 pub trait StepBehavior: Send + 'static {
     /// Called once at spawn. checkpoint is Some if recovering.
     fn init(&mut self, checkpoint: Option<Vec<u8>>) -> StepResult;
 
-    /// Called for each message (user, effect result, signal).
-    fn handle(&mut self, msg: Envelope) -> StepResult;
+    /// Called for each message. Emit intents via ctx; return what to do next.
+    fn handle(&mut self, msg: Envelope, ctx: &mut TurnContext) -> StepResult;
 
     /// Called when the process is terminating.
     fn terminate(&mut self, reason: &Reason);
@@ -704,33 +843,26 @@ mod tests {
 
     struct EchoStep;
     impl StepBehavior for EchoStep {
-        fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult {
-            StepResult::Continue
-        }
-        fn handle(&mut self, _msg: Envelope) -> StepResult {
+        fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult { StepResult::Continue }
+        fn handle(&mut self, _msg: Envelope, _ctx: &mut TurnContext) -> StepResult {
             StepResult::Continue
         }
         fn terminate(&mut self, _reason: &Reason) {}
     }
 
-    struct LlmAgent {
-        awaiting_response: bool,
-    }
-
+    struct LlmAgent { awaiting_response: bool }
     impl StepBehavior for LlmAgent {
-        fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult {
-            StepResult::Continue
-        }
+        fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult { StepResult::Continue }
 
-        fn handle(&mut self, msg: Envelope) -> StepResult {
+        fn handle(&mut self, msg: Envelope, ctx: &mut TurnContext) -> StepResult {
             match &msg.payload {
                 EnvelopePayload::Effect(result) => {
-                    // Got LLM response back
+                    // Got LLM response — forward to requester, then done
                     self.awaiting_response = false;
                     StepResult::Done(Reason::Normal)
                 }
                 EnvelopePayload::User(_) if !self.awaiting_response => {
-                    // User trigger → request LLM call
+                    // User trigger → request LLM call via context
                     self.awaiting_response = true;
                     let req = EffectRequest::new(
                         EffectKind::LlmCall,
@@ -742,6 +874,17 @@ mod tests {
             }
         }
 
+        fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    /// Agent that sends outbound messages via TurnContext
+    struct Forwarder { target: Pid }
+    impl StepBehavior for Forwarder {
+        fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult { StepResult::Continue }
+        fn handle(&mut self, _msg: Envelope, ctx: &mut TurnContext) -> StepResult {
+            ctx.send_text(self.target, "forwarded");
+            StepResult::Continue
+        }
         fn terminate(&mut self, _reason: &Reason) {}
     }
 
@@ -759,31 +902,40 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_agent_suspend_on_user_message() {
-        let mut agent = LlmAgent {
-            awaiting_response: false,
-        };
+    fn test_llm_agent_suspend() {
+        let mut agent = LlmAgent { awaiting_response: false };
         agent.init(None);
-
-        let msg = Envelope::text(Pid::from_raw(1), "call the LLM");
-        let result = agent.handle(msg);
+        let pid = Pid::from_raw(1);
+        let mut ctx = TurnContext::new(pid);
+        let msg = Envelope::text(pid, "call the LLM");
+        let result = agent.handle(msg, &mut ctx);
         assert!(matches!(result, StepResult::Suspend(_)));
     }
 
     #[test]
     fn test_llm_agent_done_on_effect_result() {
-        let mut agent = LlmAgent {
-            awaiting_response: true,
-        };
-
+        let mut agent = LlmAgent { awaiting_response: true };
+        let pid = Pid::from_raw(1);
+        let mut ctx = TurnContext::new(pid);
         use crate::core::effect::EffectId;
-        let result = EffectResult::success(
-            EffectId::new(),
-            serde_json::json!("LLM response"),
-        );
-        let msg = Envelope::effect_result(Pid::from_raw(1), result);
-        let step = agent.handle(msg);
+        let result = EffectResult::success(EffectId::new(), serde_json::json!("response"));
+        let msg = Envelope::effect_result(pid, result);
+        let step = agent.handle(msg, &mut ctx);
         assert!(matches!(step, StepResult::Done(Reason::Normal)));
+    }
+
+    #[test]
+    fn test_forwarder_emits_intent() {
+        let target = Pid::from_raw(99);
+        let mut fwd = Forwarder { target };
+        fwd.init(None);
+        let pid = Pid::from_raw(1);
+        let mut ctx = TurnContext::new(pid);
+        let msg = Envelope::text(pid, "trigger");
+        fwd.handle(msg, &mut ctx);
+        assert_eq!(ctx.intent_count(), 1);
+        let intents = ctx.take_intents();
+        assert!(matches!(intents[0], crate::core::turn_context::TurnIntent::SendMessage(_)));
     }
 }
 ```
@@ -1093,6 +1245,7 @@ use crate::{
         effect::EffectId,
         message::{Envelope, EnvelopePayload, Signal},
         step_result::StepResult,
+        turn_context::TurnContext,
     },
     error::Reason,
     kernel::mailbox::MultiLaneMailbox,
@@ -1145,11 +1298,14 @@ impl ProcessEntry {
     }
 
     /// Step the process once with panic isolation.
-    pub fn step(&mut self) -> StepResult {
+    /// Returns (StepResult, TurnContext with collected intents).
+    pub fn step(&mut self) -> (StepResult, TurnContext) {
+        let mut ctx = TurnContext::new(self.pid);
+
         // Kill check (highest priority, like BEAM)
         if self.kill_requested {
             self.state = ProcessRuntimeState::Done;
-            return StepResult::Done(Reason::Kill);
+            return (StepResult::Done(Reason::Kill), ctx);
         }
 
         // Pop next message (mailbox handles lane priority)
@@ -1157,17 +1313,17 @@ impl ProcessEntry {
             Some(env) => {
                 // Check for control signals that the runtime handles
                 if let EnvelopePayload::Signal(ref sig) = env.payload {
-                    return self.handle_signal(sig);
+                    return (self.handle_signal(sig), ctx);
                 }
 
                 // User/effect messages go to behavior.handle() with catch_unwind
                 self.reductions += 1;
                 let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                    self.behavior.handle(env)
+                    self.behavior.handle(env, &mut ctx)
                 }));
 
                 match result {
-                    Ok(step) => step,
+                    Ok(step) => (step, ctx),
                     Err(panic_info) => {
                         let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                             format!("panic: {s}")
@@ -1177,11 +1333,11 @@ impl ProcessEntry {
                             "panic: unknown".to_string()
                         };
                         self.state = ProcessRuntimeState::Failed;
-                        StepResult::Fail(Reason::Custom(msg))
+                        (StepResult::Fail(Reason::Custom(msg)), ctx)
                     }
                 }
             }
-            None => StepResult::Wait,
+            None => (StepResult::Wait, ctx),
         }
     }
 
@@ -1261,14 +1417,14 @@ mod tests {
     struct Echo;
     impl StepBehavior for Echo {
         fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult { StepResult::Continue }
-        fn handle(&mut self, _msg: Envelope) -> StepResult { StepResult::Continue }
+        fn handle(&mut self, _msg: Envelope, _ctx: &mut TurnContext) -> StepResult { StepResult::Continue }
         fn terminate(&mut self, _reason: &Reason) {}
     }
 
     struct Counter { count: u32 }
     impl StepBehavior for Counter {
         fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult { StepResult::Continue }
-        fn handle(&mut self, _msg: Envelope) -> StepResult {
+        fn handle(&mut self, _msg: Envelope, _ctx: &mut TurnContext) -> StepResult {
             self.count += 1;
             StepResult::Continue
         }
@@ -1288,7 +1444,7 @@ mod tests {
         let mut p = ProcessEntry::new(pid, Box::new(Echo));
         p.init(None);
         p.mailbox.push(Envelope::text(pid, "hello"));
-        let result = p.step();
+        let (result, _ctx) = p.step();
         assert!(matches!(result, StepResult::Continue));
         assert_eq!(p.reductions(), 1);
     }
@@ -1297,7 +1453,8 @@ mod tests {
     fn test_process_step_empty_returns_wait() {
         let mut p = ProcessEntry::new(Pid::new(), Box::new(Echo));
         p.init(None);
-        assert!(matches!(p.step(), StepResult::Wait));
+        let (result, _) = p.step();
+        assert!(matches!(result, StepResult::Wait));
     }
 
     #[test]
@@ -1307,7 +1464,8 @@ mod tests {
         p.init(None);
         p.mailbox.push(Envelope::text(pid, "ignored"));
         p.request_kill();
-        assert!(matches!(p.step(), StepResult::Done(Reason::Kill)));
+        let (result, _) = p.step();
+        assert!(matches!(result, StepResult::Done(Reason::Kill)));
     }
 
     #[test]
@@ -1316,7 +1474,8 @@ mod tests {
         let mut p = ProcessEntry::new(pid, Box::new(Echo));
         p.init(None);
         p.mailbox.push(Envelope::signal(pid, Signal::Kill));
-        assert!(matches!(p.step(), StepResult::Done(Reason::Kill)));
+        let (result, _) = p.step();
+        assert!(matches!(result, StepResult::Done(Reason::Kill)));
     }
 
     #[test]
@@ -1329,7 +1488,8 @@ mod tests {
             pid,
             Signal::ExitLinked(other, Reason::Custom("crash".into())),
         ));
-        assert!(matches!(p.step(), StepResult::Done(Reason::Custom(_))));
+        let (result, _) = p.step();
+        assert!(matches!(result, StepResult::Done(Reason::Custom(_))));
     }
 
     #[test]
@@ -1343,7 +1503,7 @@ mod tests {
             Signal::ExitLinked(other, Reason::Normal),
         ));
         p.mailbox.push(Envelope::text(pid, "still alive"));
-        let result = p.step(); // processes the signal → Continue
+        let (result, _) = p.step();
         assert!(matches!(result, StepResult::Continue));
     }
 
@@ -1352,7 +1512,7 @@ mod tests {
         struct Panicker;
         impl StepBehavior for Panicker {
             fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult { StepResult::Continue }
-            fn handle(&mut self, _msg: Envelope) -> StepResult { panic!("boom") }
+            fn handle(&mut self, _msg: Envelope, _ctx: &mut TurnContext) -> StepResult { panic!("boom") }
             fn terminate(&mut self, _reason: &Reason) {}
         }
 
@@ -1360,7 +1520,7 @@ mod tests {
         let mut p = ProcessEntry::new(pid, Box::new(Panicker));
         p.init(None);
         p.mailbox.push(Envelope::text(pid, "trigger"));
-        let result = p.step();
+        let (result, _) = p.step();
         assert!(matches!(result, StepResult::Fail(Reason::Custom(_))));
         assert_eq!(p.state, ProcessRuntimeState::Failed);
     }
@@ -1370,7 +1530,7 @@ mod tests {
         struct Suspender;
         impl StepBehavior for Suspender {
             fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult { StepResult::Continue }
-            fn handle(&mut self, _msg: Envelope) -> StepResult {
+            fn handle(&mut self, _msg: Envelope, _ctx: &mut TurnContext) -> StepResult {
                 StepResult::Suspend(EffectRequest::new(
                     EffectKind::LlmCall,
                     serde_json::json!({"prompt": "hi"}),
@@ -1383,8 +1543,30 @@ mod tests {
         let mut p = ProcessEntry::new(pid, Box::new(Suspender));
         p.init(None);
         p.mailbox.push(Envelope::text(pid, "go"));
-        let result = p.step();
+        let (result, _) = p.step();
         assert!(matches!(result, StepResult::Suspend(_)));
+    }
+
+    #[test]
+    fn test_process_intents_collected() {
+        struct Sender { target: Pid }
+        impl StepBehavior for Sender {
+            fn init(&mut self, _cp: Option<Vec<u8>>) -> StepResult { StepResult::Continue }
+            fn handle(&mut self, _msg: Envelope, ctx: &mut TurnContext) -> StepResult {
+                ctx.send_text(self.target, "forwarded");
+                StepResult::Continue
+            }
+            fn terminate(&mut self, _reason: &Reason) {}
+        }
+
+        let pid = Pid::new();
+        let target = Pid::from_raw(99);
+        let mut p = ProcessEntry::new(pid, Box::new(Sender { target }));
+        p.init(None);
+        p.mailbox.push(Envelope::text(pid, "go"));
+        let (result, ctx) = p.step();
+        assert!(matches!(result, StepResult::Continue));
+        assert_eq!(ctx.intent_count(), 1);
     }
 
     #[test]
