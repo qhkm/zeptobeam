@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use crate::core::message::{Envelope, MessageClass};
@@ -16,6 +17,10 @@ pub struct MultiLaneMailbox {
     fairness_window: u32,
     /// Counter for fairness tracking.
     high_priority_streak: u32,
+    /// Tracks seen dedup keys to reject duplicate envelopes.
+    seen_dedup_keys: HashSet<String>,
+    /// Maximum number of dedup keys to track before eviction.
+    dedup_capacity: usize,
 }
 
 impl MultiLaneMailbox {
@@ -28,11 +33,29 @@ impl MultiLaneMailbox {
             background: VecDeque::new(),
             fairness_window: 50,
             high_priority_streak: 0,
+            seen_dedup_keys: HashSet::new(),
+            dedup_capacity: 1000,
         }
     }
 
     /// Push an envelope into the correct lane based on its MessageClass.
-    pub fn push(&mut self, env: Envelope) {
+    ///
+    /// Returns `false` if the envelope was rejected as a duplicate
+    /// (matching `dedup_key` already seen). Returns `true` otherwise.
+    pub fn push(&mut self, env: Envelope) -> bool {
+        // Check dedup_key
+        if let Some(ref key) = env.dedup_key {
+            if self.seen_dedup_keys.contains(key) {
+                return false; // Duplicate, skip
+            }
+            // Evict oldest if at capacity
+            if self.seen_dedup_keys.len() >= self.dedup_capacity {
+                // Simple eviction: clear the set when full
+                self.seen_dedup_keys.clear();
+            }
+            self.seen_dedup_keys.insert(key.clone());
+        }
+
         match env.class {
             MessageClass::Control => self.control.push_back(env),
             MessageClass::Supervisor => self.supervisor.push_back(env),
@@ -40,6 +63,7 @@ impl MultiLaneMailbox {
             MessageClass::User => self.user.push_back(env),
             MessageClass::Background => self.background.push_back(env),
         }
+        true
     }
 
     /// Pop the next envelope respecting lane priority with fairness.
@@ -239,5 +263,61 @@ mod tests {
         // 5th pop: back to effect
         let env = mb.pop().unwrap();
         assert_eq!(env.class, MessageClass::EffectResult);
+    }
+
+    #[test]
+    fn test_mailbox_dedup_rejects_duplicate() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut env1 = Envelope::text(to(), "first");
+        env1.dedup_key = Some("key-1".into());
+        let mut env2 = Envelope::text(to(), "second");
+        env2.dedup_key = Some("key-1".into());
+
+        assert!(mb.push(env1));
+        assert!(!mb.push(env2)); // Duplicate rejected
+        assert_eq!(mb.total_len(), 1);
+    }
+
+    #[test]
+    fn test_mailbox_dedup_allows_different_keys() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut env1 = Envelope::text(to(), "first");
+        env1.dedup_key = Some("key-1".into());
+        let mut env2 = Envelope::text(to(), "second");
+        env2.dedup_key = Some("key-2".into());
+
+        assert!(mb.push(env1));
+        assert!(mb.push(env2));
+        assert_eq!(mb.total_len(), 2);
+    }
+
+    #[test]
+    fn test_mailbox_dedup_no_key_always_accepted() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "a"));
+        mb.push(Envelope::text(to(), "b"));
+        assert_eq!(mb.total_len(), 2);
+    }
+
+    #[test]
+    fn test_mailbox_dedup_capacity_eviction() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.dedup_capacity = 3;
+
+        for i in 0..3 {
+            let mut env = Envelope::text(to(), format!("msg-{i}"));
+            env.dedup_key = Some(format!("key-{i}"));
+            assert!(mb.push(env));
+        }
+
+        // 4th message triggers capacity eviction (clear)
+        let mut env4 = Envelope::text(to(), "msg-3");
+        env4.dedup_key = Some("key-3".into());
+        assert!(mb.push(env4));
+
+        // Now key-0 should be accepted again (evicted)
+        let mut env_dup = Envelope::text(to(), "msg-0-dup");
+        env_dup.dedup_key = Some("key-0".into());
+        assert!(mb.push(env_dup));
     }
 }
