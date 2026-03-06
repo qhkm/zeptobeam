@@ -3,6 +3,10 @@ name = "zeptobeam"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "zeptobeam"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zeptobeam"
 path = "src/main.rs"

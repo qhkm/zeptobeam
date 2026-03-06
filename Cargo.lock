@@ -4111,12 +4111,15 @@ dependencies = [
 name = "zeptobeam"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
  "erlangrt",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeptovm",
 ]
 
 [[package]]
