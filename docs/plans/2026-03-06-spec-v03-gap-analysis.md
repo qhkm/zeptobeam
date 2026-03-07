@@ -41,8 +41,8 @@
 | # | Gap | Status | Notes |
 |---|-----|--------|-------|
 | X1 | Name-based process registry | DONE | NameRegistry + TurnIntent integration + auto-cleanup |
-| X2 | Selective receive | NOT DONE | No pattern matching in mailbox |
-| X3 | Per-message TTL | NOT DONE | No expiry on messages |
+| X2 | Selective receive | DONE | Tag-based selective receive: pop_matching() + WaitForTag StepResult + selective_tag field + scheduler wiring |
+| X3 | Per-message TTL | DONE | expires_at field + lazy TTL in pop() + reap_expired() + expired_count metrics path |
 | X4 | Structured observability events | DONE | RuntimeEvent enum + EventBus ring buffer with tracing dual-write |
 | X5 | CliExec/SandboxExec/BrowserAutomation workers | NOT DONE | Enum variants only |
 
@@ -66,8 +66,8 @@
 
 ### Tier 3 — Mailbox enhancements
 
-- **X3:** Per-message TTL (expiry field on messages, reap on receive)
-- **X2:** Selective receive (pattern matching in MultiLaneMailbox)
+- **X3:** DONE — Per-message TTL (expiry field on messages, reap on receive)
+- **X2:** DONE — Selective receive (end-to-end tag-based with control-lane bypass)
 
 ### Tier 4 — Phase 3+ (deferred from Tier 3 + multi-node)
 
