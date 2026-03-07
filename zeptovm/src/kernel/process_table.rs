@@ -34,6 +34,9 @@ pub struct ProcessEntry {
   pub mailbox: MultiLaneMailbox,
   pub parent: Option<Pid>,
   pub trap_exit: bool,
+  /// Tag filter for selective receive. When Some, step() uses
+  /// pop_matching() instead of pop(). Cleared on match.
+  pub selective_tag: Option<String>,
   behavior: Box<dyn StepBehavior>,
   reductions: u32,
   kill_requested: bool,
@@ -51,6 +54,7 @@ impl ProcessEntry {
       mailbox: MultiLaneMailbox::new(),
       parent: None,
       trap_exit: false,
+      selective_tag: None,
       behavior,
       reductions: 0,
       kill_requested: false,
@@ -97,60 +101,153 @@ impl ProcessEntry {
     // Kill check (highest priority, like BEAM)
     if self.kill_requested {
       self.state = ProcessRuntimeState::Done;
+      self.selective_tag = None;
       return (StepResult::Done(Reason::Kill), ctx);
     }
 
-    // Pop next message (mailbox handles lane priority)
-    match self.mailbox.pop(now_ms) {
+    // Phase 1: ALWAYS drain control lane first.
+    // Signals must never be blocked by tag filtering.
+    //
+    // IMPORTANT: Do NOT clear selective_tag here. Only terminal
+    // paths (Kill, Shutdown, abnormal ExitLinked, panic) clear it.
+    // Non-terminal signals (TimerFired, MonitorDown, ChildExited,
+    // trapping ExitLinked, Resume) are dispatched to the behavior,
+    // which may return Continue or WaitForTag — the tag filter
+    // must survive across these.
+    if let Some(env) = self.mailbox.pop_control(now_ms) {
+      if let EnvelopePayload::Signal(ref sig) = env.payload {
+        match sig {
+          Signal::Kill => {
+            self.state = ProcessRuntimeState::Done;
+            self.selective_tag = None; // terminal
+            return (StepResult::Done(Reason::Kill), ctx);
+          }
+          Signal::Shutdown => {
+            self.state = ProcessRuntimeState::Done;
+            self.selective_tag = None; // terminal
+            return (
+              StepResult::Done(Reason::Shutdown),
+              ctx,
+            );
+          }
+          Signal::Suspend => {
+            // Preserve selective_tag — resume will
+            // continue the wait
+            self.state = ProcessRuntimeState::Suspended;
+            return (StepResult::Wait, ctx);
+          }
+          Signal::Resume => {
+            return (StepResult::Continue, ctx);
+          }
+          Signal::ExitLinked(_, reason)
+            if !self.trap_exit && reason.is_abnormal() =>
+          {
+            self.state = ProcessRuntimeState::Done;
+            self.selective_tag = None; // terminal
+            return (
+              StepResult::Done(reason.clone()),
+              ctx,
+            );
+          }
+          Signal::ExitLinked(_, _) if !self.trap_exit => {
+            // Normal exit from linked, not trapping.
+            // Preserve selective_tag.
+            return (StepResult::Continue, ctx);
+          }
+          // Trappable signals (ChildExited, TimerFired,
+          // MonitorDown, trapping ExitLinked) fall through
+          // to behavior. selective_tag preserved.
+          _ => {}
+        }
+      }
+
+      // Control message not handled by early return
+      // (trappable signal or non-signal control) → behavior.
+      // selective_tag is preserved — behavior decides whether
+      // to continue waiting (WaitForTag) or do something else.
+      self.reductions += 1;
+      let start = std::time::Instant::now();
+      let result =
+        panic::catch_unwind(AssertUnwindSafe(|| {
+          self.behavior.handle(env, &mut ctx)
+        }));
+      let elapsed = start.elapsed();
+      self.last_turn_duration = Some(elapsed);
+      if elapsed > self.max_turn_wall_clock {
+        self.turn_overrun_flag = true;
+        tracing::warn!(
+          pid = self.pid.raw(),
+          elapsed_ms = elapsed.as_millis() as u64,
+          limit_ms =
+            self.max_turn_wall_clock.as_millis() as u64,
+          "handler overrun"
+        );
+      }
+      return match result {
+        Ok(step) => (step, ctx),
+        Err(panic_info) => {
+          let msg = if let Some(s) =
+            panic_info.downcast_ref::<&str>()
+          {
+            format!("panic: {s}")
+          } else if let Some(s) =
+            panic_info.downcast_ref::<String>()
+          {
+            format!("panic: {s}")
+          } else {
+            "panic: unknown".to_string()
+          };
+          self.state = ProcessRuntimeState::Failed;
+          self.selective_tag = None; // terminal
+          (StepResult::Fail(Reason::Custom(msg)), ctx)
+        }
+      };
+    }
+
+    // Phase 2: No control message. Pop based on selective_tag.
+    let maybe_env = if let Some(ref tag) = self.selective_tag {
+      self.mailbox.pop_matching(now_ms, tag)
+    } else {
+      self.mailbox.pop(now_ms)
+    };
+
+    match maybe_env {
       Some(env) => {
-        // Check for control signals that the runtime handles
-        // directly. Signals not matched here fall through to
-        // behavior.handle() (e.g. ChildExited, TimerFired,
-        // MonitorDown, trapping ExitLinked).
-        if let EnvelopePayload::Signal(ref sig) = env.payload {
+        self.state = ProcessRuntimeState::Running;
+        self.selective_tag = None; // matched, clear filter
+
+        // Check for signals that leaked to non-control lanes
+        // (shouldn't happen, but defensive)
+        if let EnvelopePayload::Signal(ref sig) = env.payload
+        {
           match sig {
             Signal::Kill => {
               self.state = ProcessRuntimeState::Done;
-              return (StepResult::Done(Reason::Kill), ctx);
+              return (
+                StepResult::Done(Reason::Kill),
+                ctx,
+              );
             }
             Signal::Shutdown => {
               self.state = ProcessRuntimeState::Done;
-              return (StepResult::Done(Reason::Shutdown), ctx);
+              return (
+                StepResult::Done(Reason::Shutdown),
+                ctx,
+              );
             }
-            Signal::Suspend => {
-              self.state = ProcessRuntimeState::Suspended;
-              return (StepResult::Wait, ctx);
-            }
-            Signal::Resume => {
-              return (StepResult::Continue, ctx);
-            }
-            Signal::ExitLinked(_, reason)
-              if !self.trap_exit && reason.is_abnormal() =>
-            {
-              self.state = ProcessRuntimeState::Done;
-              return (StepResult::Done(reason.clone()), ctx);
-            }
-            Signal::ExitLinked(_, _) if !self.trap_exit => {
-              // Normal exit from linked process, not trapping
-              return (StepResult::Continue, ctx);
-            }
-            // All other signals (ChildExited, TimerFired,
-            // MonitorDown, trapping ExitLinked) fall through
-            // to behavior.handle()
             _ => {}
           }
         }
 
-        // User/effect messages and fall-through signals go to
-        // behavior.handle() with catch_unwind
+        // Dispatch to behavior
         self.reductions += 1;
         let start = std::time::Instant::now();
-        let result = panic::catch_unwind(AssertUnwindSafe(|| {
-          self.behavior.handle(env, &mut ctx)
-        }));
+        let result =
+          panic::catch_unwind(AssertUnwindSafe(|| {
+            self.behavior.handle(env, &mut ctx)
+          }));
         let elapsed = start.elapsed();
         self.last_turn_duration = Some(elapsed);
-
         if elapsed > self.max_turn_wall_clock {
           self.turn_overrun_flag = true;
           tracing::warn!(
@@ -158,10 +255,9 @@ impl ProcessEntry {
             elapsed_ms = elapsed.as_millis() as u64,
             limit_ms =
               self.max_turn_wall_clock.as_millis() as u64,
-            "handler overrun: turn exceeded wall-clock limit"
+            "handler overrun"
           );
         }
-
         match result {
           Ok(step) => (step, ctx),
           Err(panic_info) => {
@@ -181,7 +277,16 @@ impl ProcessEntry {
           }
         }
       }
-      None => (StepResult::Wait, ctx),
+      None => {
+        // No message. If selective receive was active,
+        // return WaitForTag to preserve the filter.
+        // selective_tag is still Some (not cleared above).
+        if let Some(tag) = self.selective_tag.take() {
+          (StepResult::WaitForTag(tag), ctx)
+        } else {
+          (StepResult::Wait, ctx)
+        }
+      }
     }
   }
 
@@ -612,5 +717,440 @@ mod tests {
     let pid = Pid::new();
     let p = ProcessEntry::new(pid, Box::new(Echo));
     assert!(p.behavior_meta().is_none());
+  }
+
+  // ── Selective receive tests ──────────────────────────
+
+  use crate::core::message::{Payload, EnvelopePayload};
+
+  #[test]
+  fn test_selective_receive_filters_by_tag() {
+    struct SelectiveBehavior;
+    impl StepBehavior for SelectiveBehavior {
+      fn handle(
+        &mut self,
+        envelope: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        match &envelope.payload {
+          EnvelopePayload::User(Payload::Text(s))
+            if s == "start" =>
+          {
+            StepResult::WaitForTag("reply".into())
+          }
+          EnvelopePayload::User(Payload::Text(s))
+            if s == "the reply" =>
+          {
+            StepResult::Done(Reason::Normal)
+          }
+          _ => StepResult::Continue,
+        }
+      }
+      fn init(
+        &mut self,
+        _checkpoint: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(
+      pid,
+      Box::new(SelectiveBehavior),
+    );
+
+    // Process "start", get WaitForTag
+    p.mailbox.push(Envelope::text(pid, "start"));
+    let (result, _) = p.step(0);
+    assert!(matches!(
+      result,
+      StepResult::WaitForTag(ref t) if t == "reply"
+    ));
+
+    // Simulate scheduler: set selective_tag + WaitingMessage
+    p.selective_tag = Some("reply".into());
+    p.mailbox.push(Envelope::text(pid, "noise"));
+    p.mailbox.push(
+      Envelope::text(pid, "wrong").with_tag("other"),
+    );
+
+    // No match → WaitForTag again
+    let (result, _) = p.step(0);
+    assert!(matches!(
+      result,
+      StepResult::WaitForTag(ref t) if t == "reply"
+    ));
+    assert_eq!(p.mailbox.total_len(), 2);
+
+    // Send matching message
+    p.selective_tag = Some("reply".into());
+    p.mailbox.push(
+      Envelope::text(pid, "the reply").with_tag("reply"),
+    );
+    let (result, _) = p.step(0);
+    assert!(matches!(
+      result,
+      StepResult::Done(Reason::Normal)
+    ));
+    assert!(p.selective_tag.is_none()); // cleared on match
+    assert_eq!(p.mailbox.total_len(), 2); // noise + wrong
+  }
+
+  #[test]
+  fn test_selective_receive_no_match_returns_wait_for_tag() {
+    struct TagWaiter;
+    impl StepBehavior for TagWaiter {
+      fn handle(
+        &mut self,
+        _envelope: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::WaitForTag("expected".into())
+      }
+      fn init(
+        &mut self,
+        _checkpoint: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p =
+      ProcessEntry::new(pid, Box::new(TagWaiter));
+
+    // Trigger WaitForTag
+    p.mailbox.push(Envelope::text(pid, "go"));
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::WaitForTag(_)));
+
+    // Set selective_tag, step with empty mailbox
+    p.selective_tag = Some("expected".into());
+    let (result, _) = p.step(0);
+    match result {
+      StepResult::WaitForTag(tag) => {
+        assert_eq!(tag, "expected")
+      }
+      StepResult::Wait => {
+        panic!("BUG: downgraded WaitForTag to Wait")
+      }
+      other => panic!("unexpected: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_selective_receive_kill_bypasses_tag_filter() {
+    struct NeverDone;
+    impl StepBehavior for NeverDone {
+      fn handle(
+        &mut self,
+        _envelope: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::WaitForTag("reply".into())
+      }
+      fn init(
+        &mut self,
+        _checkpoint: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p =
+      ProcessEntry::new(pid, Box::new(NeverDone));
+
+    // Enter selective mode
+    p.mailbox.push(Envelope::text(pid, "trigger"));
+    let _ = p.step(0);
+    p.selective_tag = Some("reply".into());
+
+    // Send Kill (control lane, untagged)
+    p.mailbox
+      .push(Envelope::signal(pid, Signal::Kill));
+
+    let (result, _) = p.step(0);
+    assert!(
+      matches!(result, StepResult::Done(Reason::Kill)),
+      "Kill must bypass tag filter"
+    );
+    assert_eq!(p.state, ProcessRuntimeState::Done);
+    assert!(p.selective_tag.is_none());
+  }
+
+  #[test]
+  fn test_selective_receive_shutdown_bypasses_tag_filter() {
+    struct TagWaiter;
+    impl StepBehavior for TagWaiter {
+      fn handle(
+        &mut self,
+        _envelope: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::WaitForTag("reply".into())
+      }
+      fn init(
+        &mut self,
+        _checkpoint: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p =
+      ProcessEntry::new(pid, Box::new(TagWaiter));
+    p.mailbox.push(Envelope::text(pid, "trigger"));
+    let _ = p.step(0);
+    p.selective_tag = Some("reply".into());
+
+    p.mailbox
+      .push(Envelope::signal(pid, Signal::Shutdown));
+    let (result, _) = p.step(0);
+    assert!(matches!(
+      result,
+      StepResult::Done(Reason::Shutdown)
+    ));
+  }
+
+  #[test]
+  fn test_selective_receive_exit_linked_bypasses_tag_filter()
+  {
+    struct TagWaiter;
+    impl StepBehavior for TagWaiter {
+      fn handle(
+        &mut self,
+        _envelope: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::WaitForTag("reply".into())
+      }
+      fn init(
+        &mut self,
+        _checkpoint: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p =
+      ProcessEntry::new(pid, Box::new(TagWaiter));
+    p.mailbox.push(Envelope::text(pid, "trigger"));
+    let _ = p.step(0);
+    p.selective_tag = Some("reply".into());
+
+    p.mailbox.push(Envelope::signal(
+      pid,
+      Signal::ExitLinked(
+        Pid::from_raw(2),
+        Reason::Custom("crashed".into()),
+      ),
+    ));
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::Done(_)));
+  }
+
+  #[test]
+  fn test_selective_receive_no_queue_duplication() {
+    struct CountingBehavior {
+      handle_count: u32,
+    }
+    impl StepBehavior for CountingBehavior {
+      fn handle(
+        &mut self,
+        _envelope: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        self.handle_count += 1;
+        StepResult::WaitForTag("target".into())
+      }
+      fn init(
+        &mut self,
+        _checkpoint: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(
+      pid,
+      Box::new(CountingBehavior { handle_count: 0 }),
+    );
+
+    // Trigger selective mode
+    p.mailbox.push(Envelope::text(pid, "go"));
+    let _ = p.step(0);
+
+    // Simulate scheduler setting selective_tag +
+    // WaitingMessage
+    p.selective_tag = Some("target".into());
+    p.state = ProcessRuntimeState::WaitingMessage;
+
+    // Deliver 5 non-matching messages
+    for i in 0..5 {
+      p.mailbox.push(Envelope::text(
+        pid,
+        format!("noise-{i}"),
+      ));
+    }
+
+    // Simulate the wake: WaitingMessage → Ready (once)
+    assert_eq!(
+      p.state,
+      ProcessRuntimeState::WaitingMessage
+    );
+    p.state = ProcessRuntimeState::Ready;
+
+    // Step once: pop_matching finds no match, returns
+    // WaitForTag
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::WaitForTag(_)));
+
+    // All 5 noise messages still in mailbox (not consumed)
+    assert_eq!(p.mailbox.total_len(), 5);
+  }
+
+  #[test]
+  fn test_selective_receive_timer_fired_preserves_tag() {
+    use crate::core::timer::TimerId;
+
+    struct TimerAwareBehavior {
+      timer_seen: bool,
+    }
+    impl StepBehavior for TimerAwareBehavior {
+      fn handle(
+        &mut self,
+        envelope: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        match &envelope.payload {
+          EnvelopePayload::User(Payload::Text(s))
+            if s == "start" =>
+          {
+            StepResult::WaitForTag("reply".into())
+          }
+          EnvelopePayload::Signal(
+            Signal::TimerFired(_),
+          ) => {
+            self.timer_seen = true;
+            StepResult::WaitForTag("reply".into())
+          }
+          EnvelopePayload::User(Payload::Text(s))
+            if s == "the reply" =>
+          {
+            StepResult::Done(Reason::Normal)
+          }
+          _ => StepResult::Continue,
+        }
+      }
+      fn init(
+        &mut self,
+        _checkpoint: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(
+      pid,
+      Box::new(TimerAwareBehavior {
+        timer_seen: false,
+      }),
+    );
+
+    // Enter selective mode
+    p.mailbox.push(Envelope::text(pid, "start"));
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::WaitForTag(_)));
+    p.selective_tag = Some("reply".into());
+
+    // Deliver TimerFired (control lane, non-terminal)
+    p.mailbox.push(Envelope::signal(
+      pid,
+      Signal::TimerFired(TimerId::new()),
+    ));
+
+    let (result, _) = p.step(0);
+    assert!(
+      matches!(
+        result,
+        StepResult::WaitForTag(ref t) if t == "reply"
+      ),
+      "TimerFired must not cancel selective receive"
+    );
+  }
+
+  #[test]
+  fn test_selective_receive_monitor_down_preserves_tag() {
+    struct MonitorAwareBehavior;
+    impl StepBehavior for MonitorAwareBehavior {
+      fn handle(
+        &mut self,
+        envelope: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        match &envelope.payload {
+          EnvelopePayload::User(Payload::Text(s))
+            if s == "start" =>
+          {
+            StepResult::WaitForTag("reply".into())
+          }
+          EnvelopePayload::Signal(
+            Signal::MonitorDown(_, _),
+          ) => {
+            StepResult::WaitForTag("reply".into())
+          }
+          _ => StepResult::Continue,
+        }
+      }
+      fn init(
+        &mut self,
+        _checkpoint: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(
+      pid,
+      Box::new(MonitorAwareBehavior),
+    );
+
+    // Enter selective mode
+    p.mailbox.push(Envelope::text(pid, "start"));
+    let _ = p.step(0);
+    p.selective_tag = Some("reply".into());
+
+    // Deliver MonitorDown (control lane, non-terminal)
+    p.mailbox.push(Envelope::signal(
+      pid,
+      Signal::MonitorDown(
+        Pid::from_raw(2),
+        Reason::Normal,
+      ),
+    ));
+
+    let (result, _) = p.step(0);
+    assert!(
+      matches!(
+        result,
+        StepResult::WaitForTag(ref t) if t == "reply"
+      ),
+      "MonitorDown must not cancel selective receive"
+    );
   }
 }

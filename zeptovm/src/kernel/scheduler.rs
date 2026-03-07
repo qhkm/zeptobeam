@@ -316,6 +316,13 @@ impl SchedulerEngine {
           self.outbound_effects.push((pid, req));
           return;
         }
+        StepResult::WaitForTag(tag) => {
+          if let Some(proc) = self.processes.get_mut(&pid) {
+            proc.selective_tag = Some(tag);
+            proc.state = ProcessRuntimeState::WaitingMessage;
+          }
+          return;
+        }
         StepResult::Done(reason)
         | StepResult::Fail(reason) => {
           self.propagate_exit(pid, &reason);
