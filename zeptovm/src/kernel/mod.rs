@@ -1,4 +1,5 @@
 pub mod compensation;
+pub mod event_bus;
 pub mod mailbox;
 pub mod metrics;
 pub mod name_registry;
