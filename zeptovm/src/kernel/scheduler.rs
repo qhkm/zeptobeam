@@ -25,6 +25,7 @@ struct PendingEffect {
   #[allow(dead_code)] // Used by reactor in Phase 2
   request: EffectRequest,
   state: EffectState,
+  #[allow(dead_code)] // Used in observability/recovery
   created_at_ms: u64,
 }
 
