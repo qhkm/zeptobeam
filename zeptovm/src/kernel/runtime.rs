@@ -262,24 +262,24 @@ impl SchedulerRuntime {
             }
           }
           ReactorMessage::Completion(completion) => {
-            // Set terminal state before removing
+            if completion.result.status
+              == EffectStatus::Streaming
+            {
+              // Streaming chunk: deliver to process
+              // mailbox but don't mark terminal
+              self.engine.deliver_streaming_chunk(
+                completion.result,
+              );
+              continue;
+            }
+
+            // Set terminal state for non-streaming
             self.engine.update_effect_state(
               completion.result.effect_id.raw(),
               EffectState::Completed(
                 completion.result.status.clone(),
               ),
             );
-
-            if completion.result.status
-              == EffectStatus::Streaming
-            {
-              // Streaming chunk: deliver to process
-              // mailbox but don't process as completed
-              self.engine.deliver_streaming_chunk(
-                completion.result,
-              );
-              continue;
-            }
 
             // Record compensation if effect succeeded
             if completion.result.status
