@@ -64,14 +64,15 @@
 - **X1:** Name-based registry
 - **X4:** Structured observability
 
-### Tier 3 — Important but can wait
+### Tier 3 — Mailbox enhancements
 
-- **A1/G2:** ObjectRef + artifact plane
-- **A3:** Effect state machine for recovery
-- **G6:** Human approval gateway
-- **X2/X3:** Selective receive, message TTL
+- **X3:** Per-message TTL (expiry field on messages, reap on receive)
+- **X2:** Selective receive (pattern matching in MultiLaneMailbox)
 
-### Tier 4 — Phase 3+ (multi-node)
+### Tier 4 — Phase 3+ (deferred from Tier 3 + multi-node)
 
-- **G1:** Clustering
-- **G4:** Behavior migration
+- **A1/G2:** ObjectRef + artifact plane (needs storage backend design: SQLite blobs / filesystem / S3-compatible)
+- **A3:** Effect state machine for recovery (explicit Pending → Dispatched → Completed/Failed/TimedOut)
+- **G6:** Human approval gateway (approval wait state + timeout + workflow)
+- **G1:** Multi-node clustering
+- **G4:** Behavior versioning + migration
