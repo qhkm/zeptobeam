@@ -31,7 +31,7 @@
 |---|-----|--------|-------|
 | G1 | Multi-node clustering | NOT DONE | Design doc exists, no implementation |
 | G2 | Object/artifact plane | NOT DONE | No ObjectRef, no artifact store |
-| G3 | Full policy engine | NOT DONE | No PolicyDecision, no hook points |
+| G3 | Full policy engine | DONE | PolicyEngine with effect-kind rules, integrated into runtime |
 | G4 | Behavior versioning + migration | NOT DONE | No version metadata, no migration |
 | G5 | OneForAll / RestForOne supervision | DONE | All three strategies implemented with shutdown coordination |
 | G6 | Human approval UI/gateway | NOT DONE | EffectKind exists, no handler |
@@ -43,7 +43,7 @@
 | X1 | Name-based process registry | DONE | NameRegistry + TurnIntent integration + auto-cleanup |
 | X2 | Selective receive | NOT DONE | No pattern matching in mailbox |
 | X3 | Per-message TTL | NOT DONE | No expiry on messages |
-| X4 | Structured observability events | NOT DONE | Only tracing macros + basic Metrics |
+| X4 | Structured observability events | DONE | RuntimeEvent enum + EventBus ring buffer with tracing dual-write |
 | X5 | CliExec/SandboxExec/BrowserAutomation workers | NOT DONE | Enum variants only |
 
 ---
