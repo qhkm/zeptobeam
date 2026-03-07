@@ -22,6 +22,7 @@ use crate::{
   error::Reason,
   kernel::{
     compensation::{CompensationEntry, CompensationLog},
+    event_bus::{EventBus, RuntimeEvent},
     metrics::Metrics,
     process_table::ProcessRuntimeState,
     reactor::Reactor,
@@ -71,6 +72,7 @@ pub struct SchedulerRuntime {
   budget_violations: Vec<BudgetViolation>,
   budget_enabled: bool,
   policy: Option<PolicyEngine>,
+  event_bus: EventBus,
   metrics: Metrics,
 }
 
@@ -90,6 +92,7 @@ impl SchedulerRuntime {
       budget_violations: Vec::new(),
       budget_enabled: false,
       policy: None,
+      event_bus: EventBus::new(10_000),
       metrics: Metrics::new(),
     }
   }
@@ -118,6 +121,7 @@ impl SchedulerRuntime {
       budget_violations: Vec::new(),
       budget_enabled: false,
       policy: None,
+      event_bus: EventBus::new(10_000),
       metrics: Metrics::new(),
     }
   }
@@ -186,6 +190,10 @@ impl SchedulerRuntime {
     behavior: Box<dyn StepBehavior>,
   ) -> Pid {
     let pid = self.engine.spawn(behavior);
+    self.event_bus.emit(RuntimeEvent::ProcessSpawned {
+      pid,
+      behavior_module: "unknown".into(),
+    });
     self.metrics.inc("processes.spawned");
     self.metrics.gauge_set(
       "processes.active",
@@ -418,10 +426,32 @@ impl SchedulerRuntime {
         }
       }
 
+      self.event_bus.emit(RuntimeEvent::EffectRequested {
+        pid,
+        effect_id: req.effect_id.raw(),
+        kind: req.kind.clone(),
+      });
+
       // Policy check
       if let Some(ref policy) = self.policy {
         let decision = policy.evaluate(&req.kind, None);
         if let PolicyDecision::Deny(reason) = decision {
+          self.event_bus.emit(
+            RuntimeEvent::PolicyEvaluated {
+              pid,
+              effect_id: req.effect_id.raw(),
+              kind: req.kind.clone(),
+              decision: format!("Deny: {}", reason),
+            },
+          );
+          self.event_bus.emit(
+            RuntimeEvent::EffectBlocked {
+              pid,
+              effect_id: req.effect_id.raw(),
+              kind: req.kind.clone(),
+              reason: reason.clone(),
+            },
+          );
           warn!(
             pid = %pid,
             kind = ?req.kind,
@@ -440,6 +470,14 @@ impl SchedulerRuntime {
       if self.budget_enabled
         && self.should_block_effect(&req)
       {
+        self.event_bus.emit(
+          RuntimeEvent::EffectBlocked {
+            pid,
+            effect_id: req.effect_id.raw(),
+            kind: req.kind.clone(),
+            reason: "budget exceeded".into(),
+          },
+        );
         warn!(
           pid = %pid,
           kind = ?req.kind,
@@ -458,6 +496,13 @@ impl SchedulerRuntime {
         );
         self.engine.deliver_effect_result(result);
       } else {
+        self.event_bus.emit(
+          RuntimeEvent::EffectDispatched {
+            pid,
+            effect_id: req.effect_id.raw(),
+            kind: req.kind.clone(),
+          },
+        );
         // Track compensatable effects
         if let Some(ref comp) = req.compensation {
           self.pending_compensations.insert(
@@ -566,8 +611,12 @@ impl SchedulerRuntime {
   /// Take completed processes.
   pub fn take_completed(&mut self) -> Vec<(Pid, Reason)> {
     let completed = self.engine.take_completed();
-    for _ in &completed {
+    for (pid, reason) in &completed {
       self.metrics.inc("processes.exited");
+      self.event_bus.emit(RuntimeEvent::ProcessExited {
+        pid: *pid,
+        reason: reason.clone(),
+      });
     }
     if !completed.is_empty() {
       self.metrics.gauge_set(
@@ -632,6 +681,21 @@ impl SchedulerRuntime {
     result: EffectResult,
   ) {
     self.engine.deliver_streaming_chunk(result);
+  }
+
+  /// Drain all buffered runtime events.
+  pub fn drain_events(
+    &mut self,
+  ) -> Vec<(u64, RuntimeEvent)> {
+    self.event_bus.drain_events()
+  }
+
+  /// Peek recent events without draining.
+  pub fn recent_events(
+    &self,
+    n: usize,
+  ) -> Vec<(u64, RuntimeEvent)> {
+    self.event_bus.recent(n)
   }
 
   /// Get a reference to the metrics.
@@ -1528,5 +1592,105 @@ mod tests {
     rt.tick();
     let violations = rt.take_budget_violations();
     assert_eq!(violations.len(), 0);
+  }
+
+  // ── EventBus integration tests ────────────────────────
+
+  #[test]
+  fn test_runtime_event_bus_process_lifecycle() {
+    let mut rt = SchedulerRuntime::new();
+    let pid = rt.spawn(Box::new(Stopper));
+    rt.send(Envelope::text(pid, "stop"));
+    rt.tick();
+    let _ = rt.take_completed();
+
+    let events = rt.drain_events();
+    assert!(
+      events.iter().any(|(_, e)| matches!(
+        e,
+        crate::kernel::event_bus::RuntimeEvent::ProcessSpawned { .. }
+      )),
+      "should have ProcessSpawned event"
+    );
+    assert!(
+      events.iter().any(|(_, e)| matches!(
+        e,
+        crate::kernel::event_bus::RuntimeEvent::ProcessExited { .. }
+      )),
+      "should have ProcessExited event"
+    );
+  }
+
+  #[test]
+  fn test_runtime_event_bus_effect_lifecycle() {
+    let mut rt = SchedulerRuntime::new();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+
+    let events = rt.drain_events();
+    assert!(
+      events.iter().any(|(_, e)| matches!(
+        e,
+        crate::kernel::event_bus::RuntimeEvent::EffectRequested { .. }
+      )),
+      "should have EffectRequested event"
+    );
+    assert!(
+      events.iter().any(|(_, e)| matches!(
+        e,
+        crate::kernel::event_bus::RuntimeEvent::EffectDispatched { .. }
+      )),
+      "should have EffectDispatched event"
+    );
+  }
+
+  #[test]
+  fn test_runtime_event_bus_policy_blocked() {
+    use crate::control::policy::{
+      PolicyDecision, PolicyEngine, PolicyRule,
+    };
+
+    let policy = PolicyEngine::new(
+      vec![PolicyRule {
+        kind: EffectKind::LlmCall,
+        decision: PolicyDecision::Deny(
+          "blocked".into(),
+        ),
+        max_cost_microdollars: None,
+      }],
+      PolicyDecision::Allow,
+    );
+    let mut rt =
+      SchedulerRuntime::new().with_policy(policy);
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+
+    let events = rt.drain_events();
+    assert!(
+      events.iter().any(|(_, e)| matches!(
+        e,
+        crate::kernel::event_bus::RuntimeEvent::PolicyEvaluated { .. }
+      )),
+      "should have PolicyEvaluated event"
+    );
+    assert!(
+      events.iter().any(|(_, e)| matches!(
+        e,
+        crate::kernel::event_bus::RuntimeEvent::EffectBlocked { .. }
+      )),
+      "should have EffectBlocked event"
+    );
+  }
+
+  #[test]
+  fn test_runtime_drain_events_empty_after_drain() {
+    let mut rt = SchedulerRuntime::new();
+    rt.spawn(Box::new(Echo));
+    let events = rt.drain_events();
+    assert!(!events.is_empty());
+    let events2 = rt.drain_events();
+    assert!(events2.is_empty());
   }
 }
