@@ -31,6 +31,11 @@ pub enum RuntimeEvent {
     kind: EffectKind,
     status: String,
   },
+  EffectStateChanged {
+    pid: Pid,
+    effect_id: u64,
+    new_state: crate::core::effect::EffectState,
+  },
   EffectBlocked {
     pid: Pid,
     effect_id: u64,
