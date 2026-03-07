@@ -1,4 +1,5 @@
 use crate::core::behavior::StepBehavior;
+use crate::core::effect::{EffectRequest, EffectState};
 use crate::core::timer::TimerSpec;
 use crate::durability::journal::{Journal, JournalEntryType};
 use crate::durability::snapshot::SnapshotStore;
@@ -15,10 +16,17 @@ pub struct RecoveryCoordinator<'a> {
   timer_store: Option<&'a TimerStore>,
 }
 
+/// Rich recovery info for a single pending effect.
+pub struct PendingEffectRecovery {
+  pub effect_id: u64,
+  pub last_state: EffectState,
+  pub request: EffectRequest,
+}
+
 /// Result of recovering a single process.
 pub struct RecoveredProcess {
   pub entry: ProcessEntry,
-  pub pending_effect_ids: Vec<u64>,
+  pub pending_effects: Vec<PendingEffectRecovery>,
   pub timers: Vec<TimerSpec>,
 }
 
@@ -70,7 +78,12 @@ impl<'a> RecoveryCoordinator<'a> {
       .replay(pid, snapshot_seq)
       .map_err(|e| format!("journal replay failed: {e}"))?;
 
-    let mut pending_effects = Vec::new();
+    let mut effect_requests:
+      std::collections::HashMap<u64, EffectRequest> =
+      std::collections::HashMap::new();
+    let mut effect_states:
+      std::collections::HashMap<u64, EffectState> =
+      std::collections::HashMap::new();
     let mut completed_effects =
       std::collections::HashSet::new();
 
@@ -79,11 +92,36 @@ impl<'a> RecoveryCoordinator<'a> {
         JournalEntryType::EffectRequested => {
           if let Some(ref payload) = entry.payload {
             if let Ok(req) =
+              serde_json::from_slice::<EffectRequest>(
+                payload,
+              )
+            {
+              let id = req.effect_id.raw();
+              effect_states
+                .insert(id, EffectState::Pending);
+              effect_requests.insert(id, req);
+            }
+          }
+        }
+        JournalEntryType::EffectStateChanged => {
+          if let Some(ref payload) = entry.payload {
+            if let Ok(val) =
               serde_json::from_slice::<
-                crate::core::effect::EffectRequest,
+                serde_json::Value,
               >(payload)
             {
-              pending_effects.push(req.effect_id.raw());
+              if let Some(id) = val
+                .get("effect_id")
+                .and_then(|v| v.as_u64())
+              {
+                if let Ok(state) =
+                  serde_json::from_value::<EffectState>(
+                    val["new_state"].clone(),
+                  )
+                {
+                  effect_states.insert(id, state);
+                }
+              }
             }
           }
         }
@@ -100,9 +138,21 @@ impl<'a> RecoveryCoordinator<'a> {
       }
     }
 
-    // Remove completed effects from pending
-    pending_effects
-      .retain(|id| !completed_effects.contains(id));
+    // Build PendingEffectRecovery for non-completed
+    let pending_effects: Vec<PendingEffectRecovery> =
+      effect_requests
+        .into_iter()
+        .filter(|(id, _)| {
+          !completed_effects.contains(id)
+        })
+        .map(|(id, req)| PendingEffectRecovery {
+          effect_id: id,
+          last_state: effect_states
+            .remove(&id)
+            .unwrap_or(EffectState::Pending),
+          request: req,
+        })
+        .collect();
 
     // Step 3: Load durable timers
     let timers = if let Some(store) = self.timer_store {
@@ -118,7 +168,7 @@ impl<'a> RecoveryCoordinator<'a> {
 
     Ok(RecoveredProcess {
       entry,
-      pending_effect_ids: pending_effects,
+      pending_effects,
       timers,
     })
   }
@@ -128,7 +178,9 @@ impl<'a> RecoveryCoordinator<'a> {
 mod tests {
   use super::*;
   use crate::core::behavior::StepBehavior;
-  use crate::core::effect::{EffectKind, EffectRequest};
+  use crate::core::effect::{
+    EffectKind, EffectRequest, EffectState,
+  };
   use crate::core::message::Envelope;
   use crate::core::step_result::StepResult;
   use crate::core::turn_context::TurnContext;
@@ -190,7 +242,7 @@ mod tests {
       recovered.entry.state,
       ProcessRuntimeState::Ready
     );
-    assert!(recovered.pending_effect_ids.is_empty());
+    assert!(recovered.pending_effects.is_empty());
   }
 
   #[test]
@@ -249,7 +301,11 @@ mod tests {
         })
       })
       .unwrap();
-    assert_eq!(result.pending_effect_ids.len(), 1);
+    assert_eq!(result.pending_effects.len(), 1);
+    assert!(matches!(
+      result.pending_effects[0].last_state,
+      EffectState::Pending
+    ));
   }
 
   #[test]
@@ -290,6 +346,126 @@ mod tests {
         })
       })
       .unwrap();
-    assert!(result.pending_effect_ids.is_empty());
+    assert!(result.pending_effects.is_empty());
+  }
+
+  #[test]
+  fn test_recover_with_effect_state_transitions() {
+    let journal = Journal::open_in_memory().unwrap();
+    let snapshots =
+      SnapshotStore::open_in_memory().unwrap();
+    let pid = Pid::from_raw(1);
+
+    let req = EffectRequest::new(
+      EffectKind::LlmCall,
+      serde_json::json!({}),
+    );
+    let effect_id = req.effect_id.raw();
+
+    // Journal: requested
+    journal
+      .append(&JournalEntry::new(
+        pid,
+        JournalEntryType::EffectRequested,
+        Some(serde_json::to_vec(&req).unwrap()),
+      ))
+      .unwrap();
+
+    // Journal: state changed to Dispatched
+    journal
+      .append(&JournalEntry::new(
+        pid,
+        JournalEntryType::EffectStateChanged,
+        Some(
+          serde_json::to_vec(&serde_json::json!({
+            "effect_id": effect_id,
+            "new_state": EffectState::Dispatched {
+              dispatched_at_ms: 1000
+            },
+          }))
+          .unwrap(),
+        ),
+      ))
+      .unwrap();
+
+    // Journal: state changed to Retrying
+    journal
+      .append(&JournalEntry::new(
+        pid,
+        JournalEntryType::EffectStateChanged,
+        Some(
+          serde_json::to_vec(&serde_json::json!({
+            "effect_id": effect_id,
+            "new_state": EffectState::Retrying {
+              attempt: 1,
+              next_at_ms: 2000,
+            },
+          }))
+          .unwrap(),
+        ),
+      ))
+      .unwrap();
+
+    let coord =
+      RecoveryCoordinator::new(&journal, &snapshots);
+    let result = coord
+      .recover_process(pid, &|| {
+        Box::new(Restorable {
+          state: String::new(),
+        })
+      })
+      .unwrap();
+
+    assert_eq!(result.pending_effects.len(), 1);
+    let pe = &result.pending_effects[0];
+    assert_eq!(pe.effect_id, effect_id);
+    assert!(matches!(
+      pe.last_state,
+      EffectState::Retrying { attempt: 1, .. }
+    ));
+  }
+
+  #[test]
+  fn test_recover_completed_state_filtered() {
+    let journal = Journal::open_in_memory().unwrap();
+    let snapshots =
+      SnapshotStore::open_in_memory().unwrap();
+    let pid = Pid::from_raw(1);
+
+    let req = EffectRequest::new(
+      EffectKind::Http,
+      serde_json::json!({}),
+    );
+    let effect_id = req.effect_id.raw();
+
+    journal
+      .append(&JournalEntry::new(
+        pid,
+        JournalEntryType::EffectRequested,
+        Some(serde_json::to_vec(&req).unwrap()),
+      ))
+      .unwrap();
+    journal
+      .append(&JournalEntry::new(
+        pid,
+        JournalEntryType::EffectResultRecorded,
+        Some(serde_json::to_vec(&effect_id).unwrap()),
+      ))
+      .unwrap();
+
+    let coord =
+      RecoveryCoordinator::new(&journal, &snapshots);
+    let result = coord
+      .recover_process(pid, &|| {
+        Box::new(Restorable {
+          state: String::new(),
+        })
+      })
+      .unwrap();
+
+    assert!(
+      result.pending_effects.is_empty(),
+      "completed effects should be filtered out"
+    );
   }
 }
