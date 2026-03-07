@@ -1,5 +1,6 @@
 pub mod admission;
 pub mod budget;
+pub mod policy;
 pub mod provider_gate;
 
 pub use admission::{AdmissionController, Priority};
