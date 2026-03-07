@@ -793,15 +793,20 @@ pub fn step(&mut self, now_ms: u64) -> (StepResult, TurnContext) {
 
     // Phase 1: ALWAYS drain control lane first.
     // Signals must never be blocked by tag filtering.
+    //
+    // IMPORTANT: Do NOT clear selective_tag here. Only terminal
+    // paths (Kill, Shutdown, abnormal ExitLinked, panic) clear it.
+    // Non-terminal signals (TimerFired, MonitorDown, ChildExited,
+    // trapping ExitLinked, Resume) are dispatched to the behavior,
+    // which may return Continue or WaitForTag — the tag filter
+    // must survive across these.
     if let Some(env) = self.mailbox.pop_control(now_ms) {
-        self.state = ProcessRuntimeState::Running;
-        self.selective_tag = None; // signal clears selective mode
-
         if let EnvelopePayload::Signal(ref sig) = env.payload
         {
             match sig {
                 Signal::Kill => {
                     self.state = ProcessRuntimeState::Done;
+                    self.selective_tag = None; // terminal
                     return (
                         StepResult::Done(Reason::Kill),
                         ctx,
@@ -809,12 +814,15 @@ pub fn step(&mut self, now_ms: u64) -> (StepResult, TurnContext) {
                 }
                 Signal::Shutdown => {
                     self.state = ProcessRuntimeState::Done;
+                    self.selective_tag = None; // terminal
                     return (
                         StepResult::Done(Reason::Shutdown),
                         ctx,
                     );
                 }
                 Signal::Suspend => {
+                    // Preserve selective_tag — resume will
+                    // continue the wait
                     self.state =
                         ProcessRuntimeState::Suspended;
                     return (StepResult::Wait, ctx);
@@ -827,6 +835,7 @@ pub fn step(&mut self, now_ms: u64) -> (StepResult, TurnContext) {
                         && reason.is_abnormal() =>
                 {
                     self.state = ProcessRuntimeState::Done;
+                    self.selective_tag = None; // terminal
                     return (
                         StepResult::Done(reason.clone()),
                         ctx,
@@ -835,15 +844,21 @@ pub fn step(&mut self, now_ms: u64) -> (StepResult, TurnContext) {
                 Signal::ExitLinked(_, _)
                     if !self.trap_exit =>
                 {
+                    // Normal exit from linked, not trapping.
+                    // Preserve selective_tag.
                     return (StepResult::Continue, ctx);
                 }
-                // Trappable signals fall through to behavior
+                // Trappable signals (ChildExited, TimerFired,
+                // MonitorDown, trapping ExitLinked) fall through
+                // to behavior. selective_tag preserved.
                 _ => {}
             }
         }
 
         // Control message not handled by early return
-        // (trappable signal or non-signal control) → behavior
+        // (trappable signal or non-signal control) → behavior.
+        // selective_tag is preserved — behavior decides whether
+        // to continue waiting (WaitForTag) or do something else.
         self.reductions += 1;
         let start = std::time::Instant::now();
         let result =
@@ -879,7 +894,7 @@ pub fn step(&mut self, now_ms: u64) -> (StepResult, TurnContext) {
                     "panic: unknown".to_string()
                 };
                 self.state = ProcessRuntimeState::Failed;
-                self.selective_tag = None;
+                self.selective_tag = None; // terminal
                 (StepResult::Fail(Reason::Custom(msg)), ctx)
             }
         };
@@ -1301,6 +1316,150 @@ fn test_selective_receive_no_queue_duplication() {
 
     // All 5 noise messages still in mailbox (not consumed)
     assert_eq!(p.mailbox.total_len(), 5);
+}
+```
+
+Test 5 — **REGRESSION: non-terminal control signals preserve selective_tag:**
+
+```rust
+#[test]
+fn test_selective_receive_timer_fired_preserves_tag() {
+    use crate::core::timer::TimerId;
+
+    struct TimerAwareBehavior {
+        timer_seen: bool,
+    }
+    impl StepBehavior for TimerAwareBehavior {
+        fn handle(
+            &mut self,
+            envelope: Envelope,
+            _ctx: &mut TurnContext,
+        ) -> StepResult {
+            match &envelope.payload {
+                EnvelopePayload::User(Payload::Text(s))
+                    if s == "start" =>
+                {
+                    StepResult::WaitForTag("reply".into())
+                }
+                EnvelopePayload::Signal(
+                    Signal::TimerFired(_),
+                ) => {
+                    self.timer_seen = true;
+                    // After handling timer, keep waiting for
+                    // the tagged reply
+                    StepResult::WaitForTag("reply".into())
+                }
+                EnvelopePayload::User(Payload::Text(s))
+                    if s == "the reply" =>
+                {
+                    StepResult::Done(Reason::Normal)
+                }
+                _ => StepResult::Continue,
+            }
+        }
+        fn init(
+            &mut self,
+            _checkpoint: Option<Vec<u8>>,
+        ) -> StepResult {
+            StepResult::Continue
+        }
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(
+        pid,
+        Box::new(TimerAwareBehavior {
+            timer_seen: false,
+        }),
+    );
+
+    // Enter selective mode
+    p.mailbox.push(Envelope::text(pid, "start"));
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::WaitForTag(_)));
+    p.selective_tag = Some("reply".into());
+
+    // Deliver TimerFired (control lane, non-terminal)
+    p.mailbox.push(Envelope::signal(
+        pid,
+        Signal::TimerFired(TimerId::new()),
+    ));
+
+    // step() drains control lane, dispatches to behavior.
+    // Behavior returns WaitForTag("reply") again.
+    // selective_tag must NOT have been cleared before
+    // behavior got a chance to handle the signal.
+    let (result, _) = p.step(0);
+    assert!(
+        matches!(
+            result,
+            StepResult::WaitForTag(ref t) if t == "reply"
+        ),
+        "TimerFired must not cancel selective receive"
+    );
+}
+
+#[test]
+fn test_selective_receive_monitor_down_preserves_tag() {
+    struct MonitorAwareBehavior;
+    impl StepBehavior for MonitorAwareBehavior {
+        fn handle(
+            &mut self,
+            envelope: Envelope,
+            _ctx: &mut TurnContext,
+        ) -> StepResult {
+            match &envelope.payload {
+                EnvelopePayload::User(Payload::Text(s))
+                    if s == "start" =>
+                {
+                    StepResult::WaitForTag("reply".into())
+                }
+                EnvelopePayload::Signal(
+                    Signal::MonitorDown(_, _),
+                ) => {
+                    // Monitored process died, but we still
+                    // want our tagged reply
+                    StepResult::WaitForTag("reply".into())
+                }
+                _ => StepResult::Continue,
+            }
+        }
+        fn init(
+            &mut self,
+            _checkpoint: Option<Vec<u8>>,
+        ) -> StepResult {
+            StepResult::Continue
+        }
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(
+        pid,
+        Box::new(MonitorAwareBehavior),
+    );
+
+    // Enter selective mode
+    p.mailbox.push(Envelope::text(pid, "start"));
+    let _ = p.step(0);
+    p.selective_tag = Some("reply".into());
+
+    // Deliver MonitorDown (control lane, non-terminal)
+    p.mailbox.push(Envelope::signal(
+        pid,
+        Signal::MonitorDown(
+            Pid::from_raw(2),
+            Reason::Normal,
+        ),
+    ));
+
+    let (result, _) = p.step(0);
+    assert!(
+        matches!(
+            result,
+            StepResult::WaitForTag(ref t) if t == "reply"
+        ),
+        "MonitorDown must not cancel selective receive"
+    );
 }
 ```
 
