@@ -4,7 +4,7 @@ use tracing::info_span;
 
 use crate::{
   core::{
-    effect::{EffectRequest, EffectResult},
+    effect::{EffectRequest, EffectResult, EffectState},
     message::{Envelope, Signal},
     step_result::StepResult,
     turn_context::TurnIntent,
@@ -24,6 +24,8 @@ struct PendingEffect {
   pid: Pid,
   #[allow(dead_code)] // Used by reactor in Phase 2
   request: EffectRequest,
+  state: EffectState,
+  created_at_ms: u64,
 }
 
 /// Single-thread scheduler engine.
@@ -318,6 +320,8 @@ impl SchedulerEngine {
             PendingEffect {
               pid,
               request: req.clone(),
+              state: EffectState::Pending,
+              created_at_ms: self.clock_ms,
             },
           );
           self.outbound_effects.push((pid, req));
@@ -576,6 +580,31 @@ impl SchedulerEngine {
     self.clock_ms
   }
 
+  /// Update the lifecycle state of an in-flight effect.
+  /// No-op if the effect_id is not found (already completed).
+  pub fn update_effect_state(
+    &mut self,
+    effect_id: u64,
+    new_state: EffectState,
+  ) {
+    if let Some(pending) =
+      self.pending_effects.get_mut(&effect_id)
+    {
+      pending.state = new_state;
+    }
+  }
+
+  /// Query the current lifecycle state of an in-flight
+  /// effect. Returns None if the effect is not pending.
+  pub fn effect_state(
+    &self,
+    effect_id: u64,
+  ) -> Option<&EffectState> {
+    self.pending_effects
+      .get(&effect_id)
+      .map(|p| &p.state)
+  }
+
   /// Insert a pre-built process entry (for recovery).
   pub fn insert_process(
     &mut self,
@@ -645,7 +674,9 @@ impl SchedulerEngine {
 mod tests {
   use super::*;
   use crate::core::behavior::StepBehavior;
-  use crate::core::effect::{EffectKind, EffectRequest, EffectResult};
+  use crate::core::effect::{
+    EffectKind, EffectRequest, EffectResult, EffectState,
+  };
   use crate::core::message::{Envelope, EnvelopePayload};
   use crate::core::step_result::StepResult;
   use crate::core::turn_context::TurnContext;
@@ -1357,6 +1388,94 @@ mod tests {
     assert!(
       expired >= 1,
       "expected at least 1 expired, got {expired}"
+    );
+  }
+
+  #[test]
+  fn test_scheduler_effect_state_pending_on_suspend() {
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Suspender));
+    engine.send(Envelope::text(pid, "go"));
+    engine.tick();
+
+    let effects = engine.take_outbound_effects();
+    assert_eq!(effects.len(), 1);
+    let effect_id = effects[0].1.effect_id.raw();
+
+    let state = engine.effect_state(effect_id);
+    assert!(
+      matches!(state, Some(EffectState::Pending)),
+      "effect should be Pending after Suspend"
+    );
+  }
+
+  #[test]
+  fn test_scheduler_update_effect_state() {
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Suspender));
+    engine.send(Envelope::text(pid, "go"));
+    engine.tick();
+
+    let effects = engine.take_outbound_effects();
+    let effect_id = effects[0].1.effect_id.raw();
+
+    engine.update_effect_state(
+      effect_id,
+      EffectState::Dispatched {
+        dispatched_at_ms: 1000,
+      },
+    );
+    assert!(matches!(
+      engine.effect_state(effect_id),
+      Some(EffectState::Dispatched { .. })
+    ));
+
+    engine.update_effect_state(
+      effect_id,
+      EffectState::Retrying {
+        attempt: 1,
+        next_at_ms: 2000,
+      },
+    );
+    assert!(matches!(
+      engine.effect_state(effect_id),
+      Some(EffectState::Retrying { .. })
+    ));
+  }
+
+  #[test]
+  fn test_scheduler_effect_state_unknown_id_noop() {
+    let mut engine = SchedulerEngine::new();
+    engine.update_effect_state(
+      99999,
+      EffectState::Dispatched {
+        dispatched_at_ms: 0,
+      },
+    );
+    assert!(engine.effect_state(99999).is_none());
+  }
+
+  #[test]
+  fn test_scheduler_effect_state_cleared_on_delivery() {
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Suspender));
+    engine.send(Envelope::text(pid, "go"));
+    engine.tick();
+
+    let effects = engine.take_outbound_effects();
+    let effect_id = effects[0].1.effect_id;
+
+    // Deliver result — removes from pending_effects
+    engine.deliver_effect_result(
+      EffectResult::success(
+        effect_id,
+        serde_json::json!("done"),
+      ),
+    );
+
+    assert!(
+      engine.effect_state(effect_id.raw()).is_none(),
+      "effect state should be gone after delivery"
     );
   }
 }
