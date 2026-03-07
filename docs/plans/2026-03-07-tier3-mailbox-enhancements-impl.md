@@ -638,16 +638,50 @@ pub fn pop_matching(
 }
 ```
 
-**Step 4: Run tests to verify they pass**
+**Step 4: Add `pop_control()` method**
+
+Selective receive must not block control-lane signals (Kill, Shutdown, ExitLinked, etc.). `step()` needs to drain the control lane before calling `pop_matching()`. Add a method that pops from the control lane only:
+
+```rust
+/// Pop the next non-expired message from the control lane only.
+/// Used by step() to ensure signals bypass tag filtering.
+pub fn pop_control(&mut self, now_ms: u64) -> Option<Envelope> {
+    let (result, exp) =
+        pop_lane_alive(&mut self.control, now_ms);
+    self.expired_count += exp;
+    result
+}
+```
+
+Add a test:
+
+```rust
+#[test]
+fn test_pop_control_only_drains_control_lane() {
+    let mut mb = MultiLaneMailbox::new();
+    mb.push(Envelope::text(to(), "user msg"));
+    mb.push(Envelope::signal(to(), Signal::Kill));
+
+    // pop_control only returns control lane messages
+    let env = mb.pop_control(0).unwrap();
+    assert_eq!(env.class, MessageClass::Control);
+
+    // User message still there
+    assert!(mb.pop_control(0).is_none());
+    assert_eq!(mb.total_len(), 1);
+}
+```
+
+**Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p zeptovm --lib -- mailbox::tests`
-Expected: All tests pass (TTL tests + 7 new selective receive tests)
+Expected: All tests pass (TTL tests + 7 selective receive tests + 1 pop_control test)
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
 git add zeptovm/src/kernel/mailbox.rs
-git commit -m "feat(mailbox): add tag-based selective receive via pop_matching()"
+git commit -m "feat(mailbox): add pop_matching() and pop_control() for selective receive"
 ```
 
 ---
@@ -761,15 +795,27 @@ pub fn process_state(&self, pid: Pid) -> Option<ProcessRuntimeState> {
 
 Search for similar patterns in `runtime.rs:608` and `recovery.rs:191`. Fix all.
 
-**Step 4: Update `ProcessEntry::step()` with state-aware pop, explicit Running on match, correct None handling**
+**Step 4: Update `ProcessEntry::step()` with state-aware pop, control-lane bypass, explicit Running on match, correct None handling**
 
-**Critical invariant:** `step()` must explicitly set `self.state = Running` when a tagged message is matched, so the process exits selective mode. When no match, it returns `WaitForTag(tag)` to preserve the filter.
+**Critical invariants:**
+1. Control-lane signals (Kill, Shutdown, ExitLinked, etc.) must ALWAYS be delivered, even during selective receive. `pop_control()` is checked first regardless of state.
+2. `step()` must set `self.state = Running` when a message is matched, to exit selective mode.
+3. When `pop_matching()` returns `None`, return `WaitForTag(tag)` (not `Wait`) to preserve the filter.
 
 Replace the mailbox pop section in `step()`:
 
 ```rust
+// ALWAYS check control lane first — signals must not be blocked
+// by tag filtering. Kill, Shutdown, ExitLinked, etc. take priority.
+if let Some(env) = self.mailbox.pop_control(now_ms) {
+    self.state = ProcessRuntimeState::Running;
+    // Handle the control signal (existing signal handling code)
+    // ... (the existing if let EnvelopePayload::Signal check) ...
+    // Falls through to behavior.handle() for trappable signals
+}
+
 // Pop next message based on process state.
-// WaitingTagged uses selective receive; all other states use normal pop.
+// WaitingTagged uses selective receive for non-control lanes.
 let (maybe_env, waiting_tag) = match &self.state {
     ProcessRuntimeState::WaitingTagged(tag) => {
         let t = tag.clone();
@@ -797,6 +843,89 @@ match maybe_env {
             None => (StepResult::Wait, ctx),
         }
     }
+}
+```
+
+**Implementation note:** The control-lane check must be structured so that if a signal is found, it is handled immediately (Kill → Done, Shutdown → Done, Suspend → Wait, etc.) and the function returns. Only if no control message exists do we proceed to the state-aware pop. The existing signal-handling code in `step()` (lines 106-141) already does this via early returns. The refactor is:
+
+```rust
+// 1. Always drain control lane first (bypasses tag filter)
+if let Some(env) = self.mailbox.pop_control(now_ms) {
+    self.state = ProcessRuntimeState::Running;
+    if let EnvelopePayload::Signal(ref sig) = env.payload {
+        match sig {
+            Signal::Kill => {
+                self.state = ProcessRuntimeState::Done;
+                return (StepResult::Done(Reason::Kill), ctx);
+            }
+            Signal::Shutdown => {
+                self.state = ProcessRuntimeState::Done;
+                return (
+                    StepResult::Done(Reason::Shutdown),
+                    ctx,
+                );
+            }
+            Signal::Suspend => {
+                self.state = ProcessRuntimeState::Suspended;
+                return (StepResult::Wait, ctx);
+            }
+            Signal::Resume => {
+                return (StepResult::Continue, ctx);
+            }
+            Signal::ExitLinked(_, reason)
+                if !self.trap_exit
+                    && reason.is_abnormal() =>
+            {
+                self.state = ProcessRuntimeState::Done;
+                return (
+                    StepResult::Done(reason.clone()),
+                    ctx,
+                );
+            }
+            Signal::ExitLinked(_, _)
+                if !self.trap_exit =>
+            {
+                return (StepResult::Continue, ctx);
+            }
+            // Trappable signals fall through to behavior
+            _ => {}
+        }
+    }
+    // Control message that's not an early-return signal
+    // (or trappable signal) → dispatch to behavior
+    self.reductions += 1;
+    let start = std::time::Instant::now();
+    let result =
+        panic::catch_unwind(AssertUnwindSafe(|| {
+            self.behavior.handle(env, &mut ctx)
+        }));
+    // ... (existing elapsed/overrun/panic handling) ...
+    return match result {
+        Ok(step) => (step, ctx),
+        Err(panic_info) => {
+            // ... existing panic handling ...
+        }
+    };
+}
+
+// 2. No control message. State-aware pop for remaining lanes.
+let (maybe_env, waiting_tag) = match &self.state {
+    ProcessRuntimeState::WaitingTagged(tag) => {
+        let t = tag.clone();
+        (self.mailbox.pop_matching(now_ms, &t), Some(t))
+    }
+    _ => (self.mailbox.pop(now_ms), None),
+};
+
+match maybe_env {
+    Some(env) => {
+        self.state = ProcessRuntimeState::Running;
+        // ... existing behavior dispatch ...
+    }
+    None => match waiting_tag {
+        Some(tag) => (StepResult::WaitForTag(tag), ctx),
+        None => (StepResult::Wait, ctx),
+    },
 }
 ```
 
@@ -1259,6 +1388,136 @@ fn test_selective_receive_tag_survives_wake_cycle() {
 }
 ```
 
+Test 4 — **REGRESSION: control signals bypass tag filter during selective receive:**
+
+```rust
+#[test]
+fn test_selective_receive_kill_bypasses_tag_filter() {
+    struct NeverDone;
+    impl StepBehavior for NeverDone {
+        fn handle(
+            &mut self,
+            _envelope: Envelope,
+            _ctx: &mut TurnContext,
+        ) -> StepResult {
+            // Always ask for a tagged message
+            StepResult::WaitForTag("reply".into())
+        }
+        fn init(
+            &mut self,
+            _checkpoint: Option<Vec<u8>>,
+        ) -> StepResult {
+            StepResult::Continue
+        }
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(pid, Box::new(NeverDone));
+
+    // Enter WaitingTagged state
+    p.mailbox.push(Envelope::text(pid, "trigger"));
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::WaitForTag(_)));
+    p.state =
+        ProcessRuntimeState::WaitingTagged("reply".into());
+
+    // Send a Kill signal (untagged, control lane)
+    p.mailbox.push(Envelope::signal(pid, Signal::Kill));
+
+    // step() must handle Kill immediately despite WaitingTagged
+    let (result, _) = p.step(0);
+    assert!(
+        matches!(result, StepResult::Done(Reason::Kill)),
+        "Kill signal must bypass tag filter, got: {:?}",
+        result
+    );
+    assert_eq!(p.state, ProcessRuntimeState::Done);
+}
+
+#[test]
+fn test_selective_receive_shutdown_bypasses_tag_filter() {
+    struct TagWaiter;
+    impl StepBehavior for TagWaiter {
+        fn handle(
+            &mut self,
+            _envelope: Envelope,
+            _ctx: &mut TurnContext,
+        ) -> StepResult {
+            StepResult::WaitForTag("reply".into())
+        }
+        fn init(
+            &mut self,
+            _checkpoint: Option<Vec<u8>>,
+        ) -> StepResult {
+            StepResult::Continue
+        }
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(pid, Box::new(TagWaiter));
+
+    // Enter WaitingTagged
+    p.mailbox.push(Envelope::text(pid, "trigger"));
+    let _ = p.step(0);
+    p.state =
+        ProcessRuntimeState::WaitingTagged("reply".into());
+
+    // Send Shutdown (untagged, control lane)
+    p.mailbox
+        .push(Envelope::signal(pid, Signal::Shutdown));
+
+    let (result, _) = p.step(0);
+    assert!(
+        matches!(result, StepResult::Done(Reason::Shutdown)),
+        "Shutdown must bypass tag filter"
+    );
+}
+
+#[test]
+fn test_selective_receive_exit_linked_bypasses_tag_filter() {
+    struct TagWaiter;
+    impl StepBehavior for TagWaiter {
+        fn handle(
+            &mut self,
+            _envelope: Envelope,
+            _ctx: &mut TurnContext,
+        ) -> StepResult {
+            StepResult::WaitForTag("reply".into())
+        }
+        fn init(
+            &mut self,
+            _checkpoint: Option<Vec<u8>>,
+        ) -> StepResult {
+            StepResult::Continue
+        }
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(pid, Box::new(TagWaiter));
+
+    // Enter WaitingTagged
+    p.mailbox.push(Envelope::text(pid, "trigger"));
+    let _ = p.step(0);
+    p.state =
+        ProcessRuntimeState::WaitingTagged("reply".into());
+
+    // Send ExitLinked with abnormal reason (control lane)
+    p.mailbox.push(Envelope::signal(
+        pid,
+        Signal::ExitLinked(
+            Pid::from_raw(2),
+            Reason::Custom("crashed".into()),
+        ),
+    ));
+
+    let (result, _) = p.step(0);
+    assert!(
+        matches!(result, StepResult::Done(_)),
+        "ExitLinked(abnormal) must bypass tag filter"
+    );
+}
+```
+
 **Step 10: Run full test suite**
 
 Run: `cargo test -p zeptovm --lib`
@@ -1268,7 +1527,7 @@ Expected: All tests pass
 
 ```bash
 git add zeptovm/src/core/step_result.rs zeptovm/src/kernel/process_table.rs zeptovm/src/kernel/scheduler.rs zeptovm/src/kernel/runtime.rs zeptovm/src/kernel/recovery.rs
-git commit -m "feat(selective-receive): end-to-end WaitForTag with scheduler state preservation"
+git commit -m "feat(selective-receive): end-to-end WaitForTag with control-lane bypass and scheduler state preservation"
 ```
 
 ---
