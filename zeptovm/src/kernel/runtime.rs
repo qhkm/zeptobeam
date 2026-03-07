@@ -220,6 +220,7 @@ impl SchedulerRuntime {
     if let Some(ref reactor) = self.reactor {
       use crate::core::effect::EffectStatus;
 
+      #[allow(deprecated)]
       let completions = reactor.drain_completions();
       for completion in completions {
         if completion.result.status

@@ -222,6 +222,9 @@ impl Reactor {
   }
 
   /// Drain only completion messages (backward compat).
+  #[deprecated(
+    note = "Use drain_messages() to receive both state transitions and completions"
+  )]
   pub fn drain_completions(&self) -> Vec<EffectCompletion> {
     let mut results = Vec::new();
     while let Some(msg) = self.try_recv() {
@@ -685,6 +688,7 @@ mod tests {
   }
 
   #[test]
+  #[allow(deprecated)]
   fn test_reactor_drain_completions() {
     let reactor = Reactor::start();
     let pid = Pid::from_raw(1);
@@ -704,6 +708,7 @@ mod tests {
   }
 
   #[test]
+  #[allow(deprecated)]
   fn test_reactor_custom_effect() {
     let reactor = Reactor::start();
     let pid = Pid::from_raw(1);
@@ -735,6 +740,7 @@ mod tests {
   }
 
   #[test]
+  #[allow(deprecated)]
   fn test_reactor_retry_integration() {
     let reactor = Reactor::start();
     let pid = Pid::from_raw(1);
@@ -746,5 +752,36 @@ mod tests {
     std::thread::sleep(Duration::from_millis(100));
     let completions = reactor.drain_completions();
     assert_eq!(completions.len(), 1);
+  }
+
+  #[test]
+  fn test_reactor_drain_messages_includes_state_changes() {
+    let reactor = Reactor::start();
+    let request = EffectRequest::new(
+      EffectKind::LlmCall,
+      serde_json::json!({"prompt": "hi"}),
+    );
+    let pid = Pid::from_raw(1);
+    reactor.dispatch(pid, request);
+    std::thread::sleep(Duration::from_millis(100));
+
+    let messages = reactor.drain_messages();
+    let has_state_changed = messages.iter().any(|m| {
+      matches!(
+        m,
+        ReactorMessage::StateChanged {
+          new_state: EffectState::Dispatched { .. },
+          ..
+        }
+      )
+    });
+    let has_completion = messages.iter().any(|m| {
+      matches!(m, ReactorMessage::Completion(_))
+    });
+    assert!(
+      has_state_changed,
+      "should have StateChanged::Dispatched"
+    );
+    assert!(has_completion, "should have Completion");
   }
 }
