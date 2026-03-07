@@ -212,7 +212,7 @@ impl SchedulerEngine {
           Some(p) => p,
           None => return,
         };
-        let (result, mut ctx) = proc.step();
+        let (result, mut ctx) = proc.step(self.clock_ms);
         let intents = ctx.take_intents();
         (result, intents)
       };

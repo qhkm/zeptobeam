@@ -89,7 +89,7 @@ impl ProcessEntry {
 
   /// Step the process once with panic isolation.
   /// Returns (StepResult, TurnContext with collected intents).
-  pub fn step(&mut self) -> (StepResult, TurnContext) {
+  pub fn step(&mut self, now_ms: u64) -> (StepResult, TurnContext) {
     let mut ctx = TurnContext::new(self.pid);
     self.turn_overrun_flag = false;
     self.last_turn_duration = None;
@@ -101,8 +101,7 @@ impl ProcessEntry {
     }
 
     // Pop next message (mailbox handles lane priority)
-    // TODO(task-3): pass real now_ms instead of 0
-    match self.mailbox.pop(0) {
+    match self.mailbox.pop(now_ms) {
       Some(env) => {
         // Check for control signals that the runtime handles
         // directly. Signals not matched here fall through to
@@ -281,7 +280,7 @@ mod tests {
     let mut p = ProcessEntry::new(pid, Box::new(Echo));
     p.init(None);
     p.mailbox.push(Envelope::text(pid, "hello"));
-    let (result, _ctx) = p.step();
+    let (result, _ctx) = p.step(0);
     assert!(matches!(result, StepResult::Continue));
     assert_eq!(p.reductions(), 1);
   }
@@ -290,7 +289,7 @@ mod tests {
   fn test_process_step_empty_returns_wait() {
     let mut p = ProcessEntry::new(Pid::new(), Box::new(Echo));
     p.init(None);
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Wait));
   }
 
@@ -301,7 +300,7 @@ mod tests {
     p.init(None);
     p.mailbox.push(Envelope::text(pid, "ignored"));
     p.request_kill();
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Done(Reason::Kill)));
   }
 
@@ -311,7 +310,7 @@ mod tests {
     let mut p = ProcessEntry::new(pid, Box::new(Echo));
     p.init(None);
     p.mailbox.push(Envelope::signal(pid, Signal::Kill));
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Done(Reason::Kill)));
   }
 
@@ -325,7 +324,7 @@ mod tests {
       pid,
       Signal::ExitLinked(other, Reason::Custom("crash".into())),
     ));
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Done(Reason::Custom(_))));
   }
 
@@ -340,7 +339,7 @@ mod tests {
       Signal::ExitLinked(other, Reason::Normal),
     ));
     p.mailbox.push(Envelope::text(pid, "still alive"));
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Continue));
   }
 
@@ -365,7 +364,7 @@ mod tests {
     let mut p = ProcessEntry::new(pid, Box::new(Panicker));
     p.init(None);
     p.mailbox.push(Envelope::text(pid, "trigger"));
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Fail(Reason::Custom(_))));
     assert_eq!(p.state, ProcessRuntimeState::Failed);
   }
@@ -394,7 +393,7 @@ mod tests {
     let mut p = ProcessEntry::new(pid, Box::new(Suspender));
     p.init(None);
     p.mailbox.push(Envelope::text(pid, "go"));
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Suspend(_)));
   }
 
@@ -424,7 +423,7 @@ mod tests {
       ProcessEntry::new(pid, Box::new(Sender { target }));
     p.init(None);
     p.mailbox.push(Envelope::text(pid, "go"));
-    let (result, ctx) = p.step();
+    let (result, ctx) = p.step(0);
     assert!(matches!(result, StepResult::Continue));
     assert_eq!(ctx.intent_count(), 1);
   }
@@ -439,7 +438,7 @@ mod tests {
       p.mailbox.push(Envelope::text(pid, format!("m-{i}")));
     }
     for _ in 0..5 {
-      p.step();
+      p.step(0);
     }
     assert_eq!(p.reductions(), 5);
     assert_eq!(p.take_reductions(), 5);
@@ -465,7 +464,7 @@ mod tests {
       pid,
       Signal::ExitLinked(other, Reason::Custom("crash".into())),
     ));
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     // trap_exit: signal goes to behavior.handle(), which returns
     // Continue
     assert!(matches!(result, StepResult::Continue));
@@ -503,7 +502,7 @@ mod tests {
     );
     p.init(None);
     p.mailbox.push(Envelope::text(pid, "go"));
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Continue));
     assert!(
       p.turn_overrun(),
@@ -520,7 +519,7 @@ mod tests {
     );
     p.init(None);
     p.mailbox.push(Envelope::text(pid, "go"));
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Continue));
     assert!(
       !p.turn_overrun(),
@@ -559,11 +558,11 @@ mod tests {
     );
     p.init(None);
     p.mailbox.push(Envelope::text(pid, "go"));
-    p.step();
+    p.step(0);
     assert!(p.turn_overrun());
     // Second step: no message, should return Wait and
     // reset overrun flag
-    let (result, _) = p.step();
+    let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Wait));
     assert!(!p.turn_overrun());
   }
