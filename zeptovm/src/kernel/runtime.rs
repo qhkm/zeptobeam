@@ -797,6 +797,10 @@ impl SchedulerRuntime {
       self.engine.schedule_timer(timer);
     }
 
+    // TODO: re-dispatch pending effects based on last_state
+    // (Pending/Dispatched/Retrying → reactor, Streaming → from scratch, Completed → skip)
+    // recovered.pending_effects carries PendingEffectRecovery with last_state
+
     self.metrics.inc("processes.spawned");
     self.metrics.gauge_set(
       "processes.active",
