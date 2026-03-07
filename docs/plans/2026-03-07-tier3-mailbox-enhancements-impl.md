@@ -761,9 +761,11 @@ pub fn process_state(&self, pid: Pid) -> Option<ProcessRuntimeState> {
 
 Search for similar patterns in `runtime.rs:608` and `recovery.rs:191`. Fix all.
 
-**Step 4: Update `ProcessEntry::step()` with state-aware pop and correct None handling**
+**Step 4: Update `ProcessEntry::step()` with state-aware pop, explicit Running on match, correct None handling**
 
-Replace the mailbox pop section in `step()`. The key insight: when `WaitingTagged` and `pop_matching` returns `None`, we must return `WaitForTag(tag)` — NOT `Wait` — to preserve the tag filter.
+**Critical invariant:** `step()` must explicitly set `self.state = Running` when a tagged message is matched, so the process exits selective mode. When no match, it returns `WaitForTag(tag)` to preserve the filter.
+
+Replace the mailbox pop section in `step()`:
 
 ```rust
 // Pop next message based on process state.
@@ -778,9 +780,13 @@ let (maybe_env, waiting_tag) = match &self.state {
 
 match maybe_env {
     Some(env) => {
-        // We have a message — proceed with normal handling
-        // (existing code for signal checks + behavior.handle)
-        // ...
+        // IMPORTANT: Clear selective mode. The process now has
+        // a message and enters normal handling. Without this,
+        // WaitingTagged leaks into subsequent turns.
+        self.state = ProcessRuntimeState::Running;
+
+        // ... rest of existing Some(env) arm unchanged:
+        // signal checks, behavior.handle(), etc.
     }
     None => {
         // No message available. If we were doing selective receive,
@@ -835,21 +841,30 @@ StepResult::WaitForTag(tag) => {
 }
 ```
 
-**Step 7: Update all 6 wake-up sites to also wake WaitingTagged**
+**Step 7: Update all 7 wake-up sites — enqueue without erasing tag**
 
-Strategy: always wake `WaitingTagged` processes when any message arrives. The process's `step()` will use `pop_matching()` which filters properly — if no match, the behavior returns `WaitForTag` again and the scheduler re-enters `WaitingTagged`. This avoids duplicating tag-matching logic at every wake site.
+**Critical invariant: waking a tagged waiter must not destroy the tag.**
 
-Create a helper method to avoid repeating the pattern at 6 sites:
+For `WaitingMessage`: set state to `Ready` and enqueue (existing behavior).
+For `WaitingTagged`: keep state as-is, just enqueue. `step_process()` preserves `WaitingTagged` (Step 5), `step()` reads it for `pop_matching()` (Step 4), and on no match returns `WaitForTag` which re-enters the same state (Step 6).
+
+Helper method:
 
 ```rust
 /// Wake a process if it's waiting for a message.
-/// Handles both WaitingMessage and WaitingTagged states.
+/// WaitingMessage → Ready (normal wake).
+/// WaitingTagged → stays WaitingTagged, just enqueued
+///   (step() will use pop_matching, which preserves the tag filter).
 fn wake_if_waiting(&mut self, pid: Pid) {
     if let Some(proc) = self.processes.get_mut(&pid) {
         match &proc.state {
-            ProcessRuntimeState::WaitingMessage
-            | ProcessRuntimeState::WaitingTagged(_) => {
+            ProcessRuntimeState::WaitingMessage => {
                 proc.state = ProcessRuntimeState::Ready;
+                self.ready_queue.push(pid);
+            }
+            ProcessRuntimeState::WaitingTagged(_) => {
+                // DO NOT clear the tag. Just enqueue for stepping.
+                // step_process() preserves WaitingTagged state.
                 self.ready_queue.push(pid);
             }
             _ => {}
@@ -858,9 +873,9 @@ fn wake_if_waiting(&mut self, pid: Pid) {
 }
 ```
 
-Then replace the pattern at all 6 sites:
+Apply at all **7** sites (not 6 — includes deliver_streaming_chunk):
 
-**Site 1 — `send()` (line 100):** Replace the `if proc.state == ...` block. Note: `send()` owns `env` before pushing, so the borrow is released. After `proc.mailbox.push(env)`, call `self.wake_if_waiting(to)`. But wait — `self` is already borrowed via `self.processes.get_mut()`. To avoid this, restructure: push first, then call the helper.
+**Site 1 — `send()` (line 100):**
 
 ```rust
 pub fn send(&mut self, env: Envelope) {
@@ -872,7 +887,7 @@ pub fn send(&mut self, env: Envelope) {
 }
 ```
 
-**Site 2 — `deliver_effect_result()` (line 121):** After pushing the effect result envelope, wake if `WaitingMessage` or `WaitingTagged`. But this site currently also checks `WaitingEffect` — keep that as-is, and add the message-waiting check:
+**Site 2 — `deliver_effect_result()` (line 121):** Keep the existing `WaitingEffect` handling, add message-waiting wake:
 
 ```rust
 pub fn deliver_effect_result(
@@ -893,9 +908,12 @@ pub fn deliver_effect_result(
                     proc.state = ProcessRuntimeState::Ready;
                     self.ready_queue.push(pid);
                 }
-                ProcessRuntimeState::WaitingMessage
-                | ProcessRuntimeState::WaitingTagged(_) => {
+                ProcessRuntimeState::WaitingMessage => {
                     proc.state = ProcessRuntimeState::Ready;
+                    self.ready_queue.push(pid);
+                }
+                ProcessRuntimeState::WaitingTagged(_) => {
+                    // Preserve tag, just enqueue
                     self.ready_queue.push(pid);
                 }
                 _ => {}
@@ -905,13 +923,52 @@ pub fn deliver_effect_result(
 }
 ```
 
-**Sites 3-5 — `propagate_exit()` (lines 348, 368, 391):** Each site pushes a signal envelope then checks `WaitingMessage`. Change each to also match `WaitingTagged(_)`:
+**Site 3 — `deliver_streaming_chunk()` (line 135):** Currently pushes to mailbox but doesn't wake. Add wake logic:
+
+```rust
+pub fn deliver_streaming_chunk(
+    &mut self,
+    result: EffectResult,
+) {
+    let effect_raw = result.effect_id.raw();
+    if let Some(pending) =
+        self.pending_effects.get(&effect_raw)
+    {
+        let pid = pending.pid;
+        if let Some(proc) =
+            self.processes.get_mut(&pid)
+        {
+            proc.mailbox.push(
+                Envelope::effect_result(pid, result),
+            );
+            // Wake if waiting for messages (effect still in-flight)
+            match &proc.state {
+                ProcessRuntimeState::WaitingMessage => {
+                    proc.state = ProcessRuntimeState::Ready;
+                    self.ready_queue.push(pid);
+                }
+                ProcessRuntimeState::WaitingTagged(_) => {
+                    self.ready_queue.push(pid);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+```
+
+**Sites 4-6 — `propagate_exit()` (lines 348, 368, 391):** Each site pushes a signal envelope then wakes. Signals are control-lane messages that should always wake (even tagged waiters — the signal is important):
 
 ```rust
 match &proc.state {
-    ProcessRuntimeState::WaitingMessage
-    | ProcessRuntimeState::WaitingTagged(_) => {
+    ProcessRuntimeState::WaitingMessage => {
         proc.state = ProcessRuntimeState::Ready;
+        self.ready_queue.push(target_pid);
+    }
+    ProcessRuntimeState::WaitingTagged(_) => {
+        // Preserve tag, just enqueue — signals go to
+        // control lane which pop() always checks first,
+        // and step() handles signals before behavior
         self.ready_queue.push(target_pid);
     }
     _ => {}
@@ -920,13 +977,15 @@ match &proc.state {
 
 Apply this pattern to all three sites (links, monitors, parent notification).
 
-**Site 6 — `advance_clock()` (line 544):** Same pattern:
+**Site 7 — `advance_clock()` (line 544):**
 
 ```rust
 match &proc.state {
-    ProcessRuntimeState::WaitingMessage
-    | ProcessRuntimeState::WaitingTagged(_) => {
+    ProcessRuntimeState::WaitingMessage => {
         proc.state = ProcessRuntimeState::Ready;
+        self.ready_queue.push(owner);
+    }
+    ProcessRuntimeState::WaitingTagged(_) => {
         self.ready_queue.push(owner);
     }
     _ => {}
@@ -935,16 +994,22 @@ match &proc.state {
 
 **Step 8: Handle preemption with WaitingTagged**
 
-In `step_process()` around line 196-207, when reductions run out, the scheduler currently checks `has_messages()` to decide `Ready` vs `WaitingMessage`. For `WaitingTagged`, we need to preserve the tag:
+In `step_process()` around line 196-207, when reductions run out:
 
 ```rust
 if reductions_left == 0 {
     if let Some(proc) = self.processes.get_mut(&pid) {
         if proc.mailbox.has_messages() {
-            proc.state = ProcessRuntimeState::Ready;
+            // Re-enqueue. If WaitingTagged, keep tag.
+            if !matches!(
+                proc.state,
+                ProcessRuntimeState::WaitingTagged(_)
+            ) {
+                proc.state = ProcessRuntimeState::Ready;
+            }
             self.ready_queue.push(pid);
         } else {
-            // Preserve WaitingTagged if that was the state
+            // No messages. Preserve WaitingTagged if active.
             if !matches!(
                 proc.state,
                 ProcessRuntimeState::WaitingTagged(_)
@@ -958,7 +1023,7 @@ if reductions_left == 0 {
 }
 ```
 
-Similarly, in the `StepResult::Continue` arm (around line 284-296), when mailbox is empty:
+Similarly, in the `StepResult::Continue` arm, when mailbox is empty:
 
 ```rust
 StepResult::Continue => {
@@ -968,7 +1033,6 @@ StepResult::Continue => {
         None => return,
     };
     if !proc.mailbox.has_messages() {
-        // Don't downgrade WaitingTagged to WaitingMessage
         if !matches!(
             proc.state,
             ProcessRuntimeState::WaitingTagged(_)
@@ -1107,6 +1171,91 @@ fn test_selective_receive_no_match_preserves_wait_tag() {
         }
         other => panic!("unexpected: {:?}", other),
     }
+}
+```
+
+Test 3 — verify tag survives wake→step cycle (the core invariant):
+
+```rust
+#[test]
+fn test_selective_receive_tag_survives_wake_cycle() {
+    struct TaggedReceiver {
+        phase: u8,
+    }
+    impl StepBehavior for TaggedReceiver {
+        fn handle(
+            &mut self,
+            envelope: Envelope,
+            _ctx: &mut TurnContext,
+        ) -> StepResult {
+            match self.phase {
+                0 => {
+                    // First message triggers selective wait
+                    self.phase = 1;
+                    StepResult::WaitForTag("target".into())
+                }
+                1 => {
+                    // Should only get here with tagged message
+                    assert_eq!(
+                        envelope.tag.as_deref(),
+                        Some("target")
+                    );
+                    self.phase = 2;
+                    StepResult::Done(Reason::Normal)
+                }
+                _ => StepResult::Continue,
+            }
+        }
+        fn init(
+            &mut self,
+            _checkpoint: Option<Vec<u8>>,
+        ) -> StepResult {
+            StepResult::Continue
+        }
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(
+        pid,
+        Box::new(TaggedReceiver { phase: 0 }),
+    );
+
+    // Phase 0: trigger WaitForTag
+    p.mailbox.push(Envelope::text(pid, "go"));
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::WaitForTag(_)));
+
+    // Simulate wake_if_waiting: scheduler enqueues pid
+    // but does NOT change state from WaitingTagged
+    p.state =
+        ProcessRuntimeState::WaitingTagged("target".into());
+    // Send non-matching message (simulates the wake trigger)
+    p.mailbox.push(Envelope::text(pid, "noise"));
+
+    // step_process would NOT overwrite WaitingTagged to Running.
+    // step() should use pop_matching, find no match, return WaitForTag.
+    let (result, _) = p.step(0);
+    assert!(matches!(
+        result,
+        StepResult::WaitForTag(ref t) if t == "target"
+    ));
+    // State should be set back by scheduler to WaitingTagged
+    // (we simulate that here)
+    p.state =
+        ProcessRuntimeState::WaitingTagged("target".into());
+
+    // Now send matching message
+    p.mailbox.push(
+        Envelope::text(pid, "match").with_tag("target"),
+    );
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::Done(Reason::Normal)));
+
+    // After match, step() set state to Running (clearing tag)
+    assert_eq!(p.state, ProcessRuntimeState::Running);
+
+    // noise still in mailbox (was skipped by pop_matching)
+    assert_eq!(p.mailbox.total_len(), 1);
 }
 ```
 
