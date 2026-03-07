@@ -13,6 +13,7 @@ use crate::effects::config::ProviderConfig;
 use crate::effects::http_worker::HttpWorker;
 use crate::effects::openai::OpenAiClient;
 use crate::effects::provider::ProviderClient;
+use crate::durability::artifact_store::ArtifactBackend;
 use crate::pid::Pid;
 
 /// Configuration for the reactor's real LLM and HTTP workers.
@@ -29,6 +30,7 @@ pub struct ReactorConfig {
   /// When false (placeholder mode), all effects return
   /// placeholder responses for backward compatibility.
   use_real_http: bool,
+  artifact_store: Option<Arc<dyn ArtifactBackend>>,
 }
 
 impl ReactorConfig {
@@ -56,6 +58,7 @@ impl ReactorConfig {
       http_worker: Arc::new(HttpWorker::new()),
       provider_config: config.clone(),
       use_real_http: true,
+      artifact_store: None,
     }
   }
 
@@ -68,6 +71,7 @@ impl ReactorConfig {
       http_worker: Arc::new(HttpWorker::new()),
       provider_config: ProviderConfig::default(),
       use_real_http: false,
+      artifact_store: None,
     }
   }
 }
@@ -116,7 +120,7 @@ impl Reactor {
   /// Start the reactor on a background thread with a Tokio
   /// runtime, using placeholder responses for all effects.
   pub fn start() -> Self {
-    Self::start_with_config(None)
+    Self::start_with_config(None, None)
   }
 
   /// Start the reactor with an optional `ProviderConfig`.
@@ -128,13 +132,16 @@ impl Reactor {
   /// returned — preserving backward-compatible behavior.
   pub fn start_with_config(
     config: Option<ProviderConfig>,
+    artifact_store: Option<Arc<dyn ArtifactBackend>>,
   ) -> Self {
-    let reactor_config = Arc::new(match config {
+    let mut reactor_config = match config {
       Some(ref c) if c.has_any_provider() => {
         ReactorConfig::from_provider_config(c)
       }
       _ => ReactorConfig::placeholder(),
-    });
+    };
+    reactor_config.artifact_store = artifact_store;
+    let reactor_config = Arc::new(reactor_config);
 
     let (dispatch_tx, dispatch_rx) =
       unbounded::<EffectDispatch>();
@@ -553,6 +560,122 @@ async fn execute_effect_once_configured(
             "status": 200,
             "body": "placeholder"
           }),
+        )
+      }
+    }
+
+    EffectKind::ObjectPut => {
+      if let Some(ref store) = config.artifact_store {
+        let data_b64 = request
+          .input
+          .get("data_base64")
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+        let media_type = request
+          .input
+          .get("media_type")
+          .and_then(|v| v.as_str())
+          .unwrap_or("application/octet-stream");
+        let ttl_ms = request
+          .input
+          .get("ttl_ms")
+          .and_then(|v| v.as_u64());
+
+        use base64::Engine;
+        let data =
+          base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .map_err(|e| format!("base64 decode: {e}"));
+
+        match data {
+          Ok(bytes) => {
+            match store.store(&bytes, media_type, ttl_ms)
+            {
+              Ok(obj_ref) => EffectResult::success(
+                request.effect_id,
+                serde_json::to_value(&obj_ref)
+                  .unwrap_or_default(),
+              ),
+              Err(e) => EffectResult::failure(
+                request.effect_id,
+                e,
+              ),
+            }
+          }
+          Err(e) => {
+            EffectResult::failure(request.effect_id, e)
+          }
+        }
+      } else {
+        EffectResult::failure(
+          request.effect_id,
+          "no artifact store configured",
+        )
+      }
+    }
+
+    EffectKind::ObjectFetch => {
+      if let Some(ref store) = config.artifact_store {
+        let obj_id = request
+          .input
+          .get("object_id")
+          .and_then(|v| v.as_u64())
+          .unwrap_or(0);
+
+        use crate::core::object::ObjectId;
+        match store
+          .retrieve(&ObjectId::from_raw(obj_id))
+        {
+          Ok((obj_ref, data)) => {
+            use base64::Engine;
+            let data_b64 =
+              base64::engine::general_purpose::STANDARD
+                .encode(&data);
+            EffectResult::success(
+              request.effect_id,
+              serde_json::json!({
+                "ref": obj_ref,
+                "data_base64": data_b64,
+              }),
+            )
+          }
+          Err(e) => EffectResult::failure(
+            request.effect_id,
+            e,
+          ),
+        }
+      } else {
+        EffectResult::failure(
+          request.effect_id,
+          "no artifact store configured",
+        )
+      }
+    }
+
+    EffectKind::ObjectDelete => {
+      if let Some(ref store) = config.artifact_store {
+        let obj_id = request
+          .input
+          .get("object_id")
+          .and_then(|v| v.as_u64())
+          .unwrap_or(0);
+
+        use crate::core::object::ObjectId;
+        match store.delete(&ObjectId::from_raw(obj_id))
+        {
+          Ok(existed) => EffectResult::success(
+            request.effect_id,
+            serde_json::json!({ "deleted": existed }),
+          ),
+          Err(e) => EffectResult::failure(
+            request.effect_id,
+            e,
+          ),
+        }
+      } else {
+        EffectResult::failure(
+          request.effect_id,
+          "no artifact store configured",
         )
       }
     }

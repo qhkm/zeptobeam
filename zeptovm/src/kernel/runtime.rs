@@ -138,6 +138,7 @@ impl SchedulerRuntime {
       self.reactor = Some(
         Reactor::start_with_config(
           Some(config.clone()),
+          None,
         ),
       );
     }
