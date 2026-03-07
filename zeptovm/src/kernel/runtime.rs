@@ -4,6 +4,7 @@ use tracing::{debug, warn};
 
 use crate::{
   control::budget::BudgetGate,
+  control::policy::{PolicyDecision, PolicyEngine},
   core::{
     behavior::StepBehavior,
     effect::{
@@ -69,6 +70,7 @@ pub struct SchedulerRuntime {
   budget_gate: Option<BudgetGate>,
   budget_violations: Vec<BudgetViolation>,
   budget_enabled: bool,
+  policy: Option<PolicyEngine>,
   metrics: Metrics,
 }
 
@@ -87,6 +89,7 @@ impl SchedulerRuntime {
       budget_gate: None,
       budget_violations: Vec::new(),
       budget_enabled: false,
+      policy: None,
       metrics: Metrics::new(),
     }
   }
@@ -114,6 +117,7 @@ impl SchedulerRuntime {
       budget_gate: None,
       budget_violations: Vec::new(),
       budget_enabled: false,
+      policy: None,
       metrics: Metrics::new(),
     }
   }
@@ -161,6 +165,12 @@ impl SchedulerRuntime {
       cost_limit_microdollars,
     ));
     self.budget_enabled = true;
+    self
+  }
+
+  /// Attach a policy engine for effect-level access control.
+  pub fn with_policy(mut self, policy: PolicyEngine) -> Self {
+    self.policy = Some(policy);
     self
   }
 
@@ -405,6 +415,25 @@ impl SchedulerRuntime {
               .deliver_effect_result(cached);
             continue;
           }
+        }
+      }
+
+      // Policy check
+      if let Some(ref policy) = self.policy {
+        let decision = policy.evaluate(&req.kind, None);
+        if let PolicyDecision::Deny(reason) = decision {
+          warn!(
+            pid = %pid,
+            kind = ?req.kind,
+            reason = %reason,
+            "effect blocked by policy"
+          );
+          let result = EffectResult::failure(
+            req.effect_id,
+            format!("policy denied: {}", reason),
+          );
+          self.engine.deliver_effect_result(result);
+          continue;
         }
       }
 
@@ -1437,5 +1466,67 @@ mod tests {
       completed[0].1,
       Reason::Normal
     ));
+  }
+
+  #[test]
+  fn test_runtime_policy_denies_effect() {
+    use crate::control::policy::{
+      PolicyDecision, PolicyEngine, PolicyRule,
+    };
+
+    let policy = PolicyEngine::new(
+      vec![PolicyRule {
+        kind: EffectKind::LlmCall,
+        decision: PolicyDecision::Deny(
+          "LLM calls blocked".into(),
+        ),
+        max_cost_microdollars: None,
+      }],
+      PolicyDecision::Allow,
+    );
+    let mut rt = SchedulerRuntime::new().with_policy(policy);
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick(); // Process suspends with LlmCall; policy blocks it
+    rt.tick(); // Process handles failed effect result and exits
+
+    let completed = rt.take_completed();
+    assert_eq!(completed.len(), 1);
+    assert!(matches!(completed[0].1, Reason::Normal));
+  }
+
+  #[test]
+  fn test_runtime_policy_allows_effect() {
+    use crate::control::policy::{
+      PolicyDecision, PolicyEngine, PolicyRule,
+    };
+
+    let policy = PolicyEngine::new(
+      vec![PolicyRule {
+        kind: EffectKind::DbWrite,
+        decision: PolicyDecision::Deny(
+          "writes blocked".into(),
+        ),
+        max_cost_microdollars: None,
+      }],
+      PolicyDecision::Allow,
+    );
+    let mut rt = SchedulerRuntime::new().with_policy(policy);
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+
+    let violations = rt.take_budget_violations();
+    assert_eq!(violations.len(), 0);
+  }
+
+  #[test]
+  fn test_runtime_no_policy_allows_all() {
+    let mut rt = SchedulerRuntime::new();
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+    let violations = rt.take_budget_violations();
+    assert_eq!(violations.len(), 0);
   }
 }
