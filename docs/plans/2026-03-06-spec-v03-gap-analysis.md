@@ -20,7 +20,7 @@
 
 | # | Addition | Status | Details |
 |---|----------|--------|---------|
-| A1 | ObjectRef type | NOT DONE | EffectKind variants exist, no ObjectRef struct or store |
+| A1 | ObjectRef type | DONE | ObjectRef type + ArtifactBackend trait + SqliteArtifactStore + ObjectPut/ObjectFetch/ObjectDelete reactor handlers + TTL sweep |
 | A2 | Behavior version in process metadata | DONE | BehaviorMeta struct + meta() trait method on StepBehavior |
 | A3 | Effect state classification for recovery | DONE | Explicit EffectState enum (Pending/Dispatched/Retrying/Streaming/Completed) + ReactorMessage state reporting + journal transitions + RecoveryCoordinator replays last_state |
 | A4 | Watchdog for handler overruns | DONE | Implemented with C4 — wall-clock timing in ProcessEntry::step() |
@@ -30,7 +30,7 @@
 | # | Gap | Status | Notes |
 |---|-----|--------|-------|
 | G1 | Multi-node clustering | NOT DONE | Design doc exists, no implementation |
-| G2 | Object/artifact plane | NOT DONE | No ObjectRef, no artifact store |
+| G2 | Object/artifact plane | DONE | ObjectRef + artifact plane implemented with trait-based backend (SQLite first) |
 | G3 | Full policy engine | DONE | PolicyEngine with effect-kind rules, integrated into runtime |
 | G4 | Behavior versioning + migration | NOT DONE | No version metadata, no migration |
 | G5 | OneForAll / RestForOne supervision | DONE | All three strategies implemented with shutdown coordination |
@@ -71,7 +71,7 @@
 
 ### Tier 4 — Phase 3+ (deferred from Tier 3 + multi-node)
 
-- **A1/G2:** ObjectRef + artifact plane (needs storage backend design: SQLite blobs / filesystem / S3-compatible)
+- **A1/G2:** DONE — ObjectRef + artifact plane (ObjectRef type, ArtifactBackend trait, SqliteArtifactStore, reactor handlers, TTL sweep)
 - **A3:** DONE — Effect state machine for recovery (EffectState enum + ReactorMessage + journal + recovery)
 - **G6:** Human approval gateway (approval wait state + timeout + workflow)
 - **G1:** Multi-node clustering
