@@ -97,7 +97,9 @@ impl ArtifactBackend for SqliteArtifactStore {
   ) -> Result<ObjectRef, String> {
     let hash = format!("{:x}", Sha256::digest(data));
     let now = Self::now_ms();
-    let expires_at = ttl_ms.map(|ttl| now + ttl);
+    let expires_at = ttl_ms.map(|ttl| {
+      now.saturating_add(ttl).min(i64::MAX as u64)
+    });
 
     let conn =
       self.conn.lock().map_err(|e| format!("lock error: {e}"))?;
@@ -163,6 +165,18 @@ impl ArtifactBackend for SqliteArtifactStore {
       })?;
 
     let (hash, media, size, data, created, expires) = result;
+
+    // Enforce TTL at read time — don't return expired
+    // artifacts even if the sweep hasn't run yet.
+    if let Some(exp) = expires {
+      if exp <= Self::now_ms() as i64 {
+        return Err(format!(
+          "object expired: {}",
+          object_id.raw()
+        ));
+      }
+    }
+
     let ttl_ms = expires.map(|e| (e - created).max(0) as u64);
 
     let obj_ref = ObjectRef {
@@ -369,5 +383,40 @@ mod tests {
     let ids: std::collections::HashSet<_> =
       refs.iter().map(|r| r.object_id.raw()).collect();
     assert_eq!(ids.len(), 4);
+  }
+
+  #[test]
+  fn test_retrieve_expired_before_sweep() {
+    let store =
+      SqliteArtifactStore::open_in_memory().unwrap();
+    let obj_ref = store
+      .store(b"ephemeral", "text/plain", Some(0))
+      .unwrap();
+
+    // Don't call cleanup_expired — retrieve should
+    // still reject the expired artifact.
+    std::thread::sleep(
+      std::time::Duration::from_millis(10),
+    );
+
+    let result = store.retrieve(&obj_ref.object_id);
+    assert!(result.is_err());
+    assert!(
+      result.unwrap_err().contains("object expired")
+    );
+  }
+
+  #[test]
+  fn test_ttl_saturating_add() {
+    let store =
+      SqliteArtifactStore::open_in_memory().unwrap();
+    // u64::MAX ttl should not panic or wrap
+    let obj_ref = store
+      .store(b"big-ttl", "text/plain", Some(u64::MAX))
+      .unwrap();
+    // Should still be retrievable (expiry far in future)
+    let (_, data) =
+      store.retrieve(&obj_ref.object_id).unwrap();
+    assert_eq!(data, b"big-ttl");
   }
 }

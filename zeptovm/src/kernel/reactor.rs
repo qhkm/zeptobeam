@@ -566,11 +566,19 @@ async fn execute_effect_once_configured(
 
     EffectKind::ObjectPut => {
       if let Some(ref store) = config.artifact_store {
-        let data_b64 = request
+        let data_b64 = match request
           .input
           .get("data_base64")
           .and_then(|v| v.as_str())
-          .unwrap_or("");
+        {
+          Some(s) => s,
+          None => {
+            return EffectResult::failure(
+              request.effect_id,
+              "missing required field: data_base64",
+            );
+          }
+        };
         let media_type = request
           .input
           .get("media_type")
@@ -616,11 +624,19 @@ async fn execute_effect_once_configured(
 
     EffectKind::ObjectFetch => {
       if let Some(ref store) = config.artifact_store {
-        let obj_id = request
+        let obj_id = match request
           .input
           .get("object_id")
           .and_then(|v| v.as_u64())
-          .unwrap_or(0);
+        {
+          Some(id) => id,
+          None => {
+            return EffectResult::failure(
+              request.effect_id,
+              "missing required field: object_id",
+            );
+          }
+        };
 
         use crate::core::object::ObjectId;
         match store
@@ -654,11 +670,19 @@ async fn execute_effect_once_configured(
 
     EffectKind::ObjectDelete => {
       if let Some(ref store) = config.artifact_store {
-        let obj_id = request
+        let obj_id = match request
           .input
           .get("object_id")
           .and_then(|v| v.as_u64())
-          .unwrap_or(0);
+        {
+          Some(id) => id,
+          None => {
+            return EffectResult::failure(
+              request.effect_id,
+              "missing required field: object_id",
+            );
+          }
+        };
 
         use crate::core::object::ObjectId;
         match store.delete(&ObjectId::from_raw(obj_id))
