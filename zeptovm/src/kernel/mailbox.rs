@@ -49,6 +49,29 @@ fn pop_lane_alive(
     }
 }
 
+/// Helper: scan a lane for first non-expired message with matching tag.
+/// Removes expired messages encountered during scan.
+/// Returns (matched_envelope_or_none, expired_count).
+fn scan_lane_for_tag(
+    lane: &mut VecDeque<Envelope>,
+    now_ms: u64,
+    tag: &str,
+) -> (Option<Envelope>, usize) {
+    // First, remove expired entries and count them
+    let before = lane.len();
+    lane.retain(|env| !is_expired(env, now_ms));
+    let expired = before - lane.len();
+
+    // Find first matching tag
+    if let Some(idx) =
+        lane.iter().position(|env| env.tag.as_deref() == Some(tag))
+    {
+        (lane.remove(idx), expired)
+    } else {
+        (None, expired)
+    }
+}
+
 impl MultiLaneMailbox {
     pub fn new() -> Self {
         Self {
@@ -160,6 +183,59 @@ impl MultiLaneMailbox {
         let count = self.expired_count;
         self.expired_count = 0;
         count
+    }
+
+    /// Selective receive: pop first non-expired message matching `tag`.
+    /// Scans lanes in priority order (control > supervisor > effect > user > background).
+    /// Non-matching and untagged messages stay in place.
+    /// Expired messages encountered during scan are discarded and counted.
+    pub fn pop_matching(
+        &mut self,
+        now_ms: u64,
+        tag: &str,
+    ) -> Option<Envelope> {
+        // Scan each lane sequentially to avoid overlapping &mut borrows
+        let (result, exp) =
+            scan_lane_for_tag(&mut self.control, now_ms, tag);
+        self.expired_count += exp;
+        if result.is_some() {
+            return result;
+        }
+
+        let (result, exp) =
+            scan_lane_for_tag(&mut self.supervisor, now_ms, tag);
+        self.expired_count += exp;
+        if result.is_some() {
+            return result;
+        }
+
+        let (result, exp) =
+            scan_lane_for_tag(&mut self.effect, now_ms, tag);
+        self.expired_count += exp;
+        if result.is_some() {
+            return result;
+        }
+
+        let (result, exp) =
+            scan_lane_for_tag(&mut self.user, now_ms, tag);
+        self.expired_count += exp;
+        if result.is_some() {
+            return result;
+        }
+
+        let (result, exp) =
+            scan_lane_for_tag(&mut self.background, now_ms, tag);
+        self.expired_count += exp;
+        result
+    }
+
+    /// Pop the next non-expired message from the control lane only.
+    /// Used by step() to ensure signals bypass tag filtering.
+    pub fn pop_control(&mut self, now_ms: u64) -> Option<Envelope> {
+        let (result, exp) =
+            pop_lane_alive(&mut self.control, now_ms);
+        self.expired_count += exp;
+        result
     }
 
     /// Remove all expired messages from all lanes.
@@ -488,6 +564,109 @@ mod tests {
         let mut mb = MultiLaneMailbox::new();
         mb.push(Envelope::text(to(), "no ttl"));
         assert_eq!(mb.reap_expired(1000), 0);
+        assert_eq!(mb.total_len(), 1);
+    }
+
+    #[test]
+    fn test_pop_matching_returns_tagged_message() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "untagged"));
+        mb.push(Envelope::text(to(), "tagged").with_tag("important"));
+        mb.push(Envelope::text(to(), "other tag").with_tag("other"));
+
+        let env = mb.pop_matching(0, "important").unwrap();
+        assert_eq!(env.tag.as_deref(), Some("important"));
+        assert_eq!(mb.total_len(), 2);
+    }
+
+    #[test]
+    fn test_pop_matching_skips_non_matching() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "a").with_tag("x"));
+        mb.push(Envelope::text(to(), "b").with_tag("y"));
+
+        let result = mb.pop_matching(0, "z");
+        assert!(result.is_none());
+        assert_eq!(mb.total_len(), 2);
+    }
+
+    #[test]
+    fn test_pop_matching_respects_lane_priority() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "user").with_tag("find_me"));
+        let mut ctrl = Envelope::signal(to(), Signal::Suspend);
+        ctrl.tag = Some("find_me".into());
+        mb.push(ctrl);
+
+        let env = mb.pop_matching(0, "find_me").unwrap();
+        assert_eq!(env.class, MessageClass::Control);
+        assert_eq!(mb.total_len(), 1);
+    }
+
+    #[test]
+    fn test_pop_matching_skips_expired_even_if_tag_matches() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut expired = Envelope::text(to(), "old").with_tag("target");
+        expired.expires_at = Some(100);
+        mb.push(expired);
+        mb.push(Envelope::text(to(), "fresh").with_tag("target"));
+
+        let env = mb.pop_matching(200, "target").unwrap();
+        if let EnvelopePayload::User(
+            crate::core::message::Payload::Text(s),
+        ) = &env.payload
+        {
+            assert_eq!(s, "fresh");
+        } else {
+            panic!("expected text");
+        }
+    }
+
+    #[test]
+    fn test_pop_matching_expired_feeds_expired_count() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut expired = Envelope::text(to(), "old").with_tag("target");
+        expired.expires_at = Some(100);
+        mb.push(expired);
+        mb.push(Envelope::text(to(), "fresh").with_tag("target"));
+
+        let _ = mb.pop_matching(200, "target").unwrap();
+        assert_eq!(mb.take_expired_count(), 1);
+    }
+
+    #[test]
+    fn test_pop_matching_no_match_returns_none_mailbox_unchanged() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "a"));
+        mb.push(Envelope::text(to(), "b").with_tag("other"));
+
+        assert!(mb.pop_matching(0, "missing").is_none());
+        assert_eq!(mb.total_len(), 2);
+    }
+
+    #[test]
+    fn test_pop_still_works_ignores_tags() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "a").with_tag("x"));
+        mb.push(Envelope::text(to(), "b").with_tag("y"));
+
+        let env = mb.pop(0).unwrap();
+        assert_eq!(env.tag.as_deref(), Some("x"));
+        assert_eq!(mb.total_len(), 1);
+    }
+
+    #[test]
+    fn test_pop_control_only_drains_control_lane() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "user msg"));
+        mb.push(Envelope::signal(to(), Signal::Kill));
+
+        // pop_control only returns control lane messages
+        let env = mb.pop_control(0).unwrap();
+        assert_eq!(env.class, MessageClass::Control);
+
+        // User message still there
+        assert!(mb.pop_control(0).is_none());
         assert_eq!(mb.total_len(), 1);
     }
 }
