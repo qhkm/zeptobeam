@@ -316,6 +316,10 @@ impl SchedulerRuntime {
     let stepped = self.engine.tick();
     debug!(stepped, "runtime tick complete");
     self.metrics.inc("scheduler.ticks");
+    let expired = self.engine.take_pending_expired_count();
+    if expired > 0 {
+      self.metrics.inc_by("messages.expired", expired as u64);
+    }
 
     // 4. Take outbound effects, messages, and patches
     let effects = self.engine.take_outbound_effects();

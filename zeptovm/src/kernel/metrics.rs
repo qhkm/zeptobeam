@@ -30,6 +30,7 @@ impl Metrics {
       "budget.blocked",
       "policy.blocked",
       "scheduler.ticks",
+      "messages.expired",
     ] {
       counters.insert(name, AtomicU64::new(0));
     }
@@ -168,5 +169,12 @@ mod tests {
       h.join().unwrap();
     }
     assert_eq!(m.counter("scheduler.ticks"), 1000);
+  }
+
+  #[test]
+  fn test_metrics_messages_expired() {
+    let m = Metrics::new();
+    m.inc_by("messages.expired", 5);
+    assert_eq!(m.counter("messages.expired"), 5);
   }
 }

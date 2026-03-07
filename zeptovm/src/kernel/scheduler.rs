@@ -48,6 +48,7 @@ pub struct SchedulerEngine {
   link_table: LinkTable,
   name_registry: NameRegistry,
   tick_count: u64,
+  pending_expired_count: usize,
 }
 
 impl SchedulerEngine {
@@ -69,6 +70,7 @@ impl SchedulerEngine {
       link_table: LinkTable::new(),
       name_registry: NameRegistry::new(),
       tick_count: 0,
+      pending_expired_count: 0,
     }
   }
 
@@ -194,8 +196,11 @@ impl SchedulerEngine {
 
     loop {
       if reductions_left == 0 {
-        // Preempted -- re-enqueue if there are still messages
+        // Preempted -- drain any expirations from the last
+        // step so they are counted in this tick, not the next.
         if let Some(proc) = self.processes.get_mut(&pid) {
+          self.pending_expired_count +=
+            proc.mailbox.take_expired_count();
           if proc.mailbox.has_messages() {
             proc.state = ProcessRuntimeState::Ready;
             self.ready_queue.push(pid);
@@ -207,15 +212,17 @@ impl SchedulerEngine {
       }
 
       // Step the process -- borrow released after this block
-      let (result, intents) = {
+      let (result, intents, expired) = {
         let proc = match self.processes.get_mut(&pid) {
           Some(p) => p,
           None => return,
         };
         let (result, mut ctx) = proc.step(self.clock_ms);
+        let expired = proc.mailbox.take_expired_count();
         let intents = ctx.take_intents();
-        (result, intents)
+        (result, intents, expired)
       };
+      self.pending_expired_count += expired;
 
       // Process intents (no borrow on self.processes here)
       for intent in intents {
@@ -478,6 +485,14 @@ impl SchedulerEngine {
     &mut self,
   ) -> Vec<(Pid, u64, u64)> {
     std::mem::take(&mut self.budget_debits)
+  }
+
+  /// Take the accumulated expired-message count and reset
+  /// it to zero.
+  pub fn take_pending_expired_count(&mut self) -> usize {
+    let c = self.pending_expired_count;
+    self.pending_expired_count = 0;
+    c
   }
 
   /// Kill a process.
@@ -1316,6 +1331,32 @@ mod tests {
     assert_eq!(
       engine.whereis("my_worker"),
       Some(pid)
+    );
+  }
+
+  #[test]
+  fn test_scheduler_expired_count_wiring() {
+    let mut engine = SchedulerEngine::new();
+    let pid = engine.spawn(Box::new(Echo));
+
+    // Send a message that has already expired
+    engine.send(
+      Envelope::text(pid, "old")
+        .with_expires_at(100),
+    );
+    // Send a valid message so the process actually steps
+    engine.send(Envelope::text(pid, "fresh"));
+
+    // Advance clock past expiry
+    engine.advance_clock(200);
+    engine.tick();
+
+    // The expired message should have been counted
+    let expired =
+      engine.take_pending_expired_count();
+    assert!(
+      expired >= 1,
+      "expected at least 1 expired, got {expired}"
     );
   }
 }
