@@ -1,8 +1,10 @@
 pub mod behavior;
 pub mod control;
-pub mod durable_handle;
+pub mod core;
 pub mod durability;
+pub mod effects;
 pub mod error;
+pub mod kernel;
 pub mod link;
 pub mod mailbox;
 pub mod pid;
@@ -11,4 +13,3 @@ pub mod registry;
 pub mod supervisor;
 
 pub use behavior::Behavior;
-pub use durable_handle::DurableHandle;
