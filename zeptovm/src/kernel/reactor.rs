@@ -5,7 +5,8 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use tracing::{info_span, Instrument};
 
 use crate::core::effect::{
-  EffectKind, EffectRequest, EffectResult, EffectStatus,
+  EffectId, EffectKind, EffectRequest, EffectResult,
+  EffectState, EffectStatus,
 };
 use crate::effects::anthropic::AnthropicClient;
 use crate::effects::config::ProviderConfig;
@@ -78,9 +79,25 @@ pub struct EffectDispatch {
 }
 
 /// A completed effect returned from the reactor.
+#[derive(Debug)]
 pub struct EffectCompletion {
   pub pid: Pid,
   pub result: EffectResult,
+}
+
+/// Message from reactor to runtime. Carries either a
+/// state transition update or a final completion.
+#[derive(Debug)]
+pub enum ReactorMessage {
+  /// Intermediate state change (Dispatched, Retrying,
+  /// Streaming).
+  StateChanged {
+    effect_id: EffectId,
+    pid: Pid,
+    new_state: EffectState,
+  },
+  /// Final or streaming completion (existing type).
+  Completion(EffectCompletion),
 }
 
 /// The reactor bridge between the sync scheduler and async effect
@@ -91,7 +108,7 @@ pub struct EffectCompletion {
 /// Completed effects come back via the completion channel.
 pub struct Reactor {
   dispatch_tx: Sender<EffectDispatch>,
-  completion_rx: Receiver<EffectCompletion>,
+  completion_rx: Receiver<ReactorMessage>,
   _handle: thread::JoinHandle<()>,
 }
 
@@ -122,7 +139,7 @@ impl Reactor {
     let (dispatch_tx, dispatch_rx) =
       unbounded::<EffectDispatch>();
     let (completion_tx, completion_rx) =
-      unbounded::<EffectCompletion>();
+      unbounded::<ReactorMessage>();
 
     let handle = thread::spawn(move || {
       let rt = tokio::runtime::Builder::new_multi_thread()
@@ -162,10 +179,11 @@ impl Reactor {
                       pid,
                     )
                     .await;
-                  let _ = tx.send(EffectCompletion {
-                    pid,
-                    result,
-                  });
+                  let _ = tx.send(
+                    ReactorMessage::Completion(
+                      EffectCompletion { pid, result },
+                    ),
+                  );
                 }
                 .instrument(span),
               );
@@ -189,16 +207,32 @@ impl Reactor {
       self.dispatch_tx.send(EffectDispatch { pid, request });
   }
 
-  /// Try to receive completed effects (non-blocking).
-  pub fn try_recv(&self) -> Option<EffectCompletion> {
+  /// Try to receive a reactor message (non-blocking).
+  pub fn try_recv(&self) -> Option<ReactorMessage> {
     self.completion_rx.try_recv().ok()
   }
 
-  /// Drain all available completions.
+  /// Drain all available reactor messages.
+  pub fn drain_messages(&self) -> Vec<ReactorMessage> {
+    let mut results = Vec::new();
+    while let Some(msg) = self.try_recv() {
+      results.push(msg);
+    }
+    results
+  }
+
+  /// Drain only completion messages (backward compat).
   pub fn drain_completions(&self) -> Vec<EffectCompletion> {
     let mut results = Vec::new();
-    while let Some(completion) = self.try_recv() {
-      results.push(completion);
+    while let Some(msg) = self.try_recv() {
+      match msg {
+        ReactorMessage::Completion(c) => {
+          results.push(c);
+        }
+        ReactorMessage::StateChanged { .. } => {
+          // Skip state-change messages in legacy drain
+        }
+      }
     }
     results
   }
@@ -304,11 +338,25 @@ async fn execute_effect_once(
 async fn execute_effect_with_retry_configured(
   request: &EffectRequest,
   config: &ReactorConfig,
-  completion_tx: &Sender<EffectCompletion>,
+  completion_tx: &Sender<ReactorMessage>,
   pid: Pid,
 ) -> EffectResult {
   let max_attempts = request.retry.max_attempts.max(1);
   let mut last_error = String::new();
+
+  // Signal Dispatched state before first attempt
+  let now_ms = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_millis() as u64;
+  let _ =
+    completion_tx.send(ReactorMessage::StateChanged {
+      effect_id: request.effect_id,
+      pid,
+      new_state: EffectState::Dispatched {
+        dispatched_at_ms: now_ms,
+      },
+    });
 
   for attempt in 0..max_attempts {
     let result = execute_effect_once_configured(
@@ -340,6 +388,21 @@ async fn execute_effect_with_retry_configured(
           let delay =
             request.retry.backoff.delay_ms(attempt);
           if delay > 0 {
+            let retry_at = std::time::SystemTime::now()
+              .duration_since(std::time::UNIX_EPOCH)
+              .unwrap_or_default()
+              .as_millis() as u64
+              + delay;
+            let _ = completion_tx.send(
+              ReactorMessage::StateChanged {
+                effect_id: request.effect_id,
+                pid,
+                new_state: EffectState::Retrying {
+                  attempt: attempt + 1,
+                  next_at_ms: retry_at,
+                },
+              },
+            );
             tokio::time::sleep(
               std::time::Duration::from_millis(delay),
             )
@@ -362,7 +425,7 @@ async fn execute_effect_with_retry_configured(
 async fn execute_effect_once_configured(
   request: &EffectRequest,
   config: &ReactorConfig,
-  completion_tx: &Sender<EffectCompletion>,
+  completion_tx: &Sender<ReactorMessage>,
   pid: Pid,
 ) -> EffectResult {
   match &request.kind {
@@ -416,14 +479,29 @@ async fn execute_effect_once_configured(
                 .await;
             });
 
+            let mut chunk_count: u32 = 0;
             let mut final_result = None;
             while let Some(result) = rx.recv().await {
               if result.status == EffectStatus::Streaming
               {
+                chunk_count += 1;
+                // Signal streaming state change
+                let _ = completion_tx.send(
+                  ReactorMessage::StateChanged {
+                    effect_id,
+                    pid,
+                    new_state:
+                      EffectState::Streaming {
+                        chunks_received: chunk_count,
+                      },
+                  },
+                );
                 // Forward streaming deltas to the
                 // completion channel.
                 let _ = completion_tx.send(
-                  EffectCompletion { pid, result },
+                  ReactorMessage::Completion(
+                    EffectCompletion { pid, result },
+                  ),
                 );
               } else {
                 final_result = Some(result);
@@ -509,12 +587,17 @@ mod tests {
     let effect_id = req.effect_id;
     reactor.dispatch(pid, req);
 
-    // Wait for result
+    // Wait for result — skip StateChanged messages
     let mut result = None;
     for _ in 0..100 {
-      if let Some(completion) = reactor.try_recv() {
-        result = Some(completion);
-        break;
+      if let Some(msg) = reactor.try_recv() {
+        if let ReactorMessage::Completion(completion) =
+          msg
+        {
+          result = Some(completion);
+          break;
+        }
+        // StateChanged messages are expected, skip
       }
       std::thread::sleep(Duration::from_millis(10));
     }
@@ -547,13 +630,18 @@ mod tests {
       reactor.dispatch(pid, req);
     }
 
-    // Collect all results
+    // Collect all completion results (skip StateChanged)
     let mut received = 0;
     for _ in 0..200 {
-      if let Some(_completion) = reactor.try_recv() {
-        received += 1;
-        if received == 5 {
-          break;
+      if let Some(msg) = reactor.try_recv() {
+        if matches!(
+          msg,
+          ReactorMessage::Completion(_)
+        ) {
+          received += 1;
+          if received == 5 {
+            break;
+          }
         }
       }
       std::thread::sleep(Duration::from_millis(10));
@@ -573,13 +661,17 @@ mod tests {
     let effect_id = req.effect_id;
     reactor.dispatch(pid, req);
 
-    // Should take at least 50ms
+    // Should take at least 50ms — skip StateChanged
     let start = std::time::Instant::now();
     let mut result = None;
     for _ in 0..100 {
-      if let Some(completion) = reactor.try_recv() {
-        result = Some(completion);
-        break;
+      if let Some(msg) = reactor.try_recv() {
+        if let ReactorMessage::Completion(completion) =
+          msg
+        {
+          result = Some(completion);
+          break;
+        }
       }
       std::thread::sleep(Duration::from_millis(10));
     }
