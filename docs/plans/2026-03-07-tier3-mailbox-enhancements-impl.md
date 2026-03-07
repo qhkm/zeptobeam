@@ -654,12 +654,24 @@ git commit -m "feat(mailbox): add tag-based selective receive via pop_matching()
 
 ### Task 5: Wire selective receive end-to-end (StepResult + ProcessState + Scheduler)
 
+This task has four specific pitfalls that MUST be handled:
+
+1. **Scheduler line 188 overwrites state to Running** — must preserve `WaitingTagged`
+2. **None from pop_matching must not downgrade to WaitingMessage** — must re-enter `WaitForTag`
+3. **ProcessRuntimeState derives Copy** — adding `WaitingTagged(String)` breaks Copy; must remove it
+4. **6 wake-up sites check only WaitingMessage** — all must also wake `WaitingTagged`
+
 **Files:**
 - Modify: `zeptovm/src/core/step_result.rs:8-18` (add WaitForTag variant)
-- Modify: `zeptovm/src/kernel/process_table.rs:17-28` (add WaitingTagged state)
-- Modify: `zeptovm/src/kernel/process_table.rs:92-119` (step uses state to choose pop vs pop_matching)
-- Modify: `zeptovm/src/kernel/scheduler.rs:283-328` (handle WaitForTag result)
-- Modify: `zeptovm/src/kernel/scheduler.rs:188-207` (wake WaitingTagged when messages arrive)
+- Modify: `zeptovm/src/kernel/process_table.rs:17-28` (add WaitingTagged, remove Copy derive)
+- Modify: `zeptovm/src/kernel/process_table.rs:92-184` (state-aware pop + None handling)
+- Modify: `zeptovm/src/kernel/scheduler.rs:95-105` (send wake-up)
+- Modify: `zeptovm/src/kernel/scheduler.rs:107-130` (deliver_effect_result wake-up)
+- Modify: `zeptovm/src/kernel/scheduler.rs:178-207` (step_process: preserve WaitingTagged, handle WaitForTag result)
+- Modify: `zeptovm/src/kernel/scheduler.rs:283-328` (result match: add WaitForTag arm)
+- Modify: `zeptovm/src/kernel/scheduler.rs:334-398` (propagate_exit: 3 wake-up sites)
+- Modify: `zeptovm/src/kernel/scheduler.rs:530-550` (advance_clock: timer wake-up)
+- Modify: All sites using `== ProcessRuntimeState::*` (must use `matches!()` after Copy removal)
 
 **Step 1: Add `WaitForTag` to `StepResult`**
 
@@ -684,15 +696,31 @@ Add a test:
 fn test_step_result_wait_for_tag() {
     let r = StepResult::WaitForTag("effect_result".into());
     match r {
-        StepResult::WaitForTag(tag) => assert_eq!(tag, "effect_result"),
+        StepResult::WaitForTag(tag) => {
+            assert_eq!(tag, "effect_result")
+        }
         _ => panic!("expected WaitForTag"),
     }
 }
 ```
 
-**Step 2: Add `WaitingTagged` to `ProcessRuntimeState`**
+**Step 2: Add `WaitingTagged` to `ProcessRuntimeState` and remove `Copy`**
 
-In `process_table.rs`, add:
+In `process_table.rs:17`, change the derive from:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessRuntimeState {
+```
+
+to:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessRuntimeState {
+```
+
+Then add the new variant:
 
 ```rust
 pub enum ProcessRuntimeState {
@@ -709,51 +737,93 @@ pub enum ProcessRuntimeState {
 }
 ```
 
-**Step 3: Update `ProcessEntry::step()` to use state for pop strategy**
+**Step 3: Fix all `==` comparisons broken by Copy removal**
 
-Replace the `mailbox.pop(now_ms)` call with state-aware logic:
+After removing `Copy`, all `proc.state == ProcessRuntimeState::X` comparisons will still compile for variants without data (like `Ready`, `Done`, `Failed`, `WaitingMessage`) because they derive `PartialEq`. However, `matches!()` is more idiomatic for pattern-matching enums with data. Change the `WaitingEffect(_)` matches that currently use `matches!()` — those are fine. The `==` comparisons for simple variants are fine too since `PartialEq` is still derived.
+
+The key places that won't compile are any that try to **copy** the state. Search for assignments like `let x = proc.state` that relied on Copy — these need `.clone()`. Also check for function returns like `Option<ProcessRuntimeState>` in `process_state()` which returns a copied value.
+
+Specifically, in `scheduler.rs:499`:
 
 ```rust
-// Pop next message based on process state
-let maybe_env = match &self.state {
+pub fn process_state(&self, pid: Pid) -> Option<ProcessRuntimeState> {
+    self.processes.get(&pid).map(|p| p.state)
+}
+```
+
+This needs `.clone()`:
+
+```rust
+pub fn process_state(&self, pid: Pid) -> Option<ProcessRuntimeState> {
+    self.processes.get(&pid).map(|p| p.state.clone())
+}
+```
+
+Search for similar patterns in `runtime.rs:608` and `recovery.rs:191`. Fix all.
+
+**Step 4: Update `ProcessEntry::step()` with state-aware pop and correct None handling**
+
+Replace the mailbox pop section in `step()`. The key insight: when `WaitingTagged` and `pop_matching` returns `None`, we must return `WaitForTag(tag)` — NOT `Wait` — to preserve the tag filter.
+
+```rust
+// Pop next message based on process state.
+// WaitingTagged uses selective receive; all other states use normal pop.
+let (maybe_env, waiting_tag) = match &self.state {
     ProcessRuntimeState::WaitingTagged(tag) => {
-        self.mailbox.pop_matching(now_ms, tag)
+        let t = tag.clone();
+        (self.mailbox.pop_matching(now_ms, &t), Some(t))
     }
-    _ => self.mailbox.pop(now_ms),
+    _ => (self.mailbox.pop(now_ms), None),
 };
 
 match maybe_env {
     Some(env) => {
-        // Reset state to Running now that we have a message
-        self.state = ProcessRuntimeState::Running;
-        // ... rest of existing match arm ...
-```
-
-**Step 4: Update scheduler to handle `WaitForTag` result**
-
-In `scheduler.rs`, in the `match result` block (around line 283), add handling for `WaitForTag`:
-
-```rust
-StepResult::WaitForTag(tag) => {
-    if let Some(proc) = self.processes.get_mut(&pid) {
-        // Check if there's already a matching message
-        if proc.mailbox.pop_matching(self.clock_ms, &tag).is_some() {
-            // Message already available — re-queue immediately
-            // (put it back, we just peeked)
-            // Actually: simpler to just re-enqueue process as Ready
-            // and let next step() pick it up with WaitingTagged state
-            proc.state = ProcessRuntimeState::WaitingTagged(tag);
-            proc.state = ProcessRuntimeState::Ready;
-            self.ready_queue.push(pid);
-        } else {
-            proc.state = ProcessRuntimeState::WaitingTagged(tag);
+        // We have a message — proceed with normal handling
+        // (existing code for signal checks + behavior.handle)
+        // ...
+    }
+    None => {
+        // No message available. If we were doing selective receive,
+        // return WaitForTag to preserve the tag filter.
+        // Otherwise return Wait as before.
+        match waiting_tag {
+            Some(tag) => (StepResult::WaitForTag(tag), ctx),
+            None => (StepResult::Wait, ctx),
         }
     }
-    return;
 }
 ```
 
-Wait — that's too complex. Simpler approach: just set the state and let the existing wake-up logic handle it.
+**Step 5: Update scheduler `step_process()` to preserve WaitingTagged state**
+
+In `scheduler.rs:178-191`, the scheduler currently unconditionally sets `proc.state = ProcessRuntimeState::Running` before calling `step()`. This would destroy the `WaitingTagged` state that `step()` needs to read. Fix:
+
+```rust
+fn step_process(&mut self, pid: Pid) {
+    let _span =
+        info_span!("process_step", pid = pid.raw()).entered();
+    // Skip terminated processes. Do NOT overwrite WaitingTagged —
+    // step() reads it to choose pop vs pop_matching.
+    if let Some(proc) = self.processes.get_mut(&pid) {
+        match &proc.state {
+            ProcessRuntimeState::Done
+            | ProcessRuntimeState::Failed => return,
+            ProcessRuntimeState::WaitingTagged(_) => {
+                // Keep WaitingTagged — step() will read it
+            }
+            _ => {
+                proc.state = ProcessRuntimeState::Running;
+            }
+        }
+    } else {
+        return;
+    }
+    // ... rest of step_process unchanged ...
+```
+
+**Step 6: Handle `WaitForTag` in the result match block**
+
+In the `match result` block (around line 283), add a new arm:
 
 ```rust
 StepResult::WaitForTag(tag) => {
@@ -765,53 +835,176 @@ StepResult::WaitForTag(tag) => {
 }
 ```
 
-**Step 5: Update the wake-up logic for message delivery**
+**Step 7: Update all 6 wake-up sites to also wake WaitingTagged**
 
-In `scheduler.rs`, where messages are delivered to mailboxes and processes are woken up (the section around lines 188-207 that checks `WaitingMessage`), also wake `WaitingTagged` processes — but only if the delivered message's tag matches:
+Strategy: always wake `WaitingTagged` processes when any message arrives. The process's `step()` will use `pop_matching()` which filters properly — if no match, the behavior returns `WaitForTag` again and the scheduler re-enters `WaitingTagged`. This avoids duplicating tag-matching logic at every wake site.
 
-Find the code that delivers messages and wakes waiting processes. After delivering a message to a process's mailbox, add:
+Create a helper method to avoid repeating the pattern at 6 sites:
 
 ```rust
-ProcessRuntimeState::WaitingTagged(ref tag)
-    if env.tag.as_deref() == Some(tag.as_str()) =>
-{
-    proc.state = ProcessRuntimeState::Ready;
-    self.ready_queue.push(pid);
+/// Wake a process if it's waiting for a message.
+/// Handles both WaitingMessage and WaitingTagged states.
+fn wake_if_waiting(&mut self, pid: Pid) {
+    if let Some(proc) = self.processes.get_mut(&pid) {
+        match &proc.state {
+            ProcessRuntimeState::WaitingMessage
+            | ProcessRuntimeState::WaitingTagged(_) => {
+                proc.state = ProcessRuntimeState::Ready;
+                self.ready_queue.push(pid);
+            }
+            _ => {}
+        }
+    }
 }
 ```
 
-For `WaitingTagged` where the tag doesn't match, the process stays waiting — the message sits in the mailbox until the process is stepped again or a matching message arrives.
+Then replace the pattern at all 6 sites:
 
-**Step 6: Add integration test**
+**Site 1 — `send()` (line 100):** Replace the `if proc.state == ...` block. Note: `send()` owns `env` before pushing, so the borrow is released. After `proc.mailbox.push(env)`, call `self.wake_if_waiting(to)`. But wait — `self` is already borrowed via `self.processes.get_mut()`. To avoid this, restructure: push first, then call the helper.
 
-Add a test in `scheduler.rs` tests (or `process_table.rs` tests) that verifies the end-to-end flow:
+```rust
+pub fn send(&mut self, env: Envelope) {
+    let to = env.to;
+    if let Some(proc) = self.processes.get_mut(&to) {
+        proc.mailbox.push(env);
+    }
+    self.wake_if_waiting(to);
+}
+```
+
+**Site 2 — `deliver_effect_result()` (line 121):** After pushing the effect result envelope, wake if `WaitingMessage` or `WaitingTagged`. But this site currently also checks `WaitingEffect` — keep that as-is, and add the message-waiting check:
+
+```rust
+pub fn deliver_effect_result(
+    &mut self,
+    result: EffectResult,
+) {
+    let effect_raw = result.effect_id.raw();
+    if let Some(pending) =
+        self.pending_effects.remove(&effect_raw)
+    {
+        let pid = pending.pid;
+        if let Some(proc) = self.processes.get_mut(&pid) {
+            proc.mailbox.push(
+                Envelope::effect_result(pid, result),
+            );
+            match &proc.state {
+                ProcessRuntimeState::WaitingEffect(_) => {
+                    proc.state = ProcessRuntimeState::Ready;
+                    self.ready_queue.push(pid);
+                }
+                ProcessRuntimeState::WaitingMessage
+                | ProcessRuntimeState::WaitingTagged(_) => {
+                    proc.state = ProcessRuntimeState::Ready;
+                    self.ready_queue.push(pid);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+```
+
+**Sites 3-5 — `propagate_exit()` (lines 348, 368, 391):** Each site pushes a signal envelope then checks `WaitingMessage`. Change each to also match `WaitingTagged(_)`:
+
+```rust
+match &proc.state {
+    ProcessRuntimeState::WaitingMessage
+    | ProcessRuntimeState::WaitingTagged(_) => {
+        proc.state = ProcessRuntimeState::Ready;
+        self.ready_queue.push(target_pid);
+    }
+    _ => {}
+}
+```
+
+Apply this pattern to all three sites (links, monitors, parent notification).
+
+**Site 6 — `advance_clock()` (line 544):** Same pattern:
+
+```rust
+match &proc.state {
+    ProcessRuntimeState::WaitingMessage
+    | ProcessRuntimeState::WaitingTagged(_) => {
+        proc.state = ProcessRuntimeState::Ready;
+        self.ready_queue.push(owner);
+    }
+    _ => {}
+}
+```
+
+**Step 8: Handle preemption with WaitingTagged**
+
+In `step_process()` around line 196-207, when reductions run out, the scheduler currently checks `has_messages()` to decide `Ready` vs `WaitingMessage`. For `WaitingTagged`, we need to preserve the tag:
+
+```rust
+if reductions_left == 0 {
+    if let Some(proc) = self.processes.get_mut(&pid) {
+        if proc.mailbox.has_messages() {
+            proc.state = ProcessRuntimeState::Ready;
+            self.ready_queue.push(pid);
+        } else {
+            // Preserve WaitingTagged if that was the state
+            if !matches!(
+                proc.state,
+                ProcessRuntimeState::WaitingTagged(_)
+            ) {
+                proc.state =
+                    ProcessRuntimeState::WaitingMessage;
+            }
+        }
+    }
+    return;
+}
+```
+
+Similarly, in the `StepResult::Continue` arm (around line 284-296), when mailbox is empty:
+
+```rust
+StepResult::Continue => {
+    reductions_left -= 1;
+    let proc = match self.processes.get_mut(&pid) {
+        Some(p) => p,
+        None => return,
+    };
+    if !proc.mailbox.has_messages() {
+        // Don't downgrade WaitingTagged to WaitingMessage
+        if !matches!(
+            proc.state,
+            ProcessRuntimeState::WaitingTagged(_)
+        ) {
+            proc.state =
+                ProcessRuntimeState::WaitingMessage;
+        }
+        return;
+    }
+    // Continue processing next message
+}
+```
+
+**Step 9: Add integration tests**
+
+Test 1 — process_table level (selective receive filters correctly):
 
 ```rust
 #[test]
-fn test_selective_receive_waits_for_tagged_message() {
-    // Create a behavior that returns WaitForTag("reply")
-    // after receiving a "start" message
-    struct SelectiveBehavior {
-        started: bool,
-        got_reply: bool,
-    }
+fn test_selective_receive_filters_by_tag() {
+    struct SelectiveBehavior;
     impl StepBehavior for SelectiveBehavior {
         fn handle(
             &mut self,
             envelope: Envelope,
-            ctx: &mut TurnContext,
+            _ctx: &mut TurnContext,
         ) -> StepResult {
             match &envelope.payload {
                 EnvelopePayload::User(Payload::Text(s))
                     if s == "start" =>
                 {
-                    self.started = true;
                     StepResult::WaitForTag("reply".into())
                 }
                 EnvelopePayload::User(Payload::Text(s))
                     if s == "the reply" =>
                 {
-                    self.got_reply = true;
                     StepResult::Done(Reason::Normal)
                 }
                 _ => StepResult::Continue,
@@ -825,53 +1018,108 @@ fn test_selective_receive_waits_for_tagged_message() {
         }
     }
 
+    let pid = Pid::from_raw(1);
     let mut p = ProcessEntry::new(
-        Pid::from_raw(1),
-        Box::new(SelectiveBehavior {
-            started: false,
-            got_reply: false,
-        }),
+        pid,
+        Box::new(SelectiveBehavior),
     );
 
-    // Send start message
-    p.mailbox.push(Envelope::text(Pid::from_raw(1), "start"));
+    // Step 1: process "start", get WaitForTag
+    p.mailbox.push(Envelope::text(pid, "start"));
     let (result, _) = p.step(0);
-    assert!(matches!(result, StepResult::WaitForTag(ref t) if t == "reply"));
+    assert!(matches!(
+        result,
+        StepResult::WaitForTag(ref t) if t == "reply"
+    ));
 
-    // Send untagged message — should be skipped by selective receive
-    p.mailbox.push(Envelope::text(Pid::from_raw(1), "noise"));
-    // Send tagged message with wrong tag — also skipped
+    // Step 2: set WaitingTagged (as scheduler would), send non-matching messages
+    p.state =
+        ProcessRuntimeState::WaitingTagged("reply".into());
+    p.mailbox.push(Envelope::text(pid, "noise"));
     p.mailbox.push(
-        Envelope::text(Pid::from_raw(1), "wrong")
-            .with_tag("other"),
-    );
-    // Send correctly tagged message
-    p.mailbox.push(
-        Envelope::text(Pid::from_raw(1), "the reply")
-            .with_tag("reply"),
+        Envelope::text(pid, "wrong").with_tag("other"),
     );
 
-    // Set state as scheduler would
-    p.state = ProcessRuntimeState::WaitingTagged("reply".into());
+    // Step with no matching message — should return WaitForTag again
+    let (result, _) = p.step(0);
+    assert!(matches!(
+        result,
+        StepResult::WaitForTag(ref t) if t == "reply"
+    ));
+    // Non-matching messages still in mailbox
+    assert_eq!(p.mailbox.total_len(), 2);
 
+    // Step 3: send matching message
+    p.state =
+        ProcessRuntimeState::WaitingTagged("reply".into());
+    p.mailbox.push(
+        Envelope::text(pid, "the reply").with_tag("reply"),
+    );
     let (result, _) = p.step(0);
     assert!(matches!(result, StepResult::Done(Reason::Normal)));
 
-    // noise and "wrong" messages should still be in mailbox
+    // noise and "wrong" still in mailbox
     assert_eq!(p.mailbox.total_len(), 2);
 }
 ```
 
-**Step 7: Run full test suite**
+Test 2 — verify WaitForTag with no match preserves tag (doesn't downgrade):
+
+```rust
+#[test]
+fn test_selective_receive_no_match_preserves_wait_tag() {
+    struct TagWaiter;
+    impl StepBehavior for TagWaiter {
+        fn handle(
+            &mut self,
+            _envelope: Envelope,
+            _ctx: &mut TurnContext,
+        ) -> StepResult {
+            StepResult::WaitForTag("expected".into())
+        }
+        fn init(
+            &mut self,
+            _checkpoint: Option<Vec<u8>>,
+        ) -> StepResult {
+            StepResult::Continue
+        }
+    }
+
+    let pid = Pid::from_raw(1);
+    let mut p = ProcessEntry::new(pid, Box::new(TagWaiter));
+
+    // Trigger WaitForTag
+    p.mailbox.push(Envelope::text(pid, "go"));
+    let (result, _) = p.step(0);
+    assert!(matches!(result, StepResult::WaitForTag(_)));
+
+    // Set tagged state, step with empty mailbox
+    p.state =
+        ProcessRuntimeState::WaitingTagged("expected".into());
+    let (result, _) = p.step(0);
+    // Must return WaitForTag, NOT Wait
+    match result {
+        StepResult::WaitForTag(tag) => {
+            assert_eq!(tag, "expected")
+        }
+        StepResult::Wait => {
+            panic!("BUG: downgraded WaitForTag to Wait")
+        }
+        other => panic!("unexpected: {:?}", other),
+    }
+}
+```
+
+**Step 10: Run full test suite**
 
 Run: `cargo test -p zeptovm --lib`
 Expected: All tests pass
 
-**Step 8: Commit**
+**Step 11: Commit**
 
 ```bash
-git add zeptovm/src/core/step_result.rs zeptovm/src/kernel/process_table.rs zeptovm/src/kernel/scheduler.rs
-git commit -m "feat(selective-receive): wire WaitForTag through process state and scheduler"
+git add zeptovm/src/core/step_result.rs zeptovm/src/kernel/process_table.rs zeptovm/src/kernel/scheduler.rs zeptovm/src/kernel/runtime.rs zeptovm/src/kernel/recovery.rs
+git commit -m "feat(selective-receive): end-to-end WaitForTag with scheduler state preservation"
 ```
 
 ---
