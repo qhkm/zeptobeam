@@ -62,6 +62,8 @@ pub struct Envelope {
   pub priority: Priority,
   pub dedup_key: Option<String>,
   pub payload: EnvelopePayload,
+  pub expires_at: Option<u64>,
+  pub tag: Option<String>,
 }
 
 /// What's inside the envelope — either a user payload or an effect
@@ -101,6 +103,8 @@ impl Envelope {
       priority: Priority::Normal,
       dedup_key: None,
       payload: EnvelopePayload::User(payload),
+      expires_at: None,
+      tag: None,
     }
   }
 
@@ -125,6 +129,8 @@ impl Envelope {
       priority: Priority::High,
       dedup_key: None,
       payload: EnvelopePayload::Effect(result),
+      expires_at: None,
+      tag: None,
     }
   }
 
@@ -139,6 +145,8 @@ impl Envelope {
       priority: Priority::High,
       dedup_key: None,
       payload: EnvelopePayload::Signal(signal),
+      expires_at: None,
+      tag: None,
     }
   }
 
@@ -154,6 +162,19 @@ impl Envelope {
   /// Builder: set sender.
   pub fn with_from(mut self, from: Pid) -> Self {
     self.from = Some(from);
+    self
+  }
+
+  /// Builder: set explicit expiry timestamp (epoch millis).
+  /// The caller is responsible for computing this from clock_ms + ttl.
+  pub fn with_expires_at(mut self, epoch_ms: u64) -> Self {
+    self.expires_at = Some(epoch_ms);
+    self
+  }
+
+  /// Builder: set message tag for selective receive.
+  pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+    self.tag = Some(tag.into());
     self
   }
 }
@@ -215,5 +236,42 @@ mod tests {
   fn test_priority_ordering() {
     assert!(Priority::High > Priority::Normal);
     assert!(Priority::Normal > Priority::Low);
+  }
+
+  #[test]
+  fn test_envelope_with_expires_at() {
+    let to = Pid::from_raw(1);
+    let env = Envelope::text(to, "hi").with_expires_at(99999);
+    assert_eq!(env.expires_at, Some(99999));
+  }
+
+  #[test]
+  fn test_envelope_with_tag() {
+    let to = Pid::from_raw(1);
+    let env = Envelope::text(to, "hi").with_tag("effect_result");
+    assert_eq!(env.tag.as_deref(), Some("effect_result"));
+  }
+
+  #[test]
+  fn test_envelope_defaults_no_expiry_no_tag() {
+    let to = Pid::from_raw(1);
+    let env = Envelope::text(to, "hi");
+    assert!(env.expires_at.is_none());
+    assert!(env.tag.is_none());
+  }
+
+  #[test]
+  fn test_envelope_builder_chain() {
+    let to = Pid::from_raw(1);
+    let from = Pid::from_raw(2);
+    let env = Envelope::text(to, "hi")
+      .with_from(from)
+      .with_expires_at(5000)
+      .with_tag("important")
+      .with_correlation("c-1");
+    assert_eq!(env.from, Some(from));
+    assert_eq!(env.expires_at, Some(5000));
+    assert_eq!(env.tag.as_deref(), Some("important"));
+    assert_eq!(env.correlation_id.as_deref(), Some("c-1"));
   }
 }
