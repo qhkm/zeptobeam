@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tracing::{debug, warn};
 
@@ -14,6 +15,7 @@ use crate::{
     message::Envelope,
   },
   durability::{
+    artifact_store::ArtifactBackend,
     idempotency::IdempotencyStore,
     journal::Journal,
     snapshot::SnapshotStore,
@@ -66,6 +68,9 @@ pub struct SchedulerRuntime {
   pending_compensations:
     HashMap<u64, (Pid, CompensationSpec)>,
   idempotency_store: Option<IdempotencyStore>,
+  artifact_store: Option<Arc<dyn ArtifactBackend>>,
+  artifact_sweep_counter: u64,
+  pending_artifact_kinds: HashMap<u64, EffectKind>,
   provider_config: Option<ProviderConfig>,
   budget: BudgetState,
   budget_gate: Option<BudgetGate>,
@@ -86,6 +91,9 @@ impl SchedulerRuntime {
       compensation_log: CompensationLog::new(),
       pending_compensations: HashMap::new(),
       idempotency_store: None,
+      artifact_store: None,
+      artifact_sweep_counter: 0,
+      pending_artifact_kinds: HashMap::new(),
       provider_config: None,
       budget: BudgetState::default(),
       budget_gate: None,
@@ -115,6 +123,9 @@ impl SchedulerRuntime {
       idempotency_store: Some(
         IdempotencyStore::open_in_memory().unwrap(),
       ),
+      artifact_store: None,
+      artifact_sweep_counter: 0,
+      pending_artifact_kinds: HashMap::new(),
       provider_config: None,
       budget: BudgetState::default(),
       budget_gate: None,
@@ -138,10 +149,32 @@ impl SchedulerRuntime {
       self.reactor = Some(
         Reactor::start_with_config(
           Some(config.clone()),
+          self.artifact_store.clone(),
         ),
       );
     }
     self.provider_config = Some(config);
+    self
+  }
+
+  /// Configure the artifact store for ObjectPut/Fetch/Delete.
+  ///
+  /// If a reactor already exists, it is restarted with the
+  /// artifact store so handlers can access it.
+  pub fn with_artifact_store(
+    mut self,
+    store: Arc<dyn ArtifactBackend>,
+  ) -> Self {
+    self.artifact_store = Some(store.clone());
+    // Restart reactor with the artifact store
+    if self.reactor.is_some() {
+      self.reactor = Some(
+        Reactor::start_with_config(
+          self.provider_config.clone(),
+          Some(store),
+        ),
+      );
+    }
     self
   }
 
@@ -356,6 +389,33 @@ impl SchedulerRuntime {
               }
               EffectStatus::Cancelled => {}
               EffectStatus::Streaming => {}
+            }
+
+            // Track artifact-specific metrics
+            if let Some(kind) = self
+              .pending_artifact_kinds
+              .remove(&completion.result.effect_id.raw())
+            {
+              if completion.result.status
+                == EffectStatus::Succeeded
+              {
+                match kind {
+                  EffectKind::ObjectPut => {
+                    self.metrics.inc("artifacts.stored");
+                  }
+                  EffectKind::ObjectFetch => {
+                    self
+                      .metrics
+                      .inc("artifacts.fetched");
+                  }
+                  EffectKind::ObjectDelete => {
+                    self
+                      .metrics
+                      .inc("artifacts.deleted");
+                  }
+                  _ => {}
+                }
+              }
             }
 
             self.engine.deliver_effect_result(
@@ -576,6 +636,19 @@ impl SchedulerRuntime {
             (pid, comp.clone()),
           );
         }
+        // Track artifact effect kinds for metric
+        // correlation on completion
+        match &req.kind {
+          EffectKind::ObjectPut
+          | EffectKind::ObjectFetch
+          | EffectKind::ObjectDelete => {
+            self.pending_artifact_kinds.insert(
+              req.effect_id.raw(),
+              req.kind.clone(),
+            );
+          }
+          _ => {}
+        }
         self.metrics.inc("effects.dispatched");
         if let Some(ref reactor) = self.reactor {
           reactor.dispatch(pid, req);
@@ -617,6 +690,21 @@ impl SchedulerRuntime {
       self.budget.usd_remaining -= cost_dollars;
       if self.budget.usd_remaining < 0.0 {
         self.budget.usd_remaining = 0.0;
+      }
+    }
+
+    // Artifact TTL sweep (every 100 ticks)
+    self.artifact_sweep_counter += 1;
+    if self.artifact_sweep_counter >= 100 {
+      self.artifact_sweep_counter = 0;
+      if let Some(ref store) = self.artifact_store {
+        let removed =
+          store.cleanup_expired().unwrap_or(0);
+        if removed > 0 {
+          self
+            .metrics
+            .inc_by("artifacts.expired", removed);
+        }
       }
     }
 

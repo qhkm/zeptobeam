@@ -1,3 +1,4 @@
+pub mod artifact_store;
 pub mod checkpoint;
 pub mod idempotency;
 pub mod journal;

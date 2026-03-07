@@ -31,6 +31,10 @@ impl Metrics {
       "policy.blocked",
       "scheduler.ticks",
       "messages.expired",
+      "artifacts.stored",
+      "artifacts.fetched",
+      "artifacts.deleted",
+      "artifacts.expired",
     ] {
       counters.insert(name, AtomicU64::new(0));
     }
@@ -176,5 +180,18 @@ mod tests {
     let m = Metrics::new();
     m.inc_by("messages.expired", 5);
     assert_eq!(m.counter("messages.expired"), 5);
+  }
+
+  #[test]
+  fn test_metrics_artifact_counters() {
+    let m = Metrics::new();
+    m.inc("artifacts.stored");
+    m.inc("artifacts.fetched");
+    m.inc("artifacts.deleted");
+    m.inc("artifacts.expired");
+    assert_eq!(m.counter("artifacts.stored"), 1);
+    assert_eq!(m.counter("artifacts.fetched"), 1);
+    assert_eq!(m.counter("artifacts.deleted"), 1);
+    assert_eq!(m.counter("artifacts.expired"), 1);
   }
 }
