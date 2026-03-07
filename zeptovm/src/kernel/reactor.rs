@@ -1138,4 +1138,150 @@ mod tests {
         .contains("no artifact store")
     );
   }
+
+  #[test]
+  fn test_reactor_object_put_missing_data_base64() {
+    use crate::durability::artifact_store::{
+      ArtifactBackend, SqliteArtifactStore,
+    };
+
+    let store: Arc<dyn ArtifactBackend> = Arc::new(
+      SqliteArtifactStore::open_in_memory().unwrap(),
+    );
+    let reactor =
+      Reactor::start_with_config(None, Some(store));
+    let pid = Pid::from_raw(1);
+
+    // ObjectPut without data_base64 field
+    let req = EffectRequest::new(
+      EffectKind::ObjectPut,
+      serde_json::json!({
+        "media_type": "text/plain",
+      }),
+    );
+    reactor.dispatch(pid, req);
+
+    let completion = poll_for_completion(&reactor)
+      .expect("should get completion");
+    assert_eq!(
+      completion.result.status,
+      EffectStatus::Failed
+    );
+    assert!(
+      completion
+        .result
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("data_base64")
+    );
+  }
+
+  #[test]
+  fn test_reactor_object_fetch_missing_object_id() {
+    use crate::durability::artifact_store::{
+      ArtifactBackend, SqliteArtifactStore,
+    };
+
+    let store: Arc<dyn ArtifactBackend> = Arc::new(
+      SqliteArtifactStore::open_in_memory().unwrap(),
+    );
+    let reactor =
+      Reactor::start_with_config(None, Some(store));
+    let pid = Pid::from_raw(1);
+
+    // ObjectFetch without object_id field
+    let req = EffectRequest::new(
+      EffectKind::ObjectFetch,
+      serde_json::json!({}),
+    );
+    reactor.dispatch(pid, req);
+
+    let completion = poll_for_completion(&reactor)
+      .expect("should get completion");
+    assert_eq!(
+      completion.result.status,
+      EffectStatus::Failed
+    );
+    assert!(
+      completion
+        .result
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("object_id")
+    );
+  }
+
+  #[test]
+  fn test_reactor_object_fetch_expired_artifact() {
+    use crate::durability::artifact_store::{
+      ArtifactBackend, SqliteArtifactStore,
+    };
+
+    let store: Arc<dyn ArtifactBackend> = Arc::new(
+      SqliteArtifactStore::open_in_memory().unwrap(),
+    );
+    let reactor =
+      Reactor::start_with_config(None, Some(store));
+    let pid = Pid::from_raw(1);
+
+    // Store with TTL=0 (expires immediately)
+    use base64::Engine;
+    let data_b64 =
+      base64::engine::general_purpose::STANDARD
+        .encode(b"ephemeral");
+    let put_req = EffectRequest::new(
+      EffectKind::ObjectPut,
+      serde_json::json!({
+        "data_base64": data_b64,
+        "media_type": "text/plain",
+        "ttl_ms": 0,
+      }),
+    );
+    reactor.dispatch(pid, put_req);
+
+    let put_completion =
+      poll_for_completion(&reactor)
+        .expect("should get put completion");
+    assert_eq!(
+      put_completion.result.status,
+      EffectStatus::Succeeded
+    );
+    let obj_id = put_completion
+      .result
+      .output
+      .as_ref()
+      .and_then(|v| v.get("object_id"))
+      .and_then(|v| v.as_u64())
+      .expect("should get object_id from put");
+
+    // Wait for expiry
+    std::thread::sleep(
+      std::time::Duration::from_millis(10),
+    );
+
+    // Fetch the expired artifact via reactor
+    let fetch_req = EffectRequest::new(
+      EffectKind::ObjectFetch,
+      serde_json::json!({ "object_id": obj_id }),
+    );
+    reactor.dispatch(pid, fetch_req);
+
+    let fetch_completion =
+      poll_for_completion(&reactor)
+        .expect("should get fetch completion");
+    assert_eq!(
+      fetch_completion.result.status,
+      EffectStatus::Failed
+    );
+    assert!(
+      fetch_completion
+        .result
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("expired")
+    );
+  }
 }
