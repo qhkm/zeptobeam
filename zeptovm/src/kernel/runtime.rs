@@ -462,6 +462,7 @@ impl SchedulerRuntime {
             req.effect_id,
             format!("policy denied: {}", reason),
           );
+          self.metrics.inc("policy.blocked");
           self.engine.deliver_effect_result(result);
           continue;
         }
@@ -1692,5 +1693,32 @@ mod tests {
     assert!(!events.is_empty());
     let events2 = rt.drain_events();
     assert!(events2.is_empty());
+  }
+
+  #[test]
+  fn test_runtime_metrics_policy_blocked() {
+    use crate::control::policy::{
+      PolicyDecision, PolicyEngine, PolicyRule,
+    };
+
+    let policy = PolicyEngine::new(
+      vec![PolicyRule {
+        kind: EffectKind::LlmCall,
+        decision: PolicyDecision::Deny(
+          "blocked".into(),
+        ),
+        max_cost_microdollars: None,
+      }],
+      PolicyDecision::Allow,
+    );
+    let mut rt = SchedulerRuntime::new()
+      .with_policy(policy);
+    let pid = rt.spawn(Box::new(LlmCaller));
+    rt.send(Envelope::text(pid, "go"));
+    rt.tick();
+    assert_eq!(
+      rt.metrics().counter("policy.blocked"),
+      1,
+    );
   }
 }

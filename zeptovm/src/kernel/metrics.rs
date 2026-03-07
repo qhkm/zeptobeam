@@ -28,6 +28,7 @@ impl Metrics {
       "supervisor.restarts",
       "compensation.triggered",
       "budget.blocked",
+      "policy.blocked",
       "scheduler.ticks",
     ] {
       counters.insert(name, AtomicU64::new(0));
