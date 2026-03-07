@@ -22,7 +22,7 @@
 |---|----------|--------|---------|
 | A1 | ObjectRef type | NOT DONE | EffectKind variants exist, no ObjectRef struct or store |
 | A2 | Behavior version in process metadata | DONE | BehaviorMeta struct + meta() trait method on StepBehavior |
-| A3 | Effect state classification for recovery | PARTIAL | RecoveryCoordinator exists but no explicit state machine |
+| A3 | Effect state classification for recovery | DONE | Explicit EffectState enum (Pending/Dispatched/Retrying/Streaming/Completed) + ReactorMessage state reporting + journal transitions + RecoveryCoordinator replays last_state |
 | A4 | Watchdog for handler overruns | DONE | Implemented with C4 — wall-clock timing in ProcessEntry::step() |
 
 ## Acknowledged Gaps (not yet needed per review)
@@ -72,7 +72,7 @@
 ### Tier 4 — Phase 3+ (deferred from Tier 3 + multi-node)
 
 - **A1/G2:** ObjectRef + artifact plane (needs storage backend design: SQLite blobs / filesystem / S3-compatible)
-- **A3:** Effect state machine for recovery (explicit Pending → Dispatched → Completed/Failed/TimedOut)
+- **A3:** DONE — Effect state machine for recovery (EffectState enum + ReactorMessage + journal + recovery)
 - **G6:** Human approval gateway (approval wait state + timeout + workflow)
 - **G1:** Multi-node clustering
 - **G4:** Behavior versioning + migration

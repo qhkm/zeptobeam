@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::pid::Pid;
 
 /// Types of journal entries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum JournalEntryType {
   ProcessSpawned,
   MessageReceived,
@@ -27,6 +27,7 @@ pub enum JournalEntryType {
   MonitorCreated,
   MonitorRemoved,
   EffectRetried,
+  EffectStateChanged,
   CompensationRecorded,
   CompensationStarted,
   CompensationStepCompleted,
@@ -57,6 +58,7 @@ impl JournalEntryType {
       Self::MonitorCreated => "monitor_created",
       Self::MonitorRemoved => "monitor_removed",
       Self::EffectRetried => "effect_retried",
+      Self::EffectStateChanged => "effect_state_changed",
       Self::CompensationRecorded => "compensation_recorded",
       Self::CompensationStarted => "compensation_started",
       Self::CompensationStepCompleted => "compensation_step_completed",
@@ -87,6 +89,7 @@ impl JournalEntryType {
       "monitor_created" => Some(Self::MonitorCreated),
       "monitor_removed" => Some(Self::MonitorRemoved),
       "effect_retried" => Some(Self::EffectRetried),
+      "effect_state_changed" => Some(Self::EffectStateChanged),
       "compensation_recorded" => Some(Self::CompensationRecorded),
       "compensation_started" => Some(Self::CompensationStarted),
       "compensation_step_completed" => Some(Self::CompensationStepCompleted),
@@ -438,5 +441,15 @@ mod tests {
 
     let entries = journal.replay(pid, 0).unwrap();
     assert_eq!(entries[0].payload.as_ref().unwrap(), &payload);
+  }
+
+  #[test]
+  fn test_journal_entry_type_effect_state_changed() {
+    let t = JournalEntryType::EffectStateChanged;
+    assert_eq!(t.as_str(), "effect_state_changed");
+    assert_eq!(
+      JournalEntryType::from_str("effect_state_changed"),
+      Some(JournalEntryType::EffectStateChanged)
+    );
   }
 }

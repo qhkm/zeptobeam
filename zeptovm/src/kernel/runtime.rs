@@ -216,92 +216,153 @@ impl SchedulerRuntime {
   /// 6. Deliver messages (after journaling)
   /// 7. Process outbound effects (budget gate -> reactor)
   pub fn tick(&mut self) -> usize {
-    // 1. Drain reactor completions
+    // 1. Drain reactor messages (state transitions +
+    //    completions)
     if let Some(ref reactor) = self.reactor {
-      use crate::core::effect::EffectStatus;
+      use crate::core::effect::{EffectState, EffectStatus};
+      use crate::kernel::reactor::ReactorMessage;
 
-      let completions = reactor.drain_completions();
-      for completion in completions {
-        if completion.result.status
-          == EffectStatus::Streaming
-        {
-          // Streaming chunk: deliver to process
-          // mailbox but don't process as completed
-          self.engine.deliver_streaming_chunk(
-            completion.result,
-          );
-          continue;
-        }
-
-        // Record compensation if effect succeeded
-        if completion.result.status
-          == EffectStatus::Succeeded
-        {
-          if let Some((pid, spec)) = self
-            .pending_compensations
-            .remove(&completion.result.effect_id.raw())
-          {
-            self.compensation_log.record(
-              pid,
-              CompensationEntry {
-                effect_id: completion.result.effect_id,
-                spec,
-                completed_at_ms: std::time::SystemTime::now()
-                  .duration_since(
-                    std::time::UNIX_EPOCH,
-                  )
-                  .unwrap_or_default()
-                  .as_millis() as u64,
+      let messages = reactor.drain_messages();
+      for msg in messages {
+        match msg {
+          ReactorMessage::StateChanged {
+            effect_id,
+            pid,
+            new_state,
+          } => {
+            self.engine.update_effect_state(
+              effect_id.raw(),
+              new_state.clone(),
+            );
+            self.event_bus.emit(
+              RuntimeEvent::EffectStateChanged {
+                pid,
+                effect_id: effect_id.raw(),
+                new_state: new_state.clone(),
               },
             );
+            // Journal the state transition
+            if let Some(ref executor) =
+              self.turn_executor
+            {
+              let payload = serde_json::to_vec(
+                &serde_json::json!({
+                  "effect_id": effect_id.raw(),
+                  "new_state": new_state,
+                }),
+              )
+              .ok();
+              let entry =
+                crate::durability::journal::JournalEntry::new(
+                  pid,
+                  crate::durability::journal::JournalEntryType::EffectStateChanged,
+                  payload,
+                );
+              let _ = executor.journal().append(&entry);
+            }
           }
+          ReactorMessage::Completion(completion) => {
+            if completion.result.status
+              == EffectStatus::Streaming
+            {
+              // Streaming chunk: deliver to process
+              // mailbox but don't mark terminal
+              self.engine.deliver_streaming_chunk(
+                completion.result,
+              );
+              continue;
+            }
 
-          // Commit usage to BudgetGate
-          if let Some(ref gate) = self.budget_gate {
-            let tokens = completion
-              .result
-              .output
-              .as_ref()
-              .and_then(|v| v.get("tokens_used"))
-              .and_then(|v| v.as_u64())
-              .unwrap_or(100);
-            let cost = completion
-              .result
-              .output
-              .as_ref()
-              .and_then(|v| v.get("cost_microdollars"))
-              .and_then(|v| v.as_u64())
-              .unwrap_or(0);
-            gate.commit(tokens, cost);
+            // Set terminal state for non-streaming
+            self.engine.update_effect_state(
+              completion.result.effect_id.raw(),
+              EffectState::Completed(
+                completion.result.status.clone(),
+              ),
+            );
+
+            // Record compensation if effect succeeded
+            if completion.result.status
+              == EffectStatus::Succeeded
+            {
+              if let Some((pid, spec)) = self
+                .pending_compensations
+                .remove(
+                  &completion.result.effect_id.raw(),
+                )
+              {
+                self.compensation_log.record(
+                  pid,
+                  CompensationEntry {
+                    effect_id: completion
+                      .result
+                      .effect_id,
+                    spec,
+                    completed_at_ms:
+                      std::time::SystemTime::now()
+                        .duration_since(
+                          std::time::UNIX_EPOCH,
+                        )
+                        .unwrap_or_default()
+                        .as_millis()
+                        as u64,
+                  },
+                );
+              }
+
+              // Commit usage to BudgetGate
+              if let Some(ref gate) = self.budget_gate {
+                let tokens = completion
+                  .result
+                  .output
+                  .as_ref()
+                  .and_then(|v| v.get("tokens_used"))
+                  .and_then(|v| v.as_u64())
+                  .unwrap_or(100);
+                let cost = completion
+                  .result
+                  .output
+                  .as_ref()
+                  .and_then(|v| {
+                    v.get("cost_microdollars")
+                  })
+                  .and_then(|v| v.as_u64())
+                  .unwrap_or(0);
+                gate.commit(tokens, cost);
+              }
+            }
+            // Record in idempotency store
+            if let Some(ref store) =
+              self.idempotency_store
+            {
+              let _ = store.record(
+                &completion.result.effect_id,
+                &completion.result,
+              );
+            }
+
+            // Track effect completion metrics
+            match completion.result.status {
+              EffectStatus::Succeeded => {
+                self.metrics.inc("effects.completed");
+              }
+              EffectStatus::Failed => {
+                self.metrics.inc("effects.failed");
+              }
+              EffectStatus::TimedOut => {
+                self
+                  .metrics
+                  .inc("effects.timed_out");
+              }
+              EffectStatus::Cancelled => {}
+              EffectStatus::Streaming => {}
+            }
+
+            self.engine.deliver_effect_result(
+              completion.result,
+            );
           }
         }
-        // Record in idempotency store
-        if let Some(ref store) =
-          self.idempotency_store
-        {
-          let _ = store.record(
-            &completion.result.effect_id,
-            &completion.result,
-          );
-        }
-
-        // Track effect completion metrics
-        match completion.result.status {
-          EffectStatus::Succeeded => {
-            self.metrics.inc("effects.completed");
-          }
-          EffectStatus::Failed => {
-            self.metrics.inc("effects.failed");
-          }
-          EffectStatus::TimedOut => {
-            self.metrics.inc("effects.timed_out");
-          }
-          EffectStatus::Cancelled => {}
-          EffectStatus::Streaming => {}
-        }
-
-        self.engine
-          .deliver_effect_result(completion.result);
       }
     }
 
@@ -735,6 +796,10 @@ impl SchedulerRuntime {
     for timer in recovered.timers {
       self.engine.schedule_timer(timer);
     }
+
+    // TODO: re-dispatch pending effects based on last_state
+    // (Pending/Dispatched/Retrying → reactor, Streaming → from scratch, Completed → skip)
+    // recovered.pending_effects carries PendingEffectRecovery with last_state
 
     self.metrics.inc("processes.spawned");
     self.metrics.gauge_set(

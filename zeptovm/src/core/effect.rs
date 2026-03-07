@@ -167,6 +167,30 @@ pub enum EffectStatus {
     Streaming,
 }
 
+/// Lifecycle state of an in-flight effect.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize,
+)]
+pub enum EffectState {
+    /// Queued in scheduler, not yet sent to reactor.
+    Pending,
+    /// Sent to reactor for execution.
+    Dispatched { dispatched_at_ms: u64 },
+    /// Execution failed, waiting for backoff before retry.
+    Retrying { attempt: u32, next_at_ms: u64 },
+    /// Streaming response in progress.
+    Streaming { chunks_received: u32 },
+    /// Terminal state.
+    Completed(EffectStatus),
+}
+
+impl EffectState {
+    /// Returns true if this is a terminal state.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, EffectState::Completed(_))
+    }
+}
+
 /// Result returned by the effect worker plane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectResult {
@@ -310,6 +334,59 @@ mod tests {
         let result = EffectResult::streaming(id, serde_json::json!({"delta": "hello"}));
         assert_eq!(result.status, EffectStatus::Streaming);
         assert!(result.output.is_some());
+    }
+
+    #[test]
+    fn test_effect_state_pending_default() {
+        let s = EffectState::Pending;
+        assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn test_effect_state_dispatched() {
+        let s = EffectState::Dispatched {
+            dispatched_at_ms: 1000,
+        };
+        assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn test_effect_state_retrying() {
+        let s = EffectState::Retrying {
+            attempt: 2,
+            next_at_ms: 5000,
+        };
+        assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn test_effect_state_streaming() {
+        let s = EffectState::Streaming {
+            chunks_received: 3,
+        };
+        assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn test_effect_state_completed_is_terminal() {
+        let s =
+            EffectState::Completed(EffectStatus::Succeeded);
+        assert!(s.is_terminal());
+        let s2 =
+            EffectState::Completed(EffectStatus::Failed);
+        assert!(s2.is_terminal());
+    }
+
+    #[test]
+    fn test_effect_state_serializable() {
+        let s = EffectState::Retrying {
+            attempt: 1,
+            next_at_ms: 2000,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let deser: EffectState =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, s);
     }
 
     #[test]
