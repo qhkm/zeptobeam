@@ -46,6 +46,7 @@ pub enum EffectKind {
     Spawn,
     ObjectFetch,
     ObjectPut,
+    ObjectDelete,
     VectorSearch,
     Custom(String),
 }
