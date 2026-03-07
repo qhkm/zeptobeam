@@ -101,7 +101,8 @@ impl ProcessEntry {
     }
 
     // Pop next message (mailbox handles lane priority)
-    match self.mailbox.pop() {
+    // TODO(task-3): pass real now_ms instead of 0
+    match self.mailbox.pop(0) {
       Some(env) => {
         // Check for control signals that the runtime handles
         // directly. Signals not matched here fall through to

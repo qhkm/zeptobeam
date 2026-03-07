@@ -21,6 +21,32 @@ pub struct MultiLaneMailbox {
     seen_dedup_keys: HashSet<String>,
     /// Maximum number of dedup keys to track before eviction.
     dedup_capacity: usize,
+    /// Accumulated count of expired messages discarded since last drain.
+    expired_count: usize,
+}
+
+/// Check if an envelope has expired.
+fn is_expired(env: &Envelope, now_ms: u64) -> bool {
+    matches!(env.expires_at, Some(t) if now_ms >= t)
+}
+
+/// Pop first non-expired message from a lane.
+/// Returns (envelope_or_none, number_of_expired_discarded).
+fn pop_lane_alive(
+    lane: &mut VecDeque<Envelope>,
+    now_ms: u64,
+) -> (Option<Envelope>, usize) {
+    let mut expired = 0;
+    loop {
+        match lane.front() {
+            None => return (None, expired),
+            Some(env) if is_expired(env, now_ms) => {
+                lane.pop_front();
+                expired += 1;
+            }
+            Some(_) => return (lane.pop_front(), expired),
+        }
+    }
 }
 
 impl MultiLaneMailbox {
@@ -35,6 +61,7 @@ impl MultiLaneMailbox {
             high_priority_streak: 0,
             seen_dedup_keys: HashSet::new(),
             dedup_capacity: 1000,
+            expired_count: 0,
         }
     }
 
@@ -67,46 +94,93 @@ impl MultiLaneMailbox {
     }
 
     /// Pop the next envelope respecting lane priority with fairness.
-    pub fn pop(&mut self) -> Option<Envelope> {
-        // Control always first (kill signals, exit links)
-        if let Some(env) = self.control.pop_front() {
-            return Some(env);
+    /// Expired messages (expires_at <= now_ms) are silently discarded.
+    /// Discarded count accumulates in expired_count for metrics.
+    pub fn pop(&mut self, now_ms: u64) -> Option<Envelope> {
+        // Control always first
+        let (result, exp) = pop_lane_alive(&mut self.control, now_ms);
+        self.expired_count += exp;
+        if result.is_some() {
+            return result;
         }
 
-        // Fairness check: if high-priority lanes have been draining too long,
-        // give low-priority a chance
+        // Fairness check
         if self.high_priority_streak >= self.fairness_window {
             self.high_priority_streak = 0;
-            if let Some(env) = self.background.pop_front() {
-                return Some(env);
+            let (result, exp) =
+                pop_lane_alive(&mut self.background, now_ms);
+            self.expired_count += exp;
+            if result.is_some() {
+                return result;
             }
         }
 
         // Supervisor
-        if let Some(env) = self.supervisor.pop_front() {
+        let (result, exp) =
+            pop_lane_alive(&mut self.supervisor, now_ms);
+        self.expired_count += exp;
+        if let Some(env) = result {
             self.high_priority_streak += 1;
             return Some(env);
         }
 
-        // Effect results (high priority — unblock waiting processes)
-        if let Some(env) = self.effect.pop_front() {
+        // Effect results
+        let (result, exp) =
+            pop_lane_alive(&mut self.effect, now_ms);
+        self.expired_count += exp;
+        if let Some(env) = result {
             self.high_priority_streak += 1;
             return Some(env);
         }
 
         // User messages
-        if let Some(env) = self.user.pop_front() {
+        let (result, exp) =
+            pop_lane_alive(&mut self.user, now_ms);
+        self.expired_count += exp;
+        if let Some(env) = result {
             self.high_priority_streak = 0;
             return Some(env);
         }
 
         // Background
-        if let Some(env) = self.background.pop_front() {
+        let (result, exp) =
+            pop_lane_alive(&mut self.background, now_ms);
+        self.expired_count += exp;
+        if let Some(env) = result {
             self.high_priority_streak = 0;
             return Some(env);
         }
 
         None
+    }
+
+    /// Drain the expired-message counter. Returns the count since
+    /// last drain. The runtime calls this to feed metrics.
+    pub fn take_expired_count(&mut self) -> usize {
+        let count = self.expired_count;
+        self.expired_count = 0;
+        count
+    }
+
+    /// Remove all expired messages from all lanes.
+    /// Returns the number of messages removed. Also feeds
+    /// expired_count.
+    pub fn reap_expired(&mut self, now_ms: u64) -> usize {
+        fn reap_lane(
+            lane: &mut VecDeque<Envelope>,
+            now_ms: u64,
+        ) -> usize {
+            let before = lane.len();
+            lane.retain(|env| !is_expired(env, now_ms));
+            before - lane.len()
+        }
+        let count = reap_lane(&mut self.control, now_ms)
+            + reap_lane(&mut self.supervisor, now_ms)
+            + reap_lane(&mut self.effect, now_ms)
+            + reap_lane(&mut self.user, now_ms)
+            + reap_lane(&mut self.background, now_ms);
+        self.expired_count += count;
+        count
     }
 
     /// Check if any lane has messages.
@@ -154,7 +228,7 @@ mod tests {
     fn test_mailbox_empty() {
         let mut mb = MultiLaneMailbox::new();
         assert!(!mb.has_messages());
-        assert!(mb.pop().is_none());
+        assert!(mb.pop(0).is_none());
         assert_eq!(mb.total_len(), 0);
     }
 
@@ -165,7 +239,7 @@ mod tests {
         assert!(mb.has_messages());
         assert_eq!(mb.total_len(), 1);
 
-        let env = mb.pop().unwrap();
+        let env = mb.pop(0).unwrap();
         assert_eq!(env.class, MessageClass::User);
         assert!(!mb.has_messages());
     }
@@ -176,10 +250,10 @@ mod tests {
         mb.push(Envelope::text(to(), "user msg"));
         mb.push(Envelope::signal(to(), Signal::Kill));
 
-        let first = mb.pop().unwrap();
+        let first = mb.pop(0).unwrap();
         assert_eq!(first.class, MessageClass::Control);
 
-        let second = mb.pop().unwrap();
+        let second = mb.pop(0).unwrap();
         assert_eq!(second.class, MessageClass::User);
     }
 
@@ -193,10 +267,10 @@ mod tests {
         );
         mb.push(Envelope::effect_result(to(), result));
 
-        let first = mb.pop().unwrap();
+        let first = mb.pop(0).unwrap();
         assert_eq!(first.class, MessageClass::EffectResult);
 
-        let second = mb.pop().unwrap();
+        let second = mb.pop(0).unwrap();
         assert_eq!(second.class, MessageClass::User);
     }
 
@@ -208,7 +282,7 @@ mod tests {
         mb.push(Envelope::text(to(), "third"));
 
         for expected in ["first", "second", "third"] {
-            let env = mb.pop().unwrap();
+            let env = mb.pop(0).unwrap();
             if let EnvelopePayload::User(crate::core::message::Payload::Text(s)) =
                 &env.payload
             {
@@ -252,16 +326,16 @@ mod tests {
 
         // First 3 pops should be effect results (high-priority streak)
         for _ in 0..3 {
-            let env = mb.pop().unwrap();
+            let env = mb.pop(0).unwrap();
             assert_eq!(env.class, MessageClass::EffectResult);
         }
 
         // 4th pop: fairness kicks in, background gets a turn
-        let env = mb.pop().unwrap();
+        let env = mb.pop(0).unwrap();
         assert_eq!(env.class, MessageClass::Background);
 
         // 5th pop: back to effect
-        let env = mb.pop().unwrap();
+        let env = mb.pop(0).unwrap();
         assert_eq!(env.class, MessageClass::EffectResult);
     }
 
@@ -319,5 +393,101 @@ mod tests {
         let mut env_dup = Envelope::text(to(), "msg-0-dup");
         env_dup.dedup_key = Some("key-0".into());
         assert!(mb.push(env_dup));
+    }
+
+    #[test]
+    fn test_pop_no_ttl_never_expires() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "hello"));
+        // Even at far-future time, no-TTL messages are fine
+        let env = mb.pop(u64::MAX).unwrap();
+        assert!(matches!(
+            env.payload,
+            EnvelopePayload::User(
+                crate::core::message::Payload::Text(_)
+            )
+        ));
+    }
+
+    #[test]
+    fn test_pop_ttl_before_expiry() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut env = Envelope::text(to(), "fresh");
+        env.expires_at = Some(1000);
+        mb.push(env);
+        let result = mb.pop(500);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_pop_ttl_after_expiry_skipped() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut expired = Envelope::text(to(), "old");
+        expired.expires_at = Some(100);
+        mb.push(expired);
+        mb.push(Envelope::text(to(), "fresh"));
+        let env = mb.pop(200).unwrap();
+        if let EnvelopePayload::User(
+            crate::core::message::Payload::Text(s),
+        ) = &env.payload
+        {
+            assert_eq!(s, "fresh");
+        } else {
+            panic!("expected text");
+        }
+        assert_eq!(mb.total_len(), 0);
+    }
+
+    #[test]
+    fn test_pop_all_expired_returns_none() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut env = Envelope::text(to(), "old");
+        env.expires_at = Some(100);
+        mb.push(env);
+        assert!(mb.pop(200).is_none());
+        assert_eq!(mb.total_len(), 0);
+    }
+
+    #[test]
+    fn test_expired_count_tracks_discards() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut e1 = Envelope::text(to(), "old1");
+        e1.expires_at = Some(100);
+        let mut e2 = Envelope::text(to(), "old2");
+        e2.expires_at = Some(200);
+        mb.push(e1);
+        mb.push(e2);
+        mb.push(Envelope::text(to(), "fresh"));
+        // Pop at t=300 should skip 2 expired, return fresh
+        let _ = mb.pop(300).unwrap();
+        assert_eq!(mb.take_expired_count(), 2);
+        // Second call returns 0 (counter was drained)
+        assert_eq!(mb.take_expired_count(), 0);
+    }
+
+    #[test]
+    fn test_reap_expired_removes_and_returns_count() {
+        let mut mb = MultiLaneMailbox::new();
+        let mut e1 = Envelope::text(to(), "old1");
+        e1.expires_at = Some(100);
+        let mut e2 = Envelope::text(to(), "old2");
+        e2.expires_at = Some(200);
+        mb.push(e1);
+        mb.push(e2);
+        mb.push(Envelope::text(to(), "fresh"));
+
+        let reaped = mb.reap_expired(300);
+        assert_eq!(reaped, 2);
+        assert_eq!(mb.total_len(), 1);
+        // reap also feeds expired_count
+        assert_eq!(mb.take_expired_count(), 2);
+    }
+
+    #[test]
+    fn test_reap_expired_nothing_to_reap() {
+        let mut mb = MultiLaneMailbox::new();
+        mb.push(Envelope::text(to(), "no ttl"));
+        assert_eq!(mb.reap_expired(1000), 0);
+        assert_eq!(mb.total_len(), 1);
     }
 }
