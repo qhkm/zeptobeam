@@ -1,3 +1,4 @@
+pub mod approval_store;
 pub mod compensation;
 pub mod event_bus;
 pub mod mailbox;
