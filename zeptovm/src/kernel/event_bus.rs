@@ -10,6 +10,7 @@ pub enum RuntimeEvent {
   ProcessSpawned {
     pid: Pid,
     behavior_module: String,
+    behavior_version: Option<String>,
   },
   ProcessExited {
     pid: Pid,
@@ -130,6 +131,7 @@ mod tests {
     RuntimeEvent::ProcessSpawned {
       pid,
       behavior_module: "test_mod".into(),
+      behavior_version: None,
     }
   }
 

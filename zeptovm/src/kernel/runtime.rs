@@ -224,10 +224,16 @@ impl SchedulerRuntime {
     &mut self,
     behavior: Box<dyn StepBehavior>,
   ) -> Pid {
+    let meta = behavior.meta();
     let pid = self.engine.spawn(behavior);
+    let (module, version) = match meta {
+      Some(m) => (m.module, Some(m.version)),
+      None => ("unknown".into(), None),
+    };
     self.event_bus.emit(RuntimeEvent::ProcessSpawned {
       pid,
-      behavior_module: "unknown".into(),
+      behavior_module: module,
+      behavior_version: version,
     });
     self.metrics.inc("processes.spawned");
     self.metrics.gauge_set(
@@ -1880,5 +1886,64 @@ mod tests {
       rt.metrics().counter("policy.blocked"),
       1,
     );
+  }
+
+  #[test]
+  fn test_spawn_records_behavior_version_in_event() {
+    use crate::core::behavior::BehaviorMeta;
+
+    struct VersionedAgent;
+    impl StepBehavior for VersionedAgent {
+      fn init(
+        &mut self,
+        _cp: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+      fn meta(&self) -> Option<BehaviorMeta> {
+        Some(BehaviorMeta {
+          module: "versioned_agent".to_string(),
+          version: "1.0.0".to_string(),
+        })
+      }
+    }
+
+    let mut rt = SchedulerRuntime::new();
+    let _pid = rt.spawn(Box::new(VersionedAgent));
+
+    let events = rt.drain_events();
+    let spawn_event = events.iter().find(|(_, e)| {
+      matches!(
+        e,
+        crate::kernel::event_bus::RuntimeEvent
+          ::ProcessSpawned { .. }
+      )
+    });
+    assert!(spawn_event.is_some());
+    match &spawn_event.unwrap().1 {
+      crate::kernel::event_bus::RuntimeEvent
+        ::ProcessSpawned {
+        behavior_module,
+        behavior_version,
+        ..
+      } => {
+        assert_eq!(
+          behavior_module, "versioned_agent"
+        );
+        assert_eq!(
+          behavior_version.as_deref(),
+          Some("1.0.0"),
+        );
+      }
+      _ => panic!("wrong event type"),
+    }
   }
 }
