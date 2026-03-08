@@ -32,7 +32,7 @@
 | G1 | Multi-node clustering | NOT DONE | Design doc exists, no implementation |
 | G2 | Object/artifact plane | DONE | ObjectRef + artifact plane implemented with trait-based backend (SQLite first) |
 | G3 | Full policy engine | DONE | PolicyEngine with effect-kind rules, integrated into runtime |
-| G4 | Behavior versioning + migration | NOT DONE | No version metadata, no migration |
+| G4 | Behavior versioning + migration | DONE | Version in journal, migrate() callback, recovery-time check |
 | G5 | OneForAll / RestForOne supervision | DONE | All three strategies implemented with shutdown coordination |
 | G6 | Human approval UI/gateway | DONE | ApprovalStore + reactor handlers + HTTP endpoints + timeout enforcement |
 
@@ -75,4 +75,3 @@
 - **A3:** DONE — Effect state machine for recovery (EffectState enum + ReactorMessage + journal + recovery)
 - **G6:** DONE — Human approval gateway (ApprovalStore, reactor handlers, HTTP endpoints, timeout enforcement)
 - **G1:** Multi-node clustering
-- **G4:** Behavior versioning + migration
