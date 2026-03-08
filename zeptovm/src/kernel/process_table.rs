@@ -38,6 +38,8 @@ pub struct ProcessEntry {
   /// pop_matching() instead of pop(). Cleared on match.
   pub selective_tag: Option<String>,
   behavior: Box<dyn StepBehavior>,
+  pub behavior_module: Option<String>,
+  pub behavior_version: Option<String>,
   reductions: u32,
   kill_requested: bool,
   exit_reason: Option<Reason>,
@@ -47,7 +49,16 @@ pub struct ProcessEntry {
 }
 
 impl ProcessEntry {
-  pub fn new(pid: Pid, behavior: Box<dyn StepBehavior>) -> Self {
+  pub fn new(
+    pid: Pid,
+    behavior: Box<dyn StepBehavior>,
+  ) -> Self {
+    let (behavior_module, behavior_version) =
+      if let Some(meta) = behavior.meta() {
+        (Some(meta.module), Some(meta.version))
+      } else {
+        (None, None)
+      };
     Self {
       pid,
       state: ProcessRuntimeState::Ready,
@@ -56,10 +67,13 @@ impl ProcessEntry {
       trap_exit: false,
       selective_tag: None,
       behavior,
+      behavior_module,
+      behavior_version,
       reductions: 0,
       kill_requested: false,
       exit_reason: None,
-      max_turn_wall_clock: std::time::Duration::from_secs(5),
+      max_turn_wall_clock:
+        std::time::Duration::from_secs(5),
       turn_overrun_flag: false,
       last_turn_duration: None,
     }
@@ -717,6 +731,55 @@ mod tests {
     let pid = Pid::new();
     let p = ProcessEntry::new(pid, Box::new(Echo));
     assert!(p.behavior_meta().is_none());
+  }
+
+  #[test]
+  fn test_process_entry_version_fields_from_meta() {
+    use crate::core::behavior::BehaviorMeta;
+
+    struct VersionedBehavior;
+    impl StepBehavior for VersionedBehavior {
+      fn init(
+        &mut self,
+        _cp: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+      fn meta(&self) -> Option<BehaviorMeta> {
+        Some(BehaviorMeta {
+          module: "agent_v2".to_string(),
+          version: "2.1.0".to_string(),
+        })
+      }
+    }
+
+    let pid = Pid::new();
+    let p =
+      ProcessEntry::new(pid, Box::new(VersionedBehavior));
+    assert_eq!(
+      p.behavior_module.as_deref(),
+      Some("agent_v2"),
+    );
+    assert_eq!(
+      p.behavior_version.as_deref(),
+      Some("2.1.0"),
+    );
+  }
+
+  #[test]
+  fn test_process_entry_version_fields_none_without_meta() {
+    let pid = Pid::new();
+    let p = ProcessEntry::new(pid, Box::new(Echo));
+    assert!(p.behavior_module.is_none());
+    assert!(p.behavior_version.is_none());
   }
 
   // ── Selective receive tests ──────────────────────────
