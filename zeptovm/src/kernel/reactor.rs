@@ -14,6 +14,7 @@ use crate::effects::http_worker::HttpWorker;
 use crate::effects::openai::OpenAiClient;
 use crate::effects::provider::ProviderClient;
 use crate::durability::artifact_store::ArtifactBackend;
+use crate::kernel::approval_store::ApprovalStore;
 use crate::pid::Pid;
 
 /// Configuration for the reactor's real LLM and HTTP workers.
@@ -31,6 +32,7 @@ pub struct ReactorConfig {
   /// placeholder responses for backward compatibility.
   use_real_http: bool,
   artifact_store: Option<Arc<dyn ArtifactBackend>>,
+  approval_store: Option<ApprovalStore>,
 }
 
 impl ReactorConfig {
@@ -59,6 +61,7 @@ impl ReactorConfig {
       provider_config: config.clone(),
       use_real_http: true,
       artifact_store: None,
+      approval_store: None,
     }
   }
 
@@ -72,6 +75,7 @@ impl ReactorConfig {
       provider_config: ProviderConfig::default(),
       use_real_http: false,
       artifact_store: None,
+      approval_store: None,
     }
   }
 }
@@ -113,6 +117,8 @@ pub enum ReactorMessage {
 pub struct Reactor {
   dispatch_tx: Sender<EffectDispatch>,
   completion_rx: Receiver<ReactorMessage>,
+  completion_tx: Sender<ReactorMessage>,
+  approval_store: Option<ApprovalStore>,
   _handle: thread::JoinHandle<()>,
 }
 
@@ -120,7 +126,7 @@ impl Reactor {
   /// Start the reactor on a background thread with a Tokio
   /// runtime, using placeholder responses for all effects.
   pub fn start() -> Self {
-    Self::start_with_config(None, None)
+    Self::start_with_config(None, None, None)
   }
 
   /// Start the reactor with an optional `ProviderConfig`.
@@ -133,6 +139,7 @@ impl Reactor {
   pub fn start_with_config(
     config: Option<ProviderConfig>,
     artifact_store: Option<Arc<dyn ArtifactBackend>>,
+    approval_store: Option<ApprovalStore>,
   ) -> Self {
     let mut reactor_config = match config {
       Some(ref c) if c.has_any_provider() => {
@@ -141,12 +148,15 @@ impl Reactor {
       _ => ReactorConfig::placeholder(),
     };
     reactor_config.artifact_store = artifact_store;
+    reactor_config.approval_store = approval_store.clone();
     let reactor_config = Arc::new(reactor_config);
 
     let (dispatch_tx, dispatch_rx) =
       unbounded::<EffectDispatch>();
     let (completion_tx, completion_rx) =
       unbounded::<ReactorMessage>();
+    let external_completion_tx = completion_tx.clone();
+    let external_approval_store = approval_store;
 
     let handle = thread::spawn(move || {
       let rt = tokio::runtime::Builder::new_multi_thread()
@@ -186,11 +196,14 @@ impl Reactor {
                       pid,
                     )
                     .await;
-                  let _ = tx.send(
-                    ReactorMessage::Completion(
-                      EffectCompletion { pid, result },
-                    ),
-                  );
+                  if result.status != EffectStatus::Deferred
+                  {
+                    let _ = tx.send(
+                      ReactorMessage::Completion(
+                        EffectCompletion { pid, result },
+                      ),
+                    );
+                  }
                 }
                 .instrument(span),
               );
@@ -204,6 +217,8 @@ impl Reactor {
     Self {
       dispatch_tx,
       completion_rx,
+      completion_tx: external_completion_tx,
+      approval_store: external_approval_store,
       _handle: handle,
     }
   }
@@ -250,6 +265,79 @@ impl Reactor {
   /// Get a clone of the dispatch sender (for multi-thread use).
   pub fn dispatch_sender(&self) -> Sender<EffectDispatch> {
     self.dispatch_tx.clone()
+  }
+
+  /// Get the approval store, if configured.
+  pub fn approval_store(&self) -> Option<&ApprovalStore> {
+    self.approval_store.as_ref()
+  }
+
+  /// Get a clone of the completion sender (for HTTP handlers).
+  pub fn completion_sender(
+    &self,
+  ) -> Sender<ReactorMessage> {
+    self.completion_tx.clone()
+  }
+
+  /// Resolve a pending approval and send the completion.
+  /// Returns `true` if the approval was found and resolved.
+  pub fn resolve_approval(
+    &self,
+    effect_id: u64,
+    action: &str,
+    payload: serde_json::Value,
+  ) -> bool {
+    let store = match &self.approval_store {
+      Some(s) => s,
+      None => return false,
+    };
+
+    let approval = match store.resolve(effect_id) {
+      Some(a) => a,
+      None => return false,
+    };
+
+    let result = match action {
+      "approve" => EffectResult::success(
+        approval.effect_id,
+        serde_json::json!({"approved": true}),
+      ),
+      "deny" => {
+        let reason = payload
+          .get("reason")
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+        EffectResult::success(
+          approval.effect_id,
+          serde_json::json!({
+            "approved": false,
+            "reason": reason,
+          }),
+        )
+      }
+      "respond" => {
+        let response = payload
+          .get("response")
+          .cloned()
+          .unwrap_or(serde_json::Value::Null);
+        EffectResult::success(
+          approval.effect_id,
+          serde_json::json!({"response": response}),
+        )
+      }
+      _ => EffectResult::failure(
+        approval.effect_id,
+        format!("unknown action: {action}"),
+      ),
+    };
+
+    let _ = self.completion_tx.send(
+      ReactorMessage::Completion(EffectCompletion {
+        pid: approval.pid,
+        result,
+      }),
+    );
+    true
   }
 }
 
@@ -704,6 +792,86 @@ async fn execute_effect_once_configured(
       }
     }
 
+    EffectKind::HumanApproval
+    | EffectKind::HumanInput => {
+      if let Some(ref store) = config.approval_store {
+        let description = match request
+          .input
+          .get("description")
+          .and_then(|v| v.as_str())
+        {
+          Some(s) => s.to_string(),
+          None => {
+            return EffectResult::failure(
+              request.effect_id,
+              "missing required field: description",
+            );
+          }
+        };
+
+        let now_ms = std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .unwrap_or_default()
+          .as_millis() as u64;
+        let expires_at_ms = now_ms
+          .saturating_add(
+            request.timeout.as_millis() as u64,
+          );
+
+        let approval =
+          crate::kernel::approval_store::PendingApproval {
+            effect_id: request.effect_id,
+            pid,
+            kind: request.kind.clone(),
+            description,
+            input: request.input.clone(),
+            created_at_ms: now_ms,
+            expires_at_ms,
+          };
+
+        store.insert(approval);
+
+        // Spawn timeout task
+        let timeout = request.timeout;
+        let effect_id_raw = request.effect_id.raw();
+        let effect_id = request.effect_id;
+        let timeout_store = store.clone();
+        let timeout_tx = completion_tx.clone();
+        tokio::spawn(async move {
+          tokio::time::sleep(timeout).await;
+          if timeout_store.is_pending(effect_id_raw) {
+            if let Some(_) =
+              timeout_store.resolve(effect_id_raw)
+            {
+              let _ = timeout_tx.send(
+                ReactorMessage::Completion(
+                  EffectCompletion {
+                    pid,
+                    result: EffectResult::failure(
+                      effect_id,
+                      "approval timed out",
+                    ),
+                  },
+                ),
+              );
+            }
+          }
+        });
+
+        EffectResult {
+          effect_id: request.effect_id,
+          status: EffectStatus::Deferred,
+          output: None,
+          error: None,
+        }
+      } else {
+        EffectResult::failure(
+          request.effect_id,
+          "no approval store configured",
+        )
+      }
+    }
+
     other => {
       // Placeholder for other effect kinds.
       EffectResult::success(
@@ -963,6 +1131,7 @@ mod tests {
     let reactor = Reactor::start_with_config(
       None,
       Some(store),
+      None,
     );
 
     // ObjectPut — store base64-encoded data
@@ -1046,6 +1215,7 @@ mod tests {
     let reactor = Reactor::start_with_config(
       None,
       Some(store),
+      None,
     );
 
     // Store an artifact first
@@ -1149,7 +1319,7 @@ mod tests {
       SqliteArtifactStore::open_in_memory().unwrap(),
     );
     let reactor =
-      Reactor::start_with_config(None, Some(store));
+      Reactor::start_with_config(None, Some(store), None);
     let pid = Pid::from_raw(1);
 
     // ObjectPut without data_base64 field
@@ -1187,7 +1357,7 @@ mod tests {
       SqliteArtifactStore::open_in_memory().unwrap(),
     );
     let reactor =
-      Reactor::start_with_config(None, Some(store));
+      Reactor::start_with_config(None, Some(store), None);
     let pid = Pid::from_raw(1);
 
     // ObjectFetch without object_id field
@@ -1223,7 +1393,7 @@ mod tests {
       SqliteArtifactStore::open_in_memory().unwrap(),
     );
     let reactor =
-      Reactor::start_with_config(None, Some(store));
+      Reactor::start_with_config(None, Some(store), None);
     let pid = Pid::from_raw(1);
 
     // Store with TTL=0 (expires immediately)

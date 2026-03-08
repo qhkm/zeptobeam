@@ -150,6 +150,7 @@ impl SchedulerRuntime {
         Reactor::start_with_config(
           Some(config.clone()),
           self.artifact_store.clone(),
+          None,
         ),
       );
     }
@@ -172,6 +173,7 @@ impl SchedulerRuntime {
         Reactor::start_with_config(
           self.provider_config.clone(),
           Some(store),
+          None,
         ),
       );
     }
@@ -389,6 +391,7 @@ impl SchedulerRuntime {
               }
               EffectStatus::Cancelled => {}
               EffectStatus::Streaming => {}
+              EffectStatus::Deferred => {}
             }
 
             // Track artifact-specific metrics
