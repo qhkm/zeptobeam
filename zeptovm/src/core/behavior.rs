@@ -49,6 +49,20 @@ pub trait StepBehavior: Send + 'static {
   fn meta(&self) -> Option<BehaviorMeta> {
     None
   }
+
+  /// Opt-in: transform state from an old behavior version to the
+  /// current version. Called during recovery when the journaled
+  /// version differs from meta().version.
+  /// Return Some(new_state) to proceed with the transformed state,
+  /// or None to indicate migration is not supported (process will
+  /// fail).
+  fn migrate(
+    &self,
+    _old_version: &str,
+    _state: serde_json::Value,
+  ) -> Option<serde_json::Value> {
+    None
+  }
 }
 
 #[cfg(test)]
@@ -205,6 +219,71 @@ mod tests {
     let meta = b.meta().unwrap();
     assert_eq!(meta.module, "my_agent");
     assert_eq!(meta.version, "1.2.0");
+  }
+
+  #[test]
+  fn test_behavior_migrate_default_none() {
+    let b = EchoStep;
+    let result =
+      b.migrate("0.1.0", serde_json::json!({"count": 1}));
+    assert!(
+      result.is_none(),
+      "default migrate should return None",
+    );
+  }
+
+  #[test]
+  fn test_behavior_migrate_custom() {
+    struct Migrator;
+    impl StepBehavior for Migrator {
+      fn init(
+        &mut self,
+        _cp: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+      fn meta(&self) -> Option<BehaviorMeta> {
+        Some(BehaviorMeta {
+          module: "migrator".to_string(),
+          version: "2.0.0".to_string(),
+        })
+      }
+      fn migrate(
+        &self,
+        old_version: &str,
+        state: serde_json::Value,
+      ) -> Option<serde_json::Value> {
+        if old_version == "1.0.0" {
+          let mut new_state = state;
+          new_state["migrated"] =
+            serde_json::json!(true);
+          Some(new_state)
+        } else {
+          None
+        }
+      }
+    }
+
+    let b = Migrator;
+    let state = serde_json::json!({"count": 5});
+    let result = b.migrate("1.0.0", state);
+    assert!(result.is_some());
+    let new_state = result.unwrap();
+    assert_eq!(new_state["count"], 5);
+    assert_eq!(new_state["migrated"], true);
+
+    // Unknown old version returns None
+    let result2 =
+      b.migrate("0.5.0", serde_json::json!({}));
+    assert!(result2.is_none());
   }
 
   #[test]
