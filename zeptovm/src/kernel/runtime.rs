@@ -232,9 +232,27 @@ impl SchedulerRuntime {
     };
     self.event_bus.emit(RuntimeEvent::ProcessSpawned {
       pid,
-      behavior_module: module,
-      behavior_version: version,
+      behavior_module: module.clone(),
+      behavior_version: version.clone(),
     });
+    // Journal the spawn with version metadata
+    if let Some(ref executor) = self.turn_executor {
+      let payload = serde_json::to_vec(
+        &serde_json::json!({
+          "behavior_module": module,
+          "behavior_version": version,
+        }),
+      )
+      .ok();
+      let entry =
+        crate::durability::journal::JournalEntry::new(
+          pid,
+          crate::durability::journal::JournalEntryType
+            ::ProcessSpawned,
+          payload,
+        );
+      let _ = executor.journal().append(&entry);
+    }
     self.metrics.inc("processes.spawned");
     self.metrics.gauge_set(
       "processes.active",
@@ -1945,5 +1963,57 @@ mod tests {
       }
       _ => panic!("wrong event type"),
     }
+  }
+
+  #[test]
+  fn test_journal_records_behavior_version_payload() {
+    use crate::core::behavior::BehaviorMeta;
+
+    struct VersionedAgent;
+    impl StepBehavior for VersionedAgent {
+      fn init(
+        &mut self,
+        _cp: Option<Vec<u8>>,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn handle(
+        &mut self,
+        _msg: Envelope,
+        _ctx: &mut TurnContext,
+      ) -> StepResult {
+        StepResult::Continue
+      }
+      fn terminate(&mut self, _reason: &Reason) {}
+      fn meta(&self) -> Option<BehaviorMeta> {
+        Some(BehaviorMeta {
+          module: "journal_agent".to_string(),
+          version: "3.0.0".to_string(),
+        })
+      }
+    }
+
+    let mut rt = SchedulerRuntime::with_durability();
+    let pid = rt.spawn(Box::new(VersionedAgent));
+
+    // Access journal through turn_executor
+    let journal =
+      rt.turn_executor.as_ref().unwrap().journal();
+    let entries = journal.replay(pid, 0).unwrap();
+    let spawn_entry = entries.iter().find(|e| {
+      e.entry_type
+        == crate::durability::journal
+          ::JournalEntryType::ProcessSpawned
+    });
+    assert!(
+      spawn_entry.is_some(),
+      "should have ProcessSpawned journal entry",
+    );
+    let payload =
+      spawn_entry.unwrap().payload.as_ref().unwrap();
+    let val: serde_json::Value =
+      serde_json::from_slice(payload).unwrap();
+    assert_eq!(val["behavior_module"], "journal_agent");
+    assert_eq!(val["behavior_version"], "3.0.0");
   }
 }
