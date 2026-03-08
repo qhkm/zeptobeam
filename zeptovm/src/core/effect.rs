@@ -166,6 +166,7 @@ pub enum EffectStatus {
     TimedOut,
     Cancelled,
     Streaming,
+    Deferred,
 }
 
 /// Lifecycle state of an in-flight effect.

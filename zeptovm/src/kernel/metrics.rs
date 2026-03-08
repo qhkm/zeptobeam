@@ -35,6 +35,11 @@ impl Metrics {
       "artifacts.fetched",
       "artifacts.deleted",
       "artifacts.expired",
+      "approvals.requested",
+      "approvals.approved",
+      "approvals.denied",
+      "approvals.timed_out",
+      "approvals.input_received",
     ] {
       counters.insert(name, AtomicU64::new(0));
     }
@@ -193,5 +198,20 @@ mod tests {
     assert_eq!(m.counter("artifacts.fetched"), 1);
     assert_eq!(m.counter("artifacts.deleted"), 1);
     assert_eq!(m.counter("artifacts.expired"), 1);
+  }
+
+  #[test]
+  fn test_metrics_approval_counters() {
+    let m = Metrics::new();
+    m.inc("approvals.requested");
+    m.inc("approvals.approved");
+    m.inc("approvals.denied");
+    m.inc("approvals.timed_out");
+    m.inc("approvals.input_received");
+    assert_eq!(m.counter("approvals.requested"), 1);
+    assert_eq!(m.counter("approvals.approved"), 1);
+    assert_eq!(m.counter("approvals.denied"), 1);
+    assert_eq!(m.counter("approvals.timed_out"), 1);
+    assert_eq!(m.counter("approvals.input_received"), 1);
   }
 }
