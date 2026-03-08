@@ -59,17 +59,16 @@ impl<'a> RecoveryCoordinator<'a> {
     let mut behavior = factory();
     let mut snapshot_seq = 0i64;
 
-    // Step 1: Load latest snapshot
+    // Step 1: Load latest snapshot (defer restore until
+    // after version check to avoid double-restore on
+    // migration)
     let snapshot = self
       .snapshots
       .load_latest(pid)
       .map_err(|e| format!("snapshot load failed: {e}"))?;
 
     if let Some(ref snap) = snapshot {
-      behavior.restore(&snap.state_blob)?;
       snapshot_seq = snap.version;
-    } else {
-      behavior.init(None);
     }
 
     // Step 1.5: Check behavior version compatibility
@@ -96,6 +95,7 @@ impl<'a> RecoveryCoordinator<'a> {
     let current_version =
       current_meta.as_ref().map(|m| m.version.as_str());
 
+    let mut migrated = false;
     if let (Some(ref old_ver), Some(new_ver)) =
       (&journaled_version, current_version)
     {
@@ -121,6 +121,7 @@ impl<'a> RecoveryCoordinator<'a> {
                 },
               )?;
             behavior.restore(&new_blob)?;
+            migrated = true;
           }
           None => {
             return Err(format!(
@@ -130,6 +131,16 @@ impl<'a> RecoveryCoordinator<'a> {
             ));
           }
         }
+      }
+    }
+
+    // Step 1.6: Restore snapshot (skipped if migration
+    // already called restore with transformed state)
+    if !migrated {
+      if let Some(ref snap) = snapshot {
+        behavior.restore(&snap.state_blob)?;
+      } else {
+        behavior.init(None);
       }
     }
 
