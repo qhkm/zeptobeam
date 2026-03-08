@@ -1454,4 +1454,229 @@ mod tests {
         .contains("expired")
     );
   }
+
+  #[test]
+  fn test_reactor_human_approval_flow() {
+    use crate::kernel::approval_store::ApprovalStore;
+
+    let store = ApprovalStore::new();
+    let reactor = Reactor::start_with_config(
+      None, None, Some(store.clone()),
+    );
+    let pid = Pid::from_raw(1);
+
+    let req = EffectRequest::new(
+      EffectKind::HumanApproval,
+      serde_json::json!({
+        "description": "Delete production DB?",
+      }),
+    );
+    reactor.dispatch(pid, req);
+
+    std::thread::sleep(
+      std::time::Duration::from_millis(50),
+    );
+
+    let pending = store.list();
+    assert_eq!(pending.len(), 1);
+    let effect_id = pending[0].effect_id.raw();
+
+    let resolved = reactor.resolve_approval(
+      effect_id,
+      "approve",
+      serde_json::json!({}),
+    );
+    assert!(resolved);
+
+    let completion =
+      poll_for_completion(&reactor)
+        .expect("should get approval completion");
+    assert_eq!(
+      completion.result.status,
+      EffectStatus::Succeeded,
+    );
+    let output = completion.result.output.unwrap();
+    assert_eq!(output["approved"], true);
+  }
+
+  #[test]
+  fn test_reactor_human_input_flow() {
+    use crate::kernel::approval_store::ApprovalStore;
+
+    let store = ApprovalStore::new();
+    let reactor = Reactor::start_with_config(
+      None, None, Some(store.clone()),
+    );
+    let pid = Pid::from_raw(1);
+
+    let req = EffectRequest::new(
+      EffectKind::HumanInput,
+      serde_json::json!({
+        "description": "Which environment?",
+      }),
+    );
+    reactor.dispatch(pid, req);
+
+    std::thread::sleep(
+      std::time::Duration::from_millis(50),
+    );
+
+    let pending = store.list();
+    assert_eq!(pending.len(), 1);
+    let effect_id = pending[0].effect_id.raw();
+
+    let resolved = reactor.resolve_approval(
+      effect_id,
+      "respond",
+      serde_json::json!({"response": "staging"}),
+    );
+    assert!(resolved);
+
+    let completion =
+      poll_for_completion(&reactor)
+        .expect("should get input completion");
+    assert_eq!(
+      completion.result.status,
+      EffectStatus::Succeeded,
+    );
+    let output = completion.result.output.unwrap();
+    assert_eq!(output["response"], "staging");
+  }
+
+  #[test]
+  fn test_reactor_approval_timeout() {
+    use crate::kernel::approval_store::ApprovalStore;
+
+    let store = ApprovalStore::new();
+    let reactor = Reactor::start_with_config(
+      None, None, Some(store.clone()),
+    );
+    let pid = Pid::from_raw(1);
+
+    let mut req = EffectRequest::new(
+      EffectKind::HumanApproval,
+      serde_json::json!({
+        "description": "Auto-deny test",
+      }),
+    );
+    req.timeout =
+      std::time::Duration::from_millis(50);
+    reactor.dispatch(pid, req);
+
+    // Wait for timeout to fire
+    std::thread::sleep(
+      std::time::Duration::from_millis(200),
+    );
+
+    // Should be removed from store (already timed out)
+    assert_eq!(store.list().len(), 0);
+
+    // Should receive failure completion
+    let completion =
+      poll_for_completion(&reactor)
+        .expect("should get timeout completion");
+    assert_eq!(
+      completion.result.status,
+      EffectStatus::Failed,
+    );
+    assert!(
+      completion.result.error.as_ref().unwrap()
+        .contains("timed out"),
+    );
+  }
+
+  #[test]
+  fn test_reactor_approval_missing_description() {
+    use crate::kernel::approval_store::ApprovalStore;
+
+    let store = ApprovalStore::new();
+    let reactor = Reactor::start_with_config(
+      None, None, Some(store.clone()),
+    );
+    let pid = Pid::from_raw(1);
+
+    let req = EffectRequest::new(
+      EffectKind::HumanApproval,
+      serde_json::json!({}),
+    );
+    reactor.dispatch(pid, req);
+
+    let completion =
+      poll_for_completion(&reactor)
+        .expect("should get failure completion");
+    assert_eq!(
+      completion.result.status,
+      EffectStatus::Failed,
+    );
+    assert!(
+      completion.result.error.as_ref().unwrap()
+        .contains("description"),
+    );
+  }
+
+  #[test]
+  fn test_reactor_approval_no_store_configured() {
+    let reactor = Reactor::start();
+    let pid = Pid::from_raw(1);
+
+    let req = EffectRequest::new(
+      EffectKind::HumanApproval,
+      serde_json::json!({
+        "description": "test",
+      }),
+    );
+    reactor.dispatch(pid, req);
+
+    let completion =
+      poll_for_completion(&reactor)
+        .expect("should get failure completion");
+    assert_eq!(
+      completion.result.status,
+      EffectStatus::Failed,
+    );
+    assert!(
+      completion.result.error.as_ref().unwrap()
+        .contains("no approval store"),
+    );
+  }
+
+  #[test]
+  fn test_reactor_approval_deny_with_reason() {
+    use crate::kernel::approval_store::ApprovalStore;
+
+    let store = ApprovalStore::new();
+    let reactor = Reactor::start_with_config(
+      None, None, Some(store.clone()),
+    );
+    let pid = Pid::from_raw(1);
+
+    let req = EffectRequest::new(
+      EffectKind::HumanApproval,
+      serde_json::json!({
+        "description": "Risky operation",
+      }),
+    );
+    reactor.dispatch(pid, req);
+
+    std::thread::sleep(
+      std::time::Duration::from_millis(50),
+    );
+
+    let pending = store.list();
+    let effect_id = pending[0].effect_id.raw();
+
+    let resolved = reactor.resolve_approval(
+      effect_id,
+      "deny",
+      serde_json::json!({"reason": "too risky"}),
+    );
+    assert!(resolved);
+
+    let completion =
+      poll_for_completion(&reactor)
+        .expect("should get deny completion");
+    let output = completion.result.output.unwrap();
+    assert_eq!(output["approved"], false);
+    assert_eq!(output["reason"], "too risky");
+  }
 }
