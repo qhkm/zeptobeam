@@ -17,3 +17,4 @@ variables-ct*
 __pycache__
 .env
 .worktrees/
+docs/internal/
