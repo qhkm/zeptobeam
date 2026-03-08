@@ -34,7 +34,7 @@
 | G3 | Full policy engine | DONE | PolicyEngine with effect-kind rules, integrated into runtime |
 | G4 | Behavior versioning + migration | NOT DONE | No version metadata, no migration |
 | G5 | OneForAll / RestForOne supervision | DONE | All three strategies implemented with shutdown coordination |
-| G6 | Human approval UI/gateway | NOT DONE | EffectKind exists, no handler |
+| G6 | Human approval UI/gateway | DONE | ApprovalStore + reactor handlers + HTTP endpoints + timeout enforcement |
 
 ## Additional Gaps (from implementation audit)
 
@@ -73,6 +73,6 @@
 
 - **A1/G2:** DONE — ObjectRef + artifact plane (ObjectRef type, ArtifactBackend trait, SqliteArtifactStore, reactor handlers, TTL sweep)
 - **A3:** DONE — Effect state machine for recovery (EffectState enum + ReactorMessage + journal + recovery)
-- **G6:** Human approval gateway (approval wait state + timeout + workflow)
+- **G6:** DONE — Human approval gateway (ApprovalStore, reactor handlers, HTTP endpoints, timeout enforcement)
 - **G1:** Multi-node clustering
 - **G4:** Behavior versioning + migration
