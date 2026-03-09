@@ -1,3 +1,7 @@
+> **This repo is an experiment.** We were exploring what's possible — replicating Erlang/BEAM in Rust to understand how far the model stretches for AI agents. The learnings here directly shaped [ZeptoRT](https://github.com/qhkm/zeptort), which is where active development happens. Feel free to poke around.
+
+---
+
 <div align="center">
 
 # ZeptoBeam
