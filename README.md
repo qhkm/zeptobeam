@@ -1,4 +1,4 @@
-> **This repo is an experiment.** We replicated Erlang/BEAM in Rust — sync scheduler, reduction counting, supervision trees, ETS/DETS, hot code upgrades. It got to 343 tests and then hit a wall: the sync scheduler can't `await`, so every LLM call required two thread hops and correlation IDs. Reduction counting models the wrong resource — AI agents don't consume CPU, they consume tokens and dollars. The learnings shaped [ZeptoRT](https://github.com/qhkm/zeptort), which fixes both problems. Active development is there.
+> **This repo is an experiment.** We forked [ErlangRT](https://github.com/kvakvs/ErlangRT) and extended it toward AI agent orchestration — sync scheduler, reduction counting, supervision trees, ETS/DETS, hot code upgrades. It got to 343 tests and then hit a wall: the sync scheduler can't `await`, so every LLM call required two thread hops and correlation IDs. Reduction counting models the wrong resource — AI agents don't consume CPU, they consume tokens and dollars. The learnings shaped [ZeptoRT](https://github.com/qhkm/zeptort), which fixes both problems. Active development is there.
 
 ---
 
